@@ -1,0 +1,5 @@
+-r src/requirements.txt
+moto[dynamodb,sts,ec2,cloudwatch]==5.1.17
+cfn-lint==1.57.2
+playwright==1.63.0
+PyYAML==6.0.3

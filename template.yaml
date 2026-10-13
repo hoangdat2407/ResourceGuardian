@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Cloud Resource Guardian teaching MVP read only multi tenant
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref: [README.md, PREFLIGHT.md]
+Parameters:
+  DomainPrefix:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9-]{4,50}'
+    Description: Globally unique Cognito hosted UI prefix
+  SenderEmail:
+    Type: String
+    Default: ''
+    Description: Optional SES sender email, verify identity before sending
+Conditions:
+  EmailEnabled: !Not [!Equals [!Ref SenderEmail, '']]
+Globals:
+  Function:
+    Runtime: python3.12
+    CodeUri: src/
+    MemorySize: 256
+    Environment:
+      Variables:
+        TABLE: !Ref Data
+        WORKER_FUNCTION: !Ref WorkerFunction
+        SES_SENDER: !Ref SenderEmail
+        WEB_URL: !Sub 'https://${WebDistribution.DomainName}/'
+Resources:
+  SenderIdentity:
+    Type: AWS::SES::EmailIdentity
+    Condition: EmailEnabled
+    Properties:
+      EmailIdentity: !Ref SenderEmail
+  Data:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      SSESpecification: {SSEEnabled: true}
+      TimeToLiveSpecification: {AttributeName: expires, Enabled: true}
+  DeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: guardian-api
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+                Resource: !GetAtt Data.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt WorkerFunction.Arn
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/GuardianReadRole-*'
+  ScanRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: guardian-worker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem]
+                Resource: !GetAtt Data.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt DeadLetters.Arn
+              - !If
+                - EmailEnabled
+                - Effect: Allow
+                  Action: ses:SendEmail
+                  Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}'
+                - !Ref AWS::NoValue
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/GuardianReadRole-*'
+  ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: guardian-schedule
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Scan, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+                Resource: !GetAtt Data.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt WorkerFunction.Arn
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy: {MinimumLength: 12, RequireUppercase: true, RequireLowercase: true, RequireNumbers: true, RequireSymbols: true}
+  UserClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, aws.cognito.signin.user.admin]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs: [!Sub 'https://${WebDistribution.DomainName}/']
+      LogoutURLs: [!Sub 'https://${WebDistribution.DomainName}/']
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      TokenValidityUnits: {AccessToken: minutes}
+  UserDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: {Domain: !Ref DomainPrefix, UserPoolId: !Ref UserPool}
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Sub 'https://${WebDistribution.DomainName}']
+        AllowHeaders: [Authorization, Content-Type]
+        AllowMethods: [GET, PUT, POST, OPTIONS]
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+              audience: [!Ref UserClient]
+            AuthorizationScopes: [openid]
+      DefaultRouteSettings: {ThrottlingBurstLimit: 10, ThrottlingRateLimit: 5}
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.api
+      Timeout: 29
+      Role: !GetAtt ApiRole.Arn
+      Environment:
+        Variables:
+          API_PRINCIPAL: !GetAtt ApiRole.Arn
+          SCAN_PRINCIPAL: !GetAtt ScanRole.Arn
+      Events:
+        Me: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /me, Method: GET}}
+        Connection: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /connection, Method: PUT}}
+        Settings: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /settings, Method: PUT}}
+        Scan: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /scans, Method: POST}}
+        ScanStatus: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: '/scans/{scanId}', Method: GET}}
+        History: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /history, Method: GET}}
+        Notifications: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /notifications, Method: PUT}}
+        Findings: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /findings, Method: GET}}
+        Ignore: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /ignore, Method: PUT}}
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.worker
+      Timeout: 300
+      # Lab quota is 10: share the account pool; retain tenant lease and cooldown.
+      Role: !GetAtt ScanRole.Arn
+      Environment:
+        Variables:
+          WORKER_FUNCTION: worker
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 600
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt DeadLetters.Arn
+  ScheduleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.scheduler
+      Timeout: 60
+      Role: !GetAtt ScheduleRole.Arn
+      Events:
+        Tick: {Type: Schedule, Properties: {Schedule: 'rate(1 hour)', Enabled: true}}
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: !Sub '/aws/lambda/${ApiFunction}', RetentionInDays: 7}
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: !Sub '/aws/lambda/${WorkerFunction}', RetentionInDays: 7}
+  ScheduleLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: !Sub '/aws/lambda/${ScheduleFunction}', RetentionInDays: 7}
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: s3
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues: {QueryString: false, Cookies: {Forward: none}}
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 60
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+  WebPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub '${WebBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}'
+Outputs:
+  WebUrl: {Value: !Sub 'https://${WebDistribution.DomainName}/'}
+  WebBucket: {Value: !Ref WebBucket}
+  DistributionId: {Value: !Ref WebDistribution}
+  ApiUrl: {Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'}
+  CognitoClientId: {Value: !Ref UserClient}
+  CognitoDomain: {Value: !Sub 'https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com'}
+  ApiPrincipal: {Value: !GetAtt ApiRole.Arn}
+  ScanPrincipal: {Value: !GetAtt ScanRole.Arn}
+  TableName: {Value: !Ref Data}
+  DeadLetterQueueUrl: {Value: !Ref DeadLetters}

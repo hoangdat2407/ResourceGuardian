@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Read only role created in the AWS account being scanned
+Parameters:
+  ApiPrincipal: {Type: String}
+  ScanPrincipal: {Type: String}
+  ExternalId: {Type: String, MinLength: 16}
+  RoleSuffix: {Type: String, Default: demo, AllowedPattern: '[A-Za-z0-9-]{1,30}'}
+Resources:
+  ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'GuardianReadRole-${RoleSuffix}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: [!Ref ApiPrincipal, !Ref ScanPrincipal]
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {sts:ExternalId: !Ref ExternalId}
+      Policies:
+        - PolicyName: guardian-read-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ec2:DescribeInstances, ec2:DescribeVolumes, ec2:DescribeAddresses, ec2:DescribeSnapshots, ec2:DescribeImages, cloudwatch:GetMetricData]
+                Resource: '*'
+Outputs:
+  RoleArn: {Value: !GetAtt ReadRole.Arn}
