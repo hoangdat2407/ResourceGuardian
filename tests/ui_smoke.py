@@ -36,6 +36,12 @@ try:
   expect(page.locator('#scan-summary')).to_contain_text('Đang quét');expect(page.locator('#scan')).to_be_disabled()
   expect(page.locator('#scan-summary')).to_contain_text('Hoàn tất',timeout=15000);expect(page.locator('#review')).to_have_text('2')
   page.locator('[data-page="findings"]').click();page.locator('#filter-type').select_option('');expect(page.locator('#findings-list tbody tr')).to_have_count(4)
+  feedback=page.evaluate("async()=>await (await fetch('/api/feedback',{headers:{Authorization:'Bearer demo-local-only'}})).json()")
+  assert len(feedback['results'])==1,feedback
+  record=feedback['results'][0]
+  cleared=page.evaluate("""async r=>await (await fetch('/api/feedback',{method:'PUT',headers:{Authorization:'Bearer demo-local-only','Content-Type':'application/json'},body:JSON.stringify({region:r.region,finding_id:r.finding_id,ignoreUntil:null})})).json()""",record)
+  assert cleared['ignore_until']==0,cleared
+  page.evaluate("refresh()");expect(page.locator('#findings-list tbody tr')).to_have_count(5)
   page.locator('#search').fill('snapshot');expect(page.locator('#findings-list tbody tr')).to_have_count(1)
   page.locator('[data-page="history"]').click();expect(page.locator('#history-list tr')).to_have_count(3)
   page.locator('#history-list button').first.click();expect(page.locator('#history-detail table')).to_be_visible()
@@ -46,6 +52,6 @@ try:
   stale=browser.new_context();stale.add_init_script("sessionStorage.setItem('crg-token','expired-demo-token')")
   sp=stale.new_page();sp.goto(f'http://127.0.0.1:{PORT}/');expect(sp.locator('#status')).to_contain_text('Đăng nhập demo');expect(sp.locator('#app')).to_be_hidden();expect(sp.locator('#login')).to_have_text('Đăng nhập')
   assert not errors,errors
-  browser.close();print('UI smoke PASS: dashboard, filters, ignore, settings, email preference, region validation, scan polling, history, mobile, expired session.')
+  browser.close();print('UI smoke PASS: dashboard, filters, feedback hide/list/clear, settings, email preference, region validation, scan polling, history, mobile, expired session.')
 finally:
  server.terminate();server.wait(timeout=5)
