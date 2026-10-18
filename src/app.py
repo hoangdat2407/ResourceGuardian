@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from rules import config
+from botocore.config import Config
+from rules import config, keep, evaluate_ec2, evaluate_ebs, evaluate_eip, evaluate_snapshot
 from collectors import SDK_CONFIG, collect_region
 
 log = logging.getLogger()
@@ -24,11 +25,14 @@ STATIC_ROUTES = {
     "/me": {"GET"},
     "/connection": {"PUT"},
     "/settings": {"PUT"},
+    "/scan": {"POST"},
     "/scans": {"POST"},
     "/findings": {"GET"},
     "/history": {"GET"},
     "/feedback": {"GET", "PUT"},
     "/notifications": {"PUT"},
+    "/keep": {"PUT"},
+    "/ignore": {"PUT"},
 }
 BODY_LIMIT = 10240
 FINDING_ID_RE = re.compile(r"[0-9a-f]{64}")
@@ -381,7 +385,7 @@ def api(event, context):
                 ExpressionAttributeValues={":s": json.loads(json.dumps(cfg), parse_float=Decimal)},
             )
             return response(200, cfg)
-        if route == "/scans":
+        if route in ("/scan", "/scans"):
             if event.get("body"):
                 raise ValueError("Scan request body must be empty")
             if not profile.get("role_arn"):
@@ -428,9 +432,9 @@ def api(event, context):
             record = _upsert_feedback(pk, profile, body)
             return response(200, record) if record else response(404, {"error": "Finding not found"})
         if route == "/notifications":
-            if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
-                raise ValueError("enabled must be the only field and must be a boolean")
-            enabled = body["enabled"]
+            enabled = body.get("enabled")
+            if type(enabled) is not bool:
+                raise ValueError("enabled must be a boolean")
             if enabled and not os.environ.get("SES_SENDER"):
                 raise ValueError("Email has not been configured by platform owner")
             notification = {"enabled": enabled}
@@ -449,6 +453,23 @@ def api(event, context):
                 ExpressionAttributeValues={":n": notification},
             )
             return response(200, notification)
+        if route in ("/keep", "/ignore") and method == "PUT":
+            if not profile.get("role_arn") or not profile.get("connection_version"):
+                raise ValueError("Connect AWS first")
+            region, rid = body.get("region", ""), body.get("resource_id", "")
+            if region not in profile.get("regions", []) or not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", rid):
+                raise ValueError("Invalid region or resource ID")
+            if route == "/keep":
+                enabled = body.get("enabled")
+                if type(enabled) is not bool:
+                    raise ValueError("enabled must be a boolean")
+                put({"pk": pk, "sk": "KEEP#" + profile["connection_version"] + "#" + region + "#" + rid, "enabled": enabled})
+                return response(200, {"kept": enabled})
+            days = body.get("days", 7)
+            if type(days) is not int or not 1 <= days <= 30:
+                raise ValueError("Ignore duration must be 1 to 30 days")
+            put({"pk": pk, "sk": "IGNORE#" + profile["connection_version"] + "#" + region + "#" + rid, "expires": int(time.time()) + days * 86400})
+            return response(200, {"ignored": True})
         raise RuntimeError("Unreachable route")
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeEncodeError) as error:
         return response(400, {"error": str(error)})
@@ -510,7 +531,7 @@ def scan(job, context):
     sess = session(profile)
 
     def observed(kind, ident, bad):
-        sk = "OBS#" + profile["connection_version"] + "#" + region + "#" + kind + "#" + ident
+        sk = "OBS#" + profile["connection_version"] + "#" + region + "#" + ident
         old = get(pk, sk)
         if not bad:
             if old:
@@ -528,10 +549,13 @@ def scan(job, context):
         sess, region, profile.get("account_id", ""), profile["settings"],
         profile["service_groups"], datetime.now(timezone.utc), time_check, observed,
     )
+    skip = {r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "IGNORE#" + profile["connection_version"] + "#" + region + "#") if r.get("expires", 0) > now}
+    skip.update(r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "KEEP#" + profile["connection_version"] + "#" + region + "#") if r.get("enabled") is True)
     feedback = feedback_records(pk, profile, region)
     actionable = [
         finding for finding in collected["findings"]
-        if not feedback.get(finding["finding_id"], {}).get("kept")
+        if finding.get("resource_id") not in skip
+        and not feedback.get(finding["finding_id"], {}).get("kept")
         and feedback.get(finding["finding_id"], {}).get("ignore_until", 0) <= now
     ]
     errors = list(collected["errors"])

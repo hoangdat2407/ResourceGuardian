@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from rules import alb_idle, finding_id, idle, keep, nat_idle, nlb_idle, rds_idle, stale_multipart
+from rules import RULE_METADATA, alb_idle, finding_id, idle, keep, nat_idle, nlb_idle, rds_idle, stale_multipart
 
 SDK_CONFIG = Config(
     retries={"mode": "standard", "max_attempts": 5},
@@ -93,6 +93,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         return clients[name]
 
     def add(kind, resource_id, stable_identity, reason, evidence=None, level="REVIEW"):
+        rule_info = RULE_METADATA.get(kind, (kind, ""))
         findings.append({
             "finding_id": finding_id(kind, region, stable_identity),
             "type": kind,
@@ -101,6 +102,8 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             "reason": reason,
             "evidence": evidence or {},
             "level": level,
+            "rule_id": rule_info[0],
+            "recommendation": rule_info[1],
         })
 
     def limited(kind, truncated):
@@ -142,12 +145,10 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for volume in resources:
             time_check()
             resource_id = volume["VolumeId"]
-            ident = finding_id("EBS", region, resource_id)
-            bad = volume.get("State") == "available" and not volume.get("Attachments") and not keep(volume.get("Tags", []))
-            hours = observed("EBS", ident, bad)
-            if bad:
-                add("EBS", resource_id, resource_id, "Unattached volume; validate data retention", {"size_gib": volume["Size"], "observed_hours": round(hours, 1)}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
-
+            bad = volume.get("State") == "available" and not volume.get("Attachments")
+            hours = observed("EBS", resource_id, bad)
+            if bad and not keep(volume.get("Tags", [])):
+                add("EBS", resource_id, resource_id, "Unattached volume; validate data retention", {"size_gib": volume["Size"], "observed_hours": round(hours, 1), "threshold_hours": cfg["orphan_hours"]}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
     def eip_addresses():
         resources, token, truncated = [], None, False
         while True:
@@ -170,20 +171,19 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             resource_id = address.get("AllocationId")
             if not resource_id:
                 continue
-            ident = finding_id("EIP", region, resource_id)
-            bad = not address.get("AssociationId") and not keep(address.get("Tags", []))
-            hours = observed("EIP", ident, bad)
-            if bad:
-                add("EIP", resource_id, resource_id, "Unassociated public IPv4; may be intentionally reserved", {"observed_hours": round(hours, 1)}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
+            bad = not address.get("AssociationId")
+            hours = observed("EIP", resource_id, bad)
+            if bad and not keep(address.get("Tags", [])):
+                add("EIP", resource_id, resource_id, "Unassociated public IPv4; may be intentionally reserved", {"observed_hours": round(hours, 1), "threshold_hours": cfg["orphan_hours"]}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
 
     def snapshots():
         resources, truncated = collect_pages(client("ec2"), "describe_snapshots", "Snapshots", OwnerIds=["self"])
-        images, images_truncated = collect_pages(client("ec2"), "describe_images", "Images", Owners=["self"])
+        images, images_truncated = collect_pages(client("ec2"), "describe_images", "Images", Owners=["self"], IncludeDisabled=True)
         counts["SNAPSHOT"] = len(resources)
         limited("SNAPSHOT", truncated)
         if images_truncated:
             limited("SNAPSHOT", True)
-            errors[-1]["code"] = "DEPENDENCY_LIMIT"
+            errors[-1]["code"] = "INVENTORY_TRUNCATED"
             return
         used = {mapping.get("Ebs", {}).get("SnapshotId") for image in images for mapping in image.get("BlockDeviceMappings", [])}
         for snapshot in resources:
@@ -194,7 +194,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             if keep(tags) or resource_id in used or "aws:backup" in snapshot.get("Description", "").lower() or any(tag.get("Key", "").startswith("aws:backup") for tag in tags):
                 continue
             if days >= cfg["snapshot_days"] and snapshot.get("State") == "completed":
-                add("SNAPSHOT", resource_id, resource_id, "Old snapshot not referenced by listed AMIs; backup purpose requires review", {"age_days": int(days), "volume_id": snapshot.get("VolumeId"), "logical_volume_gib": snapshot["VolumeSize"]})
+                add("SNAPSHOT", resource_id, resource_id, "Old snapshot not referenced by listed AMIs; backup purpose requires review", {"age_days": int(days), "snapshot_days": cfg["snapshot_days"], "volume_id": snapshot.get("VolumeId"), "logical_volume_gib": snapshot["VolumeSize"], "relationships_complete": True})
 
     def s3_multipart():
         s3 = client("s3")

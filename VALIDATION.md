@@ -1,5 +1,17 @@
 # Validation matrix
 
+## Mục 7 & Nhánh main — luật đánh giá, collectors và bằng chứng, 18/10/2026
+
+Kiểm tra tích hợp giữa nhánh `duc` (luật đánh giá, lịch quét, xử lý lỗi, dashboard) và nhánh `origin/main` (API, collectors chỉ đọc AWS, feedback lifecycle, IAM và kiểm thử mở rộng). Toàn bộ dữ liệu AWS đọc và SES được mock; DynamoDB được mô phỏng bằng Moto. Không gọi AWS thật, không triển khai hoặc thay đổi tài nguyên cloud.
+
+Các kiểm tra tại môi trường phát triển:
+- **Toàn bộ backend:** 95/95 unittest PASS (36 rule tests, 21 API tests, 33 workflow tests, 2 contract tests, 1 test AWS E2E skipped).
+- **Rule & Collectors:** Đầy đủ 9 loại tài nguyên (EC2, EBS, EIP, Snapshot, RDS, NAT, ALB, NLB, S3 multipart). Mốc 80% coverage boundary, zero thật, thiếu metric, NaN/inf/số âm/kiểu sai, threshold bằng ngưỡng; network đo riêng từng chiều; snapshot unreferenced và AMI IncludeDisabled; bằng chứng bổ sung rule_id và recommendation.
+- **Feedback & Ngoại lệ:** Feedback lifecycle (/feedback GET & PUT), acknowledged, kept, ignoreUntil; tương thích ngược API /keep và /ignore nội bộ; tag guardian:keep=true.
+- **Cấu hình số lớn:** Ngưỡng nhận ±10**400 bị từ chối bằng ValueError/HTTP 400, không ghi DynamoDB, không gây OverflowError; window_hours hỗ trợ 24–168 giờ.
+- **UI smoke:** PASS với demo cục bộ (dashboard, filters, feedback hide/list/clear, ignore, settings 24/168 giờ, email, mobile 390px, session expired).
+- **UI acceptance:** PASS với fixture cục bộ (ui_redesign.py).
+
 Status vocabulary:
 
 - `LOCAL MOCK`: exercised locally with mocked target-account AWS reads and Moto DynamoDB.
