@@ -5,7 +5,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from botocore.config import Config
-from rules import config, keep, idle
+from rules import config, keep, evaluate_ec2, evaluate_ebs, evaluate_eip, evaluate_snapshot
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -144,10 +144,17 @@ def api(event, context):
             table.update_item(Key={"pk": pk, "sk": "PROFILE"}, UpdateExpression="SET notifications = :n",
                 ExpressionAttributeValues={":n": notify})
             return response(200, notify)
-        if path == "/ignore" and method == "PUT":
+        if path in ("/keep", "/ignore") and method == "PUT":
+            if not profile.get("role_arn") or not profile.get("connection_version"):
+                raise ValueError("Connect AWS first")
             region, rid = body.get("region", ""), body.get("resource_id", "")
             if region not in profile.get("regions", []) or not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", rid):
                 raise ValueError("Invalid region or resource ID")
+            if path == "/keep":
+                enabled = body.get("enabled")
+                if type(enabled) is not bool: raise ValueError("enabled must be a boolean")
+                put({"pk": pk, "sk": "KEEP#" + profile["connection_version"] + "#" + region + "#" + rid, "enabled": enabled})
+                return response(200, {"kept": enabled})
             days = body.get("days", 7)
             if type(days) is not int or not 1 <= days <= 30: raise ValueError("Ignore duration must be 1 to 30 days")
             put({"pk": pk, "sk": "IGNORE#" + profile["connection_version"] + "#" + region + "#" + rid, "expires": int(time.time()) + days * 86400})
@@ -246,10 +253,10 @@ def scan(job, context):
     findings, errors, counts = [], [], {}
     partial = False
     skip = {r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "IGNORE#" + profile["connection_version"] + "#" + region + "#") if r["expires"] > now}
-    def add(kind, rid, reason, evidence=None, level="REVIEW"):
-        if rid not in skip:
-            findings.append({"type": kind, "resource_id": rid, "region": region, "reason": reason,
-                             "evidence": evidence or {}, "level": level})
+    skip.update(r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "KEEP#" + profile["connection_version"] + "#" + region + "#") if r.get("enabled") is True)
+    def add(finding):
+        if finding and finding["resource_id"] not in skip:
+            findings.append({**finding, "region": region})
     def observed(rid, bad):
         sk = "OBS#" + profile["connection_version"] + "#" + region + "#" + rid
         old = get(pk, sk)
@@ -272,20 +279,17 @@ def scan(job, context):
                 start = end - timedelta(hours=cfg["window_hours"])
                 for i in resources:
                     time_check()
-                    if keep(i.get("Tags", [])) or i["State"]["Name"] != "running": continue
-                    rid = i["InstanceId"]
-                    if i["LaunchTime"] > start:
-                        add(kind, rid, "Instance younger than observation window", level="INSUFFICIENT_DATA"); continue
-                    status, evidence = idle(*metrics(cw, rid, start, end), cfg["window_hours"], cfg)
-                    if status != "OK": add(kind, rid, "Low CPU and network; confirm intended workload" if status == "REVIEW" else "Missing CloudWatch metrics; not classified as idle", evidence, status)
+                    if keep(i.get("Tags", [])) or i["State"]["Name"] != "running" or i["InstanceId"] in skip: continue
+                    samples = metrics(cw, i["InstanceId"], start, end) if i["LaunchTime"] <= start else ([], [], [])
+                    add(evaluate_ec2(i, samples, cfg, start))
             elif kind == "EBS":
                 resources, truncated = collect(ec2, "describe_volumes", "Volumes")
                 counts[kind] = len(resources); partial |= truncated
                 for v in resources:
                     time_check()
-                    rid = v["VolumeId"]; bad = v["State"] == "available" and not v["Attachments"] and not keep(v.get("Tags", []))
+                    rid = v["VolumeId"]; bad = v["State"] == "available" and not v["Attachments"]
                     hours = observed(rid, bad)
-                    if bad: add(kind, rid, "Unattached volume; validate data retention", {"size_gib": v["Size"], "observed_hours": round(hours, 1)}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
+                    add(evaluate_ebs(v, hours, cfg))
             elif kind == "EIP":
                 resources = ec2.describe_addresses()["Addresses"]
                 counts[kind] = min(len(resources), 100); partial |= len(resources) > 100
@@ -293,21 +297,18 @@ def scan(job, context):
                     time_check()
                     rid = a.get("AllocationId")
                     if not rid: continue
-                    bad = not a.get("AssociationId") and not keep(a.get("Tags", []))
+                    bad = not a.get("AssociationId")
                     hours = observed(rid, bad)
-                    if bad: add(kind, rid, "Unassociated public IPv4; may be intentionally reserved", {"observed_hours": round(hours, 1)}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
+                    add(evaluate_eip(a, hours, cfg))
             else:
                 resources, truncated = collect(ec2, "describe_snapshots", "Snapshots", OwnerIds=["self"])
-                images, image_trunc = collect(ec2, "describe_images", "Images", Owners=["self"])
+                images, image_trunc = collect(ec2, "describe_images", "Images", Owners=["self"], IncludeDisabled=True)
                 counts[kind] = len(resources); partial |= truncated or image_trunc
+                if image_trunc: errors.append({"type": kind, "code": "INVENTORY_TRUNCATED"})
                 used = {b.get("Ebs", {}).get("SnapshotId") for image in images for b in image.get("BlockDeviceMappings", [])}
                 for s in resources:
                     time_check()
-                    rid = s["SnapshotId"]; days = (datetime.now(timezone.utc) - s["StartTime"]).total_seconds() / 86400
-                    if image_trunc: continue  # Cannot safely claim no AMI reference.
-                    if keep(s.get("Tags", [])) or rid in used or "aws:backup" in s.get("Description", "").lower() or any(t.get("Key", "").startswith("aws:backup") for t in s.get("Tags", [])): continue
-                    if days >= cfg["snapshot_days"] and s["State"] == "completed":
-                        add(kind, rid, "Old snapshot not referenced by listed AMIs; backup purpose requires review", {"age_days": int(days), "volume_id": s.get("VolumeId"), "logical_volume_gib": s["VolumeSize"]})
+                    add(evaluate_snapshot(s, used, not image_trunc, cfg, datetime.fromtimestamp(now, timezone.utc)))
         except (ClientError, TimeoutError, ValueError) as e:
             partial = True
             errors.append({"type": kind, "code": e.response["Error"]["Code"] if isinstance(e, ClientError) else ("TIME_BUDGET" if isinstance(e, TimeoutError) else "METRIC_DATA_ERROR")})

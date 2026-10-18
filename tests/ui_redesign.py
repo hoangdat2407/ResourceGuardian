@@ -39,7 +39,7 @@ try:
     else:
         raise RuntimeError('Local static server did not start')
     with sync_playwright() as p:
-        launch = {'headless': True}
+        launch = {'headless': True, 'downloads_path': str(OUT/'downloads')}
         if os.environ.get('CHROMIUM_EXECUTABLE'):
             launch['executable_path'] = os.environ['CHROMIUM_EXECUTABLE']
         browser = p.chromium.launch(**launch)
@@ -175,7 +175,10 @@ try:
         checks.append('API/history errors and retry; partial-history evidence; SES stays disabled')
         # XSS safety, evidence, filter reset and each page at narrow, mobile, tablet, desktop widths.
         state['rows']=[dict(ROW, findings=[dict(type='EC2',resource_id='i-fixture',level='REVIEW',
-            reason='<img src=x onerror="window.bad=true">', evidence={'cpu_p95':1})])]
+            reason='<img src=x onerror="window.bad=true">', rule_id='EC2_LOW_UTILIZATION',
+            recommendation='Xác minh tải và mục đích của instance.',
+            evidence={'cpu_p95':1,'window_hours':168,'thresholds':{'cpu_percent':5,'network_mib_hour':1},
+                      'sample_counts':{'cpu':168,'netin':168,'netout':168},'required_samples':135})])]
         page.locator('[data-page="overview"]').click()
         page.locator('#refresh').click()
         expect(page.locator('#review')).to_have_text('1')

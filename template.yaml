@@ -187,6 +187,7 @@ Resources:
         Notifications: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /notifications, Method: PUT}}
         Findings: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /findings, Method: GET}}
         Ignore: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /ignore, Method: PUT}}
+        Keep: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /keep, Method: PUT}}
   WorkerFunction:
     Type: AWS::Serverless::Function
     Properties:

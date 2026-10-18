@@ -26,7 +26,7 @@ Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày
 | Theo dõi tiến độ | API trạng thái và frontend tự lấy kết quả mỗi năm giây |
 | Quét định kỳ | EventBridge kích hoạt Lambda scheduler mỗi giờ, chọn profile đến hạn |
 | Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, màn hình 20 lần quét region gần nhất |
-| Ngoại lệ | Tag `guardian:keep=true` và bỏ qua tài nguyên 1–30 ngày (web mặc định 7) |
+| Ngoại lệ | Tag `guardian:keep=true`, giữ lại nội bộ qua API và bỏ qua tài nguyên 1–30 ngày (web mặc định 7); áp dụng từ lần quét tiếp theo |
 | Email tùy chọn | SES gửi tới email Cognito đã xác minh; chỉ gửi khi danh sách REVIEW thay đổi |
 | Xử lý lỗi | PARTIAL khi một phần API lỗi; async retry, SQS chỉ là failure destination |
 
@@ -104,13 +104,15 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 
 ## 5. Rule và giới hạn quan sát
 
-- **EC2:** instance running và tồn tại trước cửa sổ 24–72 giờ. GetMetricData lấy Maximum CPU mỗi giờ rồi tính p95; NetworkIn/Out lấy Sum mỗi giờ rồi tính MiB/giờ. Cả ba metric cần ít nhất 80% số mẫu kỳ vọng. Thiếu dữ liệu không được coi là 0. CPU và network thấp là heuristic, không chứng minh instance vô dụng.
-- **EBS/EIP:** bắt đầu tính thời gian không dùng từ lần quan sát đầu tiên; không dùng tuổi tài nguyên như thời gian không attach/associate. Khi thấy được sử dụng lại, reset cửa sổ. Khoảng trống giữa quan sát >48 giờ cũng reset. Thay đổi giữa hai lần quét có thể không được phát hiện.
-- **Snapshot:** tuổi >=ngưỡng, trạng thái completed, không có tag giữ lại và không tham chiếu bởi các AMI đã đọc; bỏ qua dấu hiệu AWS Backup. Đây chưa phải kiểm tra đầy đủ backup/retention. Không ước tính tiền snapshot theo VolumeSize. Nếu danh sách AMI bị cắt, không đánh dấu snapshot là không được tham chiếu.
+- **EC2:** instance running và tồn tại trước cửa sổ 24–168 giờ (mặc định 24). GetMetricData lấy Maximum CPU mỗi giờ rồi tính p95; NetworkIn/Out lấy Sum mỗi giờ, tính trung bình trên số giờ thực đo riêng từng chiều rồi cộng thành MiB/giờ. Cả ba metric cần ít nhất `ceil(window_hours × 80%)` mẫu. Không đủ độ phủ hoặc có mẫu không hợp lệ thì trả `INSUFFICIENT_DATA`; giờ thiếu không được coi là 0. CPU và network thấp là heuristic, không chứng minh instance vô dụng.
+- **EBS/EIP:** bắt đầu tính thời gian không dùng từ lần quan sát đầu tiên; không dùng tuổi tài nguyên như thời gian không attach/associate. Vẫn cập nhật quan sát khi tài nguyên được giữ lại hoặc bỏ qua. Khi thấy được sử dụng lại, reset cửa sổ. Khoảng trống giữa quan sát >48 giờ cũng reset. Thay đổi giữa hai lần quét có thể không được phát hiện.
+- **Snapshot:** tuổi >=ngưỡng, trạng thái completed, không có tag giữ lại và không tham chiếu bởi các AMI đã đọc (bao gồm AMI bị vô hiệu hóa); bỏ qua dấu hiệu AWS Backup. Đây chưa phải kiểm tra đầy đủ backup/retention. Không ước tính tiền snapshot theo VolumeSize. Nếu danh sách AMI bị cắt, không đánh dấu snapshot là không được tham chiếu.
 - Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region và 50 findings/region; vượt giới hạn báo PARTIAL. Worker time budget 300 giây. Account lớn cần chia job, tăng giới hạn có kiểm soát và kiểm thử tải.
 - Một account/người dùng, tối đa ba region trong danh sách hỗ trợ. Kết nối lại sẽ bắt đầu cửa sổ EBS/EIP mới; kết quả và ngoại lệ cũ không áp dụng cho kết nối mới.
 - Quét thủ công tối thiểu 15 phút/lần. Job chưa hoàn tất sau 15 phút hiển thị TIMED_OUT; kiểm tra failure queue rồi quét lại. Async delivery có thể lặp; worker có lease và kiểm tra scan_id để không ghi đè kết quả mới.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp MVP ít người dùng. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô. Chưa có quota tenant toàn platform hoặc giới hạn chi phí cứng.
+
+Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
 
 ## 6. API contract
 
@@ -126,6 +128,7 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 | GET | /findings | Kết quả hiện tại theo region của kết nối hiện tại |
 | GET | /history | 20 kết quả region hoàn tất gần nhất; retention 30 ngày |
 | PUT | /ignore | region, resource_id, days; ngoại lệ 1–30 ngày |
+| PUT | /keep | region, resource_id, enabled boolean; bật/tắt giữ lại nội bộ, trả kept boolean |
 | PUT | /notifications | enabled boolean; email nhận lấy từ Cognito GetUser |
 
 Frontend chủ động poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` có sẵn để theo dõi từng job. SUCCEEDED chỉ có nghĩa các API trong phạm vi MVP hoàn tất; không khẳng định mọi tài nguyên account đều được kiểm tra.
