@@ -1,19 +1,36 @@
 """Deterministic rule checks; no AWS, persistence, or system clock required."""
 import copy
+import datetime
+from datetime import datetime as dt, timedelta, timezone
 import json
 import pathlib
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
-from rules import config, evaluate_ebs, evaluate_ec2, evaluate_eip, evaluate_snapshot, idle, keep
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from rules import (
+    DEFAULTS,
+    LIMITS,
+    alb_idle,
+    config,
+    evaluate_ebs,
+    evaluate_ec2,
+    evaluate_eip,
+    evaluate_snapshot,
+    finding_id,
+    idle,
+    keep,
+    nat_idle,
+    nlb_idle,
+    rds_idle,
+    stale_multipart,
+)
 
 
 class RulesTest(unittest.TestCase):
     def setUp(self):
         self.cfg = config({})
-        self.now = datetime(2026, 10, 18, 3, tzinfo=timezone.utc)
+        self.now = dt(2026, 10, 18, 3, tzinfo=timezone.utc)
         self.start = self.now - timedelta(hours=24)
         self.instance = {'InstanceId': 'i-test', 'State': {'Name': 'running'},
                          'LaunchTime': self.start - timedelta(days=1)}
@@ -135,10 +152,46 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(level, 'REVIEW')
         self.assertEqual(evidence['thresholds'], {'cpu_percent': 7.5, 'network_mib_hour': 2})
 
+    def test_config_bounds_and_types(self):
+        boundaries = {
+            "cpu_percent": (1, 50),
+            "network_mib_hour": (0.1, 100),
+            "window_hours": (24, 168),
+            "orphan_hours": (1, 168),
+            "snapshot_days": (7, 365),
+            "interval_hours": (1, 24),
+            "rds_cpu_percent": (1, 50),
+            "rds_connections": (1, 1000),
+            "nat_mib_hour": (0.1, 10000),
+            "alb_requests_hour": (1, 1000000),
+            "nlb_new_flows_hour": (1, 1000000),
+        }
+        for field, (low, high) in boundaries.items():
+            with self.subTest(field=field, edge="low"):
+                self.assertEqual(config({field: low})[field], low)
+            with self.subTest(field=field, edge="high"):
+                self.assertEqual(config({field: high})[field], high)
+            with self.subTest(field=field, edge="below"):
+                with self.assertRaises(ValueError):
+                    config({field: low - 1})
+            with self.subTest(field=field, edge="above"):
+                with self.assertRaises(ValueError):
+                    config({field: high + 1})
+
     def test_config_rejects_invalid(self):
-        for value in ({'window_hours': 23}, {'window_hours': 169}, {'window_hours': 24.5},
-                      {'cpu_percent': True}, {'cpu_percent': float('nan')}, {'cpu_percent': float('inf')},
-                      {'tenant': 'a'}, {'interval_hours': 1.5}, [], None):
+        invalid = (
+            {'window_hours': 23},
+            {'window_hours': 169},
+            {'window_hours': 24.5},
+            {'cpu_percent': True},
+            {'cpu_percent': float('nan')},
+            {'cpu_percent': float('inf')},
+            {'tenant': 'a'},
+            {'interval_hours': 1.5},
+            [],
+            None,
+        )
+        for value in invalid:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 config(value)
 
@@ -152,10 +205,46 @@ class RulesTest(unittest.TestCase):
                 with self.subTest(field=field, sign=sign), self.assertRaises(ValueError):
                     config({field: sign*10**400})
 
+    def test_config_merges_old_profile_and_update(self):
+        old = {key: DEFAULTS[key] for key in tuple(DEFAULTS)[:6]}
+        merged = config({"cpu_percent": 8}, old)
+        self.assertEqual(merged["cpu_percent"], 8)
+        self.assertEqual(merged["rds_connections"], DEFAULTS["rds_connections"])
+
     def test_keep(self):
         self.assertTrue(keep([{'Key': 'guardian:keep', 'Value': 'TRUE'}]))
         self.assertFalse(keep([{'Key': 'guardian:keep', 'Value': 'false'}]))
         self.assertFalse(keep([]))
+
+    def test_rds_rule(self):
+        cfg = config({})
+        self.assertEqual(rds_idle([0] * 20, [0] * 20, 24, cfg)[0], "REVIEW")
+        self.assertEqual(rds_idle([0] * 19, [0] * 20, 24, cfg)[0], "INSUFFICIENT_DATA")
+        self.assertEqual(rds_idle([0] * 20, [2] * 20, 24, cfg)[0], "OK")
+
+    def test_average_metric_rules(self):
+        cfg = config({})
+        self.assertEqual(nat_idle([0] * 20, [0] * 20, 24, cfg)[0], "REVIEW")
+        self.assertEqual(nat_idle([0] * 19, [0] * 20, 24, cfg)[0], "INSUFFICIENT_DATA")
+        self.assertEqual(nat_idle([2 * 1048576] * 20, [0] * 20, 24, cfg)[0], "OK")
+        self.assertEqual(alb_idle([0] * 20, 24, cfg)[0], "REVIEW")
+        self.assertEqual(alb_idle([1] * 20, 24, cfg)[0], "OK")
+        self.assertEqual(nlb_idle([0] * 20, 24, cfg)[0], "REVIEW")
+        self.assertEqual(nlb_idle([1] * 20, 24, cfg)[0], "OK")
+
+    def test_strict_multipart_age(self):
+        now = datetime.datetime(2026, 1, 8, tzinfo=datetime.timezone.utc)
+        self.assertEqual(stale_multipart(now - datetime.timedelta(days=7), now)[0], "OK")
+        self.assertEqual(
+            stale_multipart(now - datetime.timedelta(days=7, seconds=1), now)[0],
+            "REVIEW",
+        )
+
+    def test_finding_id_uses_structured_identity(self):
+        first = finding_id("S3_MULTIPART", "ap-southeast-1", ["a", "b/c", "d"])
+        second = finding_id("S3_MULTIPART", "ap-southeast-1", ["a/b", "c", "d"])
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(first, second)
 
     def test_ec2_finding_has_stable_contract_and_compatible_reason(self):
         finding = evaluate_ec2(self.instance, [[0]*24 for _ in range(3)], self.cfg, self.start)

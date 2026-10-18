@@ -1,75 +1,75 @@
-# Kiểm tra MVP
+# Validation matrix
 
-## Mục 7 — luật đánh giá và bằng chứng, 18/10/2026
+## Mục 7 & Nhánh main — luật đánh giá, collectors và bằng chứng, 18/10/2026
 
-Kiểm tra trên nhánh `duc`, Python 3.12.14 trong `.venv`. Phạm vi mới là bốn rule EC2/EBS/EIP/snapshot, bằng chứng, API giữ lại nội bộ và cửa sổ EC2 24–168 giờ. Dữ liệu AWS đọc và SES được mock; DynamoDB được mô phỏng bằng Moto. Không gọi AWS thật, không triển khai hoặc thay đổi tài nguyên cloud.
+Kiểm tra tích hợp giữa nhánh `duc` (luật đánh giá, lịch quét, xử lý lỗi, dashboard) và nhánh `origin/main` (API, collectors chỉ đọc AWS, feedback lifecycle, IAM và kiểm thử mở rộng). Toàn bộ dữ liệu AWS đọc và SES được mock; DynamoDB được mô phỏng bằng Moto. Không gọi AWS thật, không triển khai hoặc thay đổi tài nguyên cloud.
 
-| Kiểm tra | Kết quả thực tế |
-|---|---|
-| Toàn bộ backend | **71/71 unittest PASS** sau sửa lỗi audit: 32 rule, 13 API, 26 workflow; giữ các ca hồi quy và bổ sung 45 test so với bộ 26 test cũ |
-| Rule EC2 | Mốc 80% tại 24/168 giờ, zero thật, thiếu metric, NaN/inf/âm/boolean/kiểu sai, spike và bằng ngưỡng; network tính trên số giờ thực đo từng chiều khi số mẫu bằng/khác nhau; instance mới không bị kết luận ít hoạt động; bằng chứng không chứa tuổi âm hoặc số không hữu hạn |
-| EBS/EIP và ngoại lệ | Trước/đúng ngưỡng giờ, dùng lại, gap đúng/trên 48 giờ; tag/keep/ignore chặn finding nhưng vẫn theo dõi trạng thái sử dụng; ignore hết hạn đúng timestamp |
-| API keep và lưu trữ | Bật/tắt idempotent, từ chối body/kết nối sai, tenant từ JWT sub, ngoại lệ tách tenant/connection; bỏ keep không vô hiệu hóa tag/ignore |
-| Snapshot và finding | AMI bị cắt/AccessDenied tạo PARTIAL; IncludeDisabled=True bảo vệ snapshot được AMI bị vô hiệu hóa tham chiếu, snapshot không tham chiếu vẫn được xét; cả bốn loại finding giữ trường cũ cùng rule_id/recommendation qua DynamoDB, findings, scan cũ và history |
-| Cấu hình số nguyên cực lớn | Cả sáu trường nhận ±10**400 đều bị từ chối bằng ValueError/HTTP 400, không ghi DynamoDB và không còn OverflowError |
-| UI smoke | **PASS** với demo cục bộ: mặc định 24 giờ, lưu/tải lại 168 giờ, chặn 23/169 giờ; dashboard, lọc, ignore, email demo, polling, lịch sử, mobile và phiên hết hạn |
-| UI acceptance | **PASS** với fixture cục bộ: finding có trường bổ sung; onboarding/download, trạng thái quét, lỗi/retry, SES tắt; năm trang không tràn ngang ở 320/390/768/1440 px, không pageerror |
-| Cú pháp | AST parse cả 12 file Python; `node --check web/app.js`: PASS |
-| Template | cfn-lint 1.57.2 cho template.yaml và target-role.yaml tại ap-southeast-1: PASS, không lỗi/cảnh báo; route PUT /keep dùng authorizer mặc định |
-| Dependencies và diff | uv pip check: 35 package tương thích; git diff --check: PASS |
+Các kiểm tra tại môi trường phát triển:
+- **Toàn bộ backend:** 95/95 unittest PASS (36 rule tests, 21 API tests, 33 workflow tests, 2 contract tests, 1 test AWS E2E skipped).
+- **Rule & Collectors:** Đầy đủ 9 loại tài nguyên (EC2, EBS, EIP, Snapshot, RDS, NAT, ALB, NLB, S3 multipart). Mốc 80% coverage boundary, zero thật, thiếu metric, NaN/inf/số âm/kiểu sai, threshold bằng ngưỡng; network đo riêng từng chiều; snapshot unreferenced và AMI IncludeDisabled; bằng chứng bổ sung rule_id và recommendation.
+- **Feedback & Ngoại lệ:** Feedback lifecycle (/feedback GET & PUT), acknowledged, kept, ignoreUntil; tương thích ngược API /keep và /ignore nội bộ; tag guardian:keep=true.
+- **Cấu hình số lớn:** Ngưỡng nhận ±10**400 bị từ chối bằng ValueError/HTTP 400, không ghi DynamoDB, không gây OverflowError; window_hours hỗ trợ 24–168 giờ.
+- **UI smoke:** PASS với demo cục bộ (dashboard, filters, feedback hide/list/clear, ignore, settings 24/168 giờ, email, mobile 390px, session expired).
+- **UI acceptance:** PASS với fixture cục bộ (ui_redesign.py).
 
-Dependencies chính: boto3 1.43.111, botocore 1.43.114, Moto 5.1.17, Playwright 1.63.0, PyYAML 6.0.3. Browser test dùng Chrome cài trên máy. Lượt acceptance đầu bị `Download.path: canceled`; đã đặt downloads_path trong thư mục QA và chạy lại toàn bộ acceptance thành công. Không thay frontend để xử lý lỗi tải file của môi trường test.
+Status vocabulary:
 
-Sau audit, đã bổ sung năm test hồi quy cho ba lỗi: AMI bị vô hiệu hóa, network bị giảm trung bình do giờ thiếu và số nguyên cấu hình quá lớn. Test mới tái hiện FAIL/OverflowError trên mã trước sửa, rồi PASS sau sửa. Lượt kiểm tra cuối chạy lại toàn bộ 71 backend test, UI smoke, cú pháp Python/JavaScript và diff check. UI acceptance, lint template và dependency check ở bảng trên là kết quả lượt trước với các phần tương ứng giữ nguyên. Log backend cuối ở `.preflight/rules-fixes/backend-tests.log`, ảnh smoke ở `.preflight/rules-fixes/ui-smoke/`.
+- `LOCAL MOCK`: exercised locally with mocked target-account AWS reads and Moto DynamoDB.
+- `AWS E2E`: exercised against a deployed stack and real target-account resources.
+- `SKIPPED`: permitted only for optional AWS scanners, with an approved exact reason.
+- `NOT RUN`: no evidence exists; never equivalent to pass.
 
-Artifacts cục bộ, đã được .gitignore loại trừ: `.preflight/rules-ui-smoke/`, `.preflight/rules-ui-redesign/acceptance-results.json` và ảnh QA. Đã xem ảnh trang cấu hình ở desktop 1440 và mobile 390 px. Traceback Throttling trong unittest là lỗi được chủ động mô phỏng để xác minh retry, test tương ứng PASS.
+## Current branch evidence
 
-Lệnh chạy lại sau khi cài requirements-dev.txt:
+| Surface | Status | Evidence / limit |
+|---|---|---|
+| Pure rules and settings bounds | LOCAL MOCK | `tests/test_rules.py`; includes 80% coverage boundary, real zero, missing series and strict S3 age |
+| Tenant/auth/API/feedback/pagination | LOCAL MOCK | `tests/test_api.py`, `tests/test_workflows.py`; mocked JWT claims and Moto DynamoDB, not real Cognito/API Gateway |
+| EC2/EBS/EIP/Snapshot collectors | LOCAL MOCK | Inventory, metric, observation, cap, partial and time-budget paths use mocked target-account clients |
+| S3 multipart collector | LOCAL MOCK | Bucket/upload pagination, structured upload identity and >7 day rule use direct S3 mocks |
+| RDS/NAT/ALB/NLB collectors | LOCAL MOCK | Missing metrics, real zeros, REVIEW and denied-service isolation use mocked clients |
+| Read-only IAM/API invariant | LOCAL MOCK | `tests/test_read_only.py` parses both target-role templates and `template.yaml` semantically |
+| Browser feedback workflow | LOCAL MOCK | `tests/ui_smoke.py` exercises hide, GET feedback, clear and reappearance against `demo.py` |
+| Cognito admin-only, <=5 users | NOT RUN | Template is checked locally; actual UserPool change set and `ListUsers` require manual release gate |
+| EC2 real finding | NOT RUN | Required before release |
+| EBS real finding | NOT RUN | Required before release |
+| EIP real finding | NOT RUN | Required before release |
+| Snapshot real finding | NOT RUN | Required before release |
+| Stale S3 multipart real finding | NOT RUN | Required before release; initiating or aborting an upload is an AWS mutation |
+| RDS real finding | NOT RUN | May become `SKIPPED` only with `RESOURCE_NOT_AVAILABLE` or `COST_NOT_APPROVED` |
+| NAT Gateway real finding | NOT RUN | May become `SKIPPED` only with `RESOURCE_NOT_AVAILABLE` or `COST_NOT_APPROVED` |
+| ALB real finding | NOT RUN | May become `SKIPPED` only with `RESOURCE_NOT_AVAILABLE` or `COST_NOT_APPROVED` |
+| NLB real finding | NOT RUN | May become `SKIPPED` only with `RESOURCE_NOT_AVAILABLE` or `COST_NOT_APPROVED` |
+| Wrong ExternalId and two-tenant isolation on AWS | NOT RUN | Required manual evidence; local mocks are insufficient |
+| Denied service gives PARTIAL on AWS | NOT RUN | Required manual evidence |
+| Missing AWS metric is not REVIEW | NOT RUN | Required manual evidence; empty inventory does not prove this rule |
+| SES | NOT RUN | Default off, optional, and excluded from the release gate |
 
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -v
-$env:CHROMIUM_EXECUTABLE='C:\Program Files\Google\Chrome\Application\chrome.exe'
-$env:UI_QA_DIR=Join-Path (Get-Location) '.preflight\rules-ui-smoke'
-.\.venv\Scripts\python.exe -X utf8 -B tests/ui_smoke.py
-$env:UI_QA_DIR=Join-Path (Get-Location) '.preflight\rules-ui-redesign'
-.\.venv\Scripts\python.exe -X utf8 -B tests/ui_redesign.py
-.\.venv\Scripts\cfn-lint.exe template.yaml target-role.yaml --regions ap-southeast-1
+## Local branch gate
+
+Run from the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q src tests demo.py
 node --check web/app.js
-git diff --check
+cfn-lint template.yaml target-role.yaml web/target-role.yaml
+cmp target-role.yaml web/target-role.yaml
+sam validate --lint --region ap-southeast-1
+sam build
+python tests/ui_smoke.py
 ```
 
-Chưa kiểm chứng route keep được triển khai trên API Gateway thật, Cognito/JWT thật, STS/IAM, metric thật trong 168 giờ, lịch quét hoặc SES thật. Không coi unit/Moto/UI fixture là AWS end-to-end. Nút giữ lại trên dashboard và collector/rule cho các nhóm dịch vụ khác thuộc các giai đoạn tiếp theo; hợp đồng bàn giao ở RULES.md.
+The AWS harness is skipped by default. It requires all five inputs plus explicit enablement:
 
-## Kết quả lịch sử — 11/10/2026
+```bash
+CRG_AWS_E2E=1 python -m unittest discover -s tests -p 'test_aws_e2e.py' -v
+```
 
-## Đã thực hiện tại môi trường phát triển
+Required variables: `CRG_AWS_E2E_API_URL`, `CRG_AWS_E2E_ACCESS_TOKEN`, `CRG_AWS_E2E_SECOND_ACCESS_TOKEN`, `CRG_AWS_E2E_MANIFEST`, `CRG_AWS_E2E_EVIDENCE`.
 
-| Kiểm tra | Kết quả và phạm vi |
-|---|---|
-| Backend | 26 tests pass: rules, API contract, DynamoDB workflows qua Moto; các API AWS đọc và SES được mock |
-| Tách người dùng | JWT sub quyết định tenant; body không chọn được tenant; scan_id của tenant khác trả 404 |
-| Phát hiện | Thiếu metrics không phải 0; GetMetricData phân trang và dedup; EBS theo cửa sổ quan sát; kết nối mới không nhận cửa sổ cũ; snapshot được AMI tham chiếu được bỏ qua |
-| Quét và email | Invoke Event; tránh quét lại marker hoàn tất; nhả lease khi lỗi transient; email nhận từ Cognito verified attribute; dedup danh sách REVIEW |
-| UI Playwright | Demo: đăng nhập mẫu, dashboard, lọc/tìm, bỏ qua, cấu hình, chọn email, giới hạn region, tự cập nhật quét, lịch sử, session hết hạn |
-| Layout | Đã xem hình desktop 1440px và mobile 390px; không tràn viewport; bảng mobile kéo ngang |
-| JavaScript / Python | node --check app.js; compileall src, demo.py, deploy.py, publish.py pass |
-| SAM | sam validate --lint tại ap-southeast-1 pass; sam build thành công cho 3 Lambda Python 3.12 |
-| Cấu hình read role | cfn-lint template.yaml và target-role.yaml pass |
+## Manual release gate
 
-Công cụ: Python 3.12, boto3 1.43.111 được pin cho Lambda; botocore 1.43.111; Moto 5.1.17; Playwright 1.63.0; SAM CLI 1.168.0. cfn-lint 1.57.2 dùng cho lượt kiểm tra cuối. SAM CLI có ràng buộc dependencies riêng; đã xử lý xung đột công cụ trong môi trường kiểm tra.
+A reviewer records commit, stack/account/region, exact template and IAM diff, UserPool replacement assessment, Cognito user count <=5, and the read-only action allowlist. A different authorized executor deploys that reviewed change set and runs `tests/test_aws_e2e.py`. Preserve sanitized scan IDs, timestamps, account, regions, responses/log references and distinct reviewer/executor identities. Never preserve passwords, OTPs, access tokens, access keys, session credentials or presigned URLs.
 
-Mock/Moto và UI demo không chứng minh hệ thống đã chạy trên AWS. Chưa có account AWS được kết nối trong phiên này; không tạo tài nguyên cloud và không đo chi phí thực tế. Bản demo hiển thị nhãn dữ liệu mẫu.
-
-## Cần kiểm tra sau deploy AWS thật
-
-1. Cognito đăng ký/xác minh email/PKCE/logout, API Gateway signature/issuer/audience/scope; API chưa đăng nhập phải 401/403, ID token không dùng được.
-2. Hai người dùng: cấu hình, kết quả, history, ngoại lệ và scan_id tách biệt; không đọc được dữ liệu người khác.
-3. STS: ExternalId sai không kết nối được; đúng role kết nối được; thu hồi role hiển thị FAILED/PARTIAL tùy API thất bại.
-4. EC2 thực: CPU/network thấp, có spike, instance mới, thiếu metric; kiểm tra cửa sổ đã chọn và độ phủ.
-5. EBS/EIP: lần đầu OBSERVING, đủ thời gian REVIEW, dùng lại sẽ reset, tag giữ lại và ignore được áp dụng.
-6. Snapshot tham chiếu AMI/tag/backup không được đánh dấu theo rule; snapshot cũ không tự xóa.
-7. Scheduler mỗi giờ chọn tenant đến hạn; quét liên tục bị 429/409; async retry và failure destination nhận đúng sự kiện.
-8. SES: sender/recipient verified theo trạng thái account; bật/tắt; thay đổi danh sách REVIEW gửi email; cùng danh sách không gửi lại; lỗi gửi không mất kết quả quét.
-9. IAM/CloudFormation quota, CloudFront HTTPS và CORS đúng domain. Kiểm tra tài nguyên/chi phí sau demo và dọn tài nguyên lab.
-
-Chỉ ghi kiểm thử AWS pass vào báo cáo khi đã thực hiện và có bằng chứng thật.
+Release cannot pass without real evidence for EC2, EBS, EIP, Snapshot and stale S3 multipart. RDS/NAT/ALB/NLB may be `SKIPPED` only for `RESOURCE_NOT_AVAILABLE` or `COST_NOT_APPROVED`. Do not create paid resources solely for evidence without separate approval. Do not update `DEPLOYMENT.md` or `HANDOFF.md` until the executor has actual results.

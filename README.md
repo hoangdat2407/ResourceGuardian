@@ -18,17 +18,17 @@ Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày
 
 | Tính năng | Cách thực hiện |
 |---|---|
-| Đăng ký, đăng nhập, đăng xuất | Cognito Hosted UI, Authorization Code + PKCE; token chỉ lưu trong sessionStorage |
-| Nhiều người dùng | API Gateway xác minh JWT; backend lấy userId từ claim `sub`, không lấy từ body |
-| Kết nối AWS | Một account/người dùng; STS AssumeRole, Role ARN và ExternalId riêng |
-| Quét tài nguyên | EC2, EBS volume, Elastic IP, EBS snapshot; tối đa ba region/người dùng |
-| Quét ngay | POST `/scans` trả `scan_id`; Lambda backend Invoke async Lambda worker |
+| Đăng nhập, đăng xuất | Cognito Hosted UI, Authorization Code + PKCE; chỉ admin tạo user; token chỉ lưu trong sessionStorage |
+| Nhiều người dùng | Tối đa 5 user nội bộ theo release gate; API Gateway xác minh JWT; backend lấy userId từ claim `sub`, không lấy từ body |
+| Kết nối AWS | Một account/người dùng; STS AssumeRole, Role ARN và ExternalId riêng; chọn 1–4 nhóm dịch vụ |
+| Quét tài nguyên | EC2; EBS/Snapshot/S3 multipart; RDS; EIP/NAT Gateway/ALB/NLB; tối đa ba region/người dùng |
+| Quét ngay | POST `/scans` không có body, trả `scan_id`; Lambda backend Invoke async Lambda worker |
 | Theo dõi tiến độ | API trạng thái và frontend tự lấy kết quả mỗi năm giây |
 | Quét định kỳ | EventBridge kích hoạt Lambda scheduler mỗi giờ, chọn profile đến hạn |
-| Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, màn hình 20 lần quét region gần nhất |
-| Ngoại lệ | Tag `guardian:keep=true`, giữ lại nội bộ qua API và bỏ qua tài nguyên 1–30 ngày (web mặc định 7); áp dụng từ lần quét tiếp theo |
-| Email tùy chọn | SES gửi tới email Cognito đã xác minh; chỉ gửi khi danh sách REVIEW thay đổi |
-| Xử lý lỗi | PARTIAL khi một phần API lỗi; async retry, SQS chỉ là failure destination |
+| Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, phân trang 20 lần quét region mặc định |
+| Phản hồi & Ngoại lệ | Tag `guardian:keep=true`; API `/feedback` (acknowledged, kept, ignoreUntil tối đa 30 ngày); hỗ trợ API `/keep` và `/ignore` nội bộ |
+| Email tùy chọn | SES mặc định tắt; khi được cấu hình, gửi tới email Cognito đã xác minh nếu danh sách REVIEW thay đổi |
+| Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry, SQS chỉ là failure destination |
 
 Ứng dụng không có quyền dừng hoặc xóa tài nguyên account cần quét. Người dùng kiểm tra cảnh báo rồi xử lý trong AWS Console.
 
@@ -106,11 +106,17 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 
 - **EC2:** instance running và tồn tại trước cửa sổ 24–168 giờ (mặc định 24). GetMetricData lấy Maximum CPU mỗi giờ rồi tính p95; NetworkIn/Out lấy Sum mỗi giờ, tính trung bình trên số giờ thực đo riêng từng chiều rồi cộng thành MiB/giờ. Cả ba metric cần ít nhất `ceil(window_hours × 80%)` mẫu. Không đủ độ phủ hoặc có mẫu không hợp lệ thì trả `INSUFFICIENT_DATA`; giờ thiếu không được coi là 0. CPU và network thấp là heuristic, không chứng minh instance vô dụng.
 - **EBS/EIP:** bắt đầu tính thời gian không dùng từ lần quan sát đầu tiên; không dùng tuổi tài nguyên như thời gian không attach/associate. Vẫn cập nhật quan sát khi tài nguyên được giữ lại hoặc bỏ qua. Khi thấy được sử dụng lại, reset cửa sổ. Khoảng trống giữa quan sát >48 giờ cũng reset. Thay đổi giữa hai lần quét có thể không được phát hiện.
-- **Snapshot:** tuổi >=ngưỡng, trạng thái completed, không có tag giữ lại và không tham chiếu bởi các AMI đã đọc (bao gồm AMI bị vô hiệu hóa); bỏ qua dấu hiệu AWS Backup. Đây chưa phải kiểm tra đầy đủ backup/retention. Không ước tính tiền snapshot theo VolumeSize. Nếu danh sách AMI bị cắt, không đánh dấu snapshot là không được tham chiếu.
-- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region và 50 findings/region; vượt giới hạn báo PARTIAL. Worker time budget 300 giây. Account lớn cần chia job, tăng giới hạn có kiểm soát và kiểm thử tải.
-- Một account/người dùng, tối đa ba region trong danh sách hỗ trợ. Kết nối lại sẽ bắt đầu cửa sổ EBS/EIP mới; kết quả và ngoại lệ cũ không áp dụng cho kết nối mới.
-- Quét thủ công tối thiểu 15 phút/lần. Job chưa hoàn tất sau 15 phút hiển thị TIMED_OUT; kiểm tra failure queue rồi quét lại. Async delivery có thể lặp; worker có lease và kiểm tra scan_id để không ghi đè kết quả mới.
-- Scheduler scan bảng DynamoDB mỗi giờ, phù hợp MVP ít người dùng. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô. Chưa có quota tenant toàn platform hoặc giới hạn chi phí cứng.
+- **Snapshot:** tuổi >=ngưỡng, trạng thái completed, không có tag giữ lại và không tham chiếu bởi các AMI đã đọc (bao gồm AMI bị vô hiệu hóa); bỏ qua dấu hiệu AWS Backup. Nếu danh sách AMI bị cắt, báo PARTIAL với INVENTORY_TRUNCATED, không đánh dấu snapshot là không được tham chiếu.
+- **S3 multipart:** cảnh báo upload chưa hoàn tất có tuổi **lớn hơn** 7 ngày. Scanner không gọi ListParts/Complete/Abort và không suy diễn dung lượng hay chi phí.
+- **RDS:** instance available và đủ tuổi cửa sổ; CPUUtilization p95 và DatabaseConnections p95 đều dưới ngưỡng. Dùng hourly Maximum.
+- **NAT Gateway:** gateway available và đủ tuổi; trung bình hourly Sum của BytesInFromSource + BytesInFromDestination dưới ngưỡng.
+- **ALB/NLB:** load balancer active và đủ tuổi; ALB dùng RequestCount/Sum, NLB dùng NewFlowCount/Sum. Scanner không gọi DescribeTags.
+- Mọi metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ. Sample 0 thật được tính; thiếu mẫu tạo `INSUFFICIENT_DATA`, không được thay bằng 0 hoặc phân loại REVIEW.
+- Bốn nhóm dịch vụ: `compute` (EC2), `storage` (EBS/Snapshot/S3 multipart), `database` (RDS), `network` (EIP/NAT/ALB/NLB). Profile cũ mặc định bật đủ bốn nhóm.
+- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region và 50 findings hiển thị/region; vượt giới hạn báo PARTIAL. Worker time budget 300 giây và dừng AWS reads trước 30 giây còn lại.
+- Một account/người dùng, tối đa ba region. Mọi PUT `/connection` tạo connection version mới; result, observation và feedback cũ không áp dụng cho kết nối mới.
+- Quét thủ công tối thiểu 15 phút/lần. Job chưa hoàn tất sau 15 phút hiển thị TIMED_OUT; async delivery có thể lặp nhưng worker lease và scan_id ngăn ghi đè kết quả mới.
+- Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
 Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
 
@@ -120,18 +126,20 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 
 | Method | Route | Nội dung |
 |---|---|---|
-| GET | /me | Profile, thông tin tạo IAM Role và khả năng gửi email |
-| PUT | /connection | role_arn, regions; STS xác minh account |
-| PUT | /settings | Sáu ngưỡng số có kiểm tra min/max |
-| POST | /scans | Tạo job; 202 + scan_id, 409 nếu đang chạy, 429 nếu chưa đủ 15 phút |
-| GET | /scans/{scanId} | Trạng thái/kết quả của scan thuộc người dùng; scan cũ ngoài 20 lịch sử có thể 404 |
-| GET | /findings | Kết quả hiện tại theo region của kết nối hiện tại |
-| GET | /history | 20 kết quả region hoàn tất gần nhất; retention 30 ngày |
-| PUT | /ignore | region, resource_id, days; ngoại lệ 1–30 ngày |
-| PUT | /keep | region, resource_id, enabled boolean; bật/tắt giữ lại nội bộ, trả kept boolean |
-| PUT | /notifications | enabled boolean; email nhận lấy từ Cognito GetUser |
+| GET | /me | Profile allowlist, complete settings, service groups, IAM principals và khả năng gửi email |
+| PUT | /connection | `role_arn`, `regions`, optional `service_groups`; STS xác minh account và rotate connection version |
+| PUT | /settings | Partial update cho 11 ngưỡng số; merge với setting hiện tại và kiểm tra min/max/type |
+| POST | /scans | Body rỗng; 202 + scan_id, 409 nếu đang chạy, 429 nếu chưa đủ 15 phút |
+| GET | /scans/{scanId} | Trạng thái/kết quả retained của scan thuộc tenant và kết nối hiện tại |
+| GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện |
+| GET | /history | Snapshot bất biến; `limit` 1–100, mặc định 20; `next_token` tenant-bound |
+| GET | /feedback | Feedback của kết nối hiện tại; `limit`/`next_token` như history |
+| PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; clear cũng dùng PUT |
+| PUT | /notifications | Chỉ `enabled` boolean; email nhận lấy từ Cognito GetUser |
+| PUT | /keep | `region`, `resource_id`, `enabled` boolean; bật/tắt giữ lại nội bộ (tương thích ngược) |
+| PUT | /ignore | `region`, `resource_id`, `days`; bỏ qua 1–30 ngày (tương thích ngược) |
 
-Frontend chủ động poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` có sẵn để theo dõi từng job. SUCCEEDED chỉ có nghĩa các API trong phạm vi MVP hoàn tất; không khẳng định mọi tài nguyên account đều được kiểm tra.
+Frontend poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` theo dõi một job. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. Bản nâng cấp xóa cleanly `/ignore`; feedback cũ theo resource_id không được migrate và người dùng có thể cần áp dụng lại. SUCCEEDED chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
 
 ## 7. Kiểm thử
 
@@ -146,7 +154,7 @@ Xem `VALIDATION.md` để phân biệt kiểm tra đã chạy và kiểm tra AWS
 
 Nếu dùng SAM CLI: `sam validate --lint --region ap-southeast-1` rồi `sam build`. Dùng virtualenv riêng cho SAM nếu dependencies của SAM CLI xung đột với phiên bản test đã pin.
 
-Sau deploy phải thử Cognito thật, sai ExternalId, role bị thu hồi, hai người dùng, EC2 metrics thật, EBS/EIP theo thời gian, snapshot/AMI, scheduler và SES. Chỉ đánh dấu kiểm thử cloud pass sau khi chạy và lưu bằng chứng thật.
+Sau deploy, reviewer và executor phải là hai người khác nhau. Reviewer xác nhận change set không replace UserPool, Cognito chỉ admin tạo user, `ListUsers` không quá 5 user và target role đúng allowlist chỉ đọc. Executor chạy `CRG_AWS_E2E=1 ... test_aws_e2e.py` với hai token và manifest đã sanitize. EC2/EBS/EIP/Snapshot/S3 multipart cần evidence thật; RDS/NAT/ALB/NLB chỉ được SKIPPED với `RESOURCE_NOT_AVAILABLE` hoặc `COST_NOT_APPROVED`. SES không là release gate.
 
 ## 8. Chi phí và dọn dẹp
 

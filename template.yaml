@@ -131,6 +131,8 @@ Resources:
     Properties:
       UsernameAttributes: [email]
       AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
       Policies:
         PasswordPolicy: {MinimumLength: 12, RequireUppercase: true, RequireLowercase: true, RequireNumbers: true, RequireSymbols: true}
   UserClient:
@@ -186,8 +188,8 @@ Resources:
         History: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /history, Method: GET}}
         Notifications: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /notifications, Method: PUT}}
         Findings: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /findings, Method: GET}}
-        Ignore: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /ignore, Method: PUT}}
-        Keep: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /keep, Method: PUT}}
+        FeedbackGet: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /feedback, Method: GET}}
+        FeedbackPut: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /feedback, Method: PUT}}
   WorkerFunction:
     Type: AWS::Serverless::Function
     Properties:
