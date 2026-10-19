@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 from moto import mock_aws
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
@@ -77,7 +77,12 @@ class Workflows(unittest.TestCase):
             return factory
 
         self.ec2.get_paginator.side_effect = ec2_paginator
-        self.ec2.describe_addresses.side_effect = lambda **kwargs: {"Addresses": self.addresses}
+        def safe_describe_addresses(**kwargs):
+            if "MaxResults" in kwargs:
+                raise ParamValidationError(report='Parameter validation failed:\nUnknown parameter in input: "MaxResults"')
+            return {"Addresses": self.addresses}
+
+        self.ec2.describe_addresses.side_effect = safe_describe_addresses
         self.s3.list_buckets.return_value = {"Buckets": []}
         self.s3.get_paginator.side_effect = simple_paginator({"list_multipart_uploads": ("Uploads", self.uploads)})
         self.rds.get_paginator.side_effect = simple_paginator({"describe_db_instances": ("DBInstances", self.rds_instances)})
@@ -501,6 +506,56 @@ class Workflows(unittest.TestCase):
                 result = self.scan(f"{self.scan_sequence:08d}-0000-0000-0000-000000000000")
                 self.assertEqual(result["findings"][0]["level"], "INSUFFICIENT_DATA")
                 json.dumps(result, allow_nan=False)
+
+    def test_describe_addresses_called_without_max_results(self):
+        self.addresses.append({"AllocationId": "eipalloc-test", "PublicIp": "203.0.113.10"})
+        result = self.scan()
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["counts"]["EIP"], 1)
+        self.ec2.describe_addresses.assert_called_with()
+
+    def test_network_group_scan_full_pipeline(self):
+        self.addresses.append({"AllocationId": "eipalloc-net-1", "PublicIp": "198.51.100.1"})
+        self.nats.append({
+            "NatGatewayId": "nat-net-1",
+            "State": "available",
+            "CreateTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "VpcId": "vpc-net-1",
+            "SubnetId": "subnet-net-1",
+        })
+        self.load_balancers.append({
+            "Type": "application",
+            "LoadBalancerName": "alb-net-1",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-southeast-1:123456789012:loadbalancer/app/alb-net-1/111",
+            "State": {"Code": "active"},
+            "CreatedTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "Scheme": "internet-facing",
+        })
+        self.load_balancers.append({
+            "Type": "network",
+            "LoadBalancerName": "nlb-net-1",
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-southeast-1:123456789012:loadbalancer/net/nlb-net-1/222",
+            "State": {"Code": "active"},
+            "CreatedTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "Scheme": "internet-facing",
+        })
+        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        timestamps = [end - timedelta(hours=i + 1) for i in range(24)]
+        self.cw.get_metric_data.side_effect = lambda **kwargs: {
+            "MetricDataResults": [
+                {"Id": query["Id"], "StatusCode": "Complete", "Values": [0] * 24, "Timestamps": timestamps}
+                for query in kwargs["MetricDataQueries"]
+            ]
+        }
+        result = self.scan()
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["counts"]["EIP"], 1)
+        self.assertEqual(result["counts"]["NAT_GATEWAY"], 1)
+        self.assertEqual(result["counts"]["ALB"], 1)
+        self.assertEqual(result["counts"]["NLB"], 1)
+        finding_types = {f["type"] for f in result["findings"]}
+        self.assertEqual(finding_types, {"EIP", "NAT_GATEWAY", "ALB", "NLB"})
 
 
 if __name__ == "__main__":

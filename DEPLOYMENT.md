@@ -136,3 +136,47 @@ Browser tích hợp lỗi môi trường missing field sandboxPolicy; hậu ki�
 Lấy lại identity và Outputs bằng AWS MCP, kiểm tra release hiện tại chưa bị thay bởi người khác. Khôi phục index.html/app.js/styles.css từ .preflight/s3-backup-20261012T022755Z/, giữ config.json; tạo invalidation mới đúng distribution với CallerReference riêng, chờ Completed rồi kiểm tra bytes và giao diện. Không cần xóa target-role.yaml. Quy trình và helper trong HANDOFF.md; không tự chạy lại publish.py/deploy.py.
 
 Trạng thái xác thực hết hạn ngày 2026-10-11 đã xử lý ngày 2026-10-12 bằng aws login được người dùng duyệt. Không còn blocker publish. Gói release và manifest PUBLISHED_VERIFIED nằm tại .preflight/frontend-release-20261011/; journal .preflight/publish-state.json.
+
+## Triển khai và Cập nhật Toàn diện — 2026-10-19 (Đã hoàn thành)
+
+Ngày: 2026-10-19. Account `376129867108`, region `ap-southeast-1`.
+
+### Kết quả triển khai
+
+- Stack `cloud-resource-guardian`: **UPDATE_COMPLETE**
+  - Stack ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:stack/cloud-resource-guardian/81f52de0-c53a-11f1-8a39-02ffd9f7b9e9`
+  - Change Set: `guardian-update-1792342627` (ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:changeSet/guardian-update-1792342627/681651f2-b35d-40a8-aaf3-3e1669f5f9b1`)
+  - Lambda Bundle Key: `cloud-resource-guardian/4be15583dbd3478716c1839a79e8d831e497a5ec8d327aae6805353578502851/lambda.zip` (16.715.151 bytes, SHA-256: `4be15583dbd3478716c1839a79e8d831e497a5ec8d327aae6805353578502851`)
+  - Thay đổi CloudFormation: 16 resources (2 Add, 1 Remove quyền cũ `/ignore`, 13 Modify, **0 Replacement**, DynamoDB `Data` và SQS `DeadLetters` giữ nguyên không sửa đổi).
+- Stack `guardian-read-role-demo`: **UPDATE_COMPLETE**
+  - Stack ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:stack/guardian-read-role-demo/4b1fba80-c542-11f1-a054-0affe454644b`
+  - Change Set: `guardian-role-update-1792342684` (ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:changeSet/guardian-role-update-1792342684/94482ecd-05d7-4985-afdc-a7fd62e5e515`)
+  - Role ARN: `arn:aws:iam::376129867108:role/GuardianReadRole-demo`
+  - Thay đổi: Cập nhật inline policy `guardian-read-only` bổ sung quyền đọc: `ec2:DescribeNatGateways`, `rds:DescribeDBInstances`, `elasticloadbalancing:DescribeLoadBalancers`, `s3:ListAllMyBuckets`, `s3:ListBucketMultipartUploads`. **0 Replacement, tuyệt đối không có quyền stop, modify hoặc delete**.
+- Website: https://d3qn9wabid8ws0.cloudfront.net/
+  - WebBucket: `cloud-resource-guardian-webbucket-gdgpbgx4t8o5`
+  - CloudFront Distribution: `ERUII98HKGJOG`
+  - Invalidation: `I51MCIJRTDV31DM63RY9R0AMSB` (**Completed**)
+  - Đã upload đủ 5 file (`index.html`, `styles.css`, `app.js`, `target-role.yaml`, `config.json`), khớp byte 100% với nguồn.
+
+### Kiểm tra thực tế sau triển khai
+
+| Hạng mục | Kết quả | Chi tiết / Bằng chứng |
+|---|---|---|
+| CloudFormation Stacks | PASS | Cả hai stack `cloud-resource-guardian` và `guardian-read-role-demo` đạt `UPDATE_COMPLETE` |
+| Frontend Website | PASS | 5 file trả HTTP 200, khớp SHA-256 nguồn; CloudFront Invalidation `I51MCIJRTDV31DM63RY9R0AMSB` Completed |
+| Cognito Authentication | PASS | Hosted UI hiển thị form login cho user `b98a55fc-e061-70f4-04e4-f8298bc94e69`; flow PKCE S256 chuẩn |
+| API Protection | PASS | Toàn bộ 10 route API trả `401 {"message":"Unauthorized"}` khi không có token Bearer |
+| API `/feedback` | PASS | `GET /feedback` trả 200 `{"results":[],"next_token":null}`; `PUT /feedback` thẩm định đúng schema |
+| STS AssumeRole | PASS | `PUT /connection` với `RoleArn` và `ExternalId` gọi `sts:AssumeRole` thành công, xác nhận account `376129867108` |
+| Quét thực tế (Real Scan) | PASS | Lượt quét ID `86219e63-6f56-49b6-9398-0447f53f7809` bao gồm cả 4 nhóm (`compute`, `storage`, `database`, `network`) hoàn tất với status `SUCCEEDED`. Toàn bộ 9 loại tài nguyên (EC2, EBS, SNAPSHOT, S3_MULTIPART, RDS, EIP, NAT_GATEWAY, ALB, NLB) đều được kiểm tra thành công, không có lỗi (`errors: []`). |
+| Scheduler Lambda | PASS | Invoke `ScheduleFunction` trả status 200, `queued_tenants: 0`, không có `FunctionError` |
+| SQS / DLQ | PASS | DeadLetters queue hoạt động đúng chuẩn; không nhận thêm message lỗi sau khi sửa `eip_addresses()` |
+| CloudWatch Logs | PASS | Log stream mới `2026/10/19/[$LATEST]a8391534a3bb460b86aac28fd2bb2358` ghi nhận worker thực thi thành công trong 4019ms, không còn bất kỳ ngoại lệ `ParamValidationError` nào. |
+
+### Giới hạn và các tính năng chưa thể kiểm chứng trên tài nguyên thật
+
+1. **Tài nguyên tài khoản trống:** Region `ap-southeast-1` hiện có 0 EC2 instances, 0 EBS volumes, 0 EIPs, 0 Snapshots, 0 RDS instances. Lượt quét trả về `counts: 0` và `findings: []`, chứng minh luồng end-to-end hoàn tất thành công (`SUCCEEDED`) nhưng chưa chứng minh các quy tắc phát hiện ngưỡng (CPU p95 < 5%, unattached volume age > 24h, snapshot age > 30d) trên dữ liệu thực.
+2. **Đã khắc phục lỗi EIP Collector:** Đã loại bỏ tham số `MaxResults` và vòng lặp phân trang không phù hợp trong `eip_addresses()` (`src/collectors.py`). DescribeAddresses được gọi trực tiếp và giới hạn an toàn theo `RESOURCE_LIMIT`. Bổ sung xử lý `BotoCoreError` trong `collect_region`. Change Set `guardian-codefix-1792380950` đã triển khai thành công lên Lambda. Lượt quét thật với đầy đủ nhóm `network` đã chạy và đạt `SUCCEEDED`.
+3. **SES:** Giữ tắt theo đúng yêu cầu; email delivery chưa gửi tới hộp thư thật.
+4. **Multi-tenant isolation:** Chưa kiểm thử đồng thời 2 tài khoản người dùng thật khác nhau.

@@ -2,7 +2,7 @@
 from datetime import datetime, timezone, timedelta
 
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from rules import RULE_METADATA, alb_idle, finding_id, idle, keep, nat_idle, nlb_idle, rds_idle, stale_multipart
 
@@ -76,8 +76,9 @@ def _error_code(error):
         return error.response["Error"]["Code"]
     if isinstance(error, TimeoutError):
         return "TIME_BUDGET"
+    if isinstance(error, BotoCoreError):
+        return error.__class__.__name__
     return "METRIC_DATA_ERROR"
-
 
 def collect_region(session, region, account_id, cfg, service_groups, now, time_check, observed):
     """Collect selected services in one region without performing AWS mutations."""
@@ -150,20 +151,9 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             if bad and not keep(volume.get("Tags", [])):
                 add("EBS", resource_id, resource_id, "Unattached volume; validate data retention", {"size_gib": volume["Size"], "observed_hours": round(hours, 1), "threshold_hours": cfg["orphan_hours"]}, "REVIEW" if hours >= cfg["orphan_hours"] else "OBSERVING")
     def eip_addresses():
-        resources, token, truncated = [], None, False
-        while True:
-            args = {"MaxResults": 100}
-            if token:
-                args["NextToken"] = token
-            page = client("ec2").describe_addresses(**args)
-            room = RESOURCE_LIMIT + 1 - len(resources)
-            resources.extend(page.get("Addresses", [])[:room])
-            if len(resources) > RESOURCE_LIMIT:
-                resources, truncated = resources[:RESOURCE_LIMIT], True
-                break
-            token = page.get("NextToken")
-            if not token:
-                break
+        addresses = client("ec2").describe_addresses().get("Addresses", [])
+        truncated = len(addresses) > RESOURCE_LIMIT
+        resources = addresses[:RESOURCE_LIMIT] if truncated else addresses
         counts["EIP"] = len(resources)
         limited("EIP", truncated)
         for address in resources:
@@ -321,7 +311,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             errors.append({"type": kind, "code": "TIME_BUDGET"})
             errors.extend({"type": remaining, "code": "TIME_BUDGET"} for remaining, _ in operations[index + 1:])
             break
-        except (ClientError, ValueError) as error:
+        except (ClientError, BotoCoreError, ValueError) as error:
             partial = True
             errors.append({"type": kind, "code": _error_code(error)})
 

@@ -67,3 +67,53 @@ $env:CHROMIUM_EXECUTABLE='C:\Program Files\Google\Chrome\Application\chrome.exe'
 ```
 
 Lịch sử chặn đã xử lý: 2026-10-11 AWS MCP không nạp do xác thực hết hạn; 2026-10-12 người dùng duyệt aws login, đăng nhập thành công và publish hoàn tất. Không cần hỏi lại quyền cho các bước đã hoàn tất.
+
+# Bàn giao Triển khai Nâng cấp Toàn diện — 2026-10-19
+
+## Trạng thái Hiện tại
+
+**Đã hoàn thành triển khai phiên bản mới từ branch `main` lên AWS và thực hiện hậu kiểm thành công.**
+
+- **Website:** https://d3qn9wabid8ws0.cloudfront.net/
+- **AWS Account:** `376129867108`, Region `ap-southeast-1`.
+- **Hạ tầng chính (`cloud-resource-guardian`):** **UPDATE_COMPLETE**
+  - Stack ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:stack/cloud-resource-guardian/81f52de0-c53a-11f1-8a39-02ffd9f7b9e9`
+  - Change Set đã thực thi: `guardian-update-1792342627` (ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:changeSet/guardian-update-1792342627/681651f2-b35d-40a8-aaf3-3e1669f5f9b1`)
+  - Lambda ZIP: `crg-artifacts-376129867108-ap-southeast-1/cloud-resource-guardian/4be15583dbd3478716c1839a79e8d831e497a5ec8d327aae6805353578502851/lambda.zip` (16.715.151 bytes, SHA-256: `4be15583dbd3478716c1839a79e8d831e497a5ec8d327aae6805353578502851`)
+  - Bảng DynamoDB: `cloud-resource-guardian-Data-15ID2URED2G6T` (**giữ nguyên 100%, không bị thay thế**)
+  - Cognito User Pool: `ap-southeast-1_NwY3bQKBQ` (**in-place update, không thay thế, dữ liệu user giữ nguyên**)
+- **Quyền đọc (`guardian-read-role-demo`):** **UPDATE_COMPLETE**
+  - Stack ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:stack/guardian-read-role-demo/4b1fba80-c542-11f1-a054-0affe454644b`
+  - Change Set đã thực thi: `guardian-role-update-1792342684` (ARN: `arn:aws:cloudformation:ap-southeast-1:376129867108:changeSet/guardian-role-update-1792342684/94482ecd-05d7-4985-afdc-a7fd62e5e515`)
+  - Role ARN: `arn:aws:iam::376129867108:role/GuardianReadRole-demo`
+  - ExternalId: `d31fae05-6d60-4f49-9631-ef06d084280f`
+  - Chính sách chỉ đọc: Bổ sung quyền đọc `ec2:DescribeNatGateways`, `rds:DescribeDBInstances`, `elasticloadbalancing:DescribeLoadBalancers`, `s3:ListAllMyBuckets`, `s3:ListBucketMultipartUploads`. Tuyệt đối không có quyền stop/terminate/delete/modify.
+- **CloudFront & Web Assets:**
+  - Distribution ID: `ERUII98HKGJOG`
+  - Invalidation: `I51MCIJRTDV31DM63RY9R0AMSB` (**Completed**)
+  - Toàn bộ 5 file tĩnh (`index.html`, `styles.css`, `app.js`, `target-role.yaml`, `config.json`) đã upload qua presigned URL ký bởi AWS MCP, khớp byte 100% với nguồn.
+
+## Kiểm thử Thực tế Sau Triển khai
+
+1. **Trạng thái CloudFormation:** Cả 2 stack đạt `UPDATE_COMPLETE` qua kiểm tra AWS MCP `DescribeStacks`.
+2. **Frontend Website:** Trả HTTP 200 cho toàn bộ 5 tài nguyên; giao diện mở bình thường, không có lỗi JavaScript console hay tràn ngang tại 1440px và 390px (`tests/ui_live_frontend.py` PASS).
+3. **Xác thực Cognito:** Hosted UI mở chính xác với `client_id=6gshdb16lafagprs48q21ifgjm`, scope `openid email aws.cognito.signin.user.admin`, PKCE S256. User `b98a55fc-e061-70f4-04e4-f8298bc94e69` (email `hoangdat2407@gmail.com`) được giữ nguyên trạng thái `CONFIRMED`.
+4. **Bảo vệ API (401 Unauthorized):** Toàn bộ 10 route API của API Gateway đều trả HTTP 401 khi không có token Authorization Bearer.
+5. **API Feedback:** `GET /feedback` trả HTTP 200 `{"results":[],"next_token":null}`; `PUT /feedback` trả 404 hợp lệ khi finding chưa xuất hiện.
+6. **STS AssumeRole:** `PUT /connection` với `RoleArn` và `ExternalId` gọi `sts:AssumeRole` thành công và xác nhận account `376129867108`.
+7. **Quét thực tế (Real Scan):**
+   - Scan ID: `86219e63-6f56-49b6-9398-0447f53f7809` tại region `ap-southeast-1` bao gồm cả 4 nhóm (`compute`, `storage`, `database`, `network`).
+   - Trạng thái kết thúc: `SUCCEEDED`.
+   - Kiểm tra đầy đủ 9 dịch vụ: EC2, EBS, SNAPSHOT, S3_MULTIPART, RDS, EIP, NAT_GATEWAY, ALB, NLB.
+   - Đã lưu vào DynamoDB tại `RESULT#ap-southeast-1` và lịch sử `HISTORY#...`.
+   - API `/findings` và `/history` trả đúng kết quả `SUCCEEDED` với `errors: []`.
+8. **Hạ tầng bổ trợ:**
+   - **Scheduler:** Lambda `ScheduleFunction` khởi động thành công, trả `queued_tenants: 0`.
+   - **SQS DeadLetters:** Hoạt động đúng chuẩn (đã chứng minh bắt message dead-letter khi retry cạn kiệt; không có lỗi mới).
+   - **CloudWatch Logs:** Log stream mới `2026/10/19/[$LATEST]a8391534a3bb460b86aac28fd2bb2358` ghi nhận thực thi 4019ms thành công, 0 lỗi, ParamValidationError được giải quyết dứt điểm.
+## Giới hạn và các Mục Chưa Kiểm chứng trên Dữ liệu Thật
+
+- **Dữ liệu tài nguyên rỗng:** Region `ap-southeast-1` không có EC2, RDS, EBS, Snapshot thật. Lượt quét trả về `0` cho tất cả các loại tài nguyên. Các rule phát hiện ngưỡng (CPU < 5%, Snapshot > 30 ngày, Volume không gắn > 24 giờ) chưa được kích hoạt trên tài nguyên thực tế.
+- **Đã khắc phục lỗi EIP Collector:** Trong `src/collectors.py`, đã bỏ tham số `MaxResults` và vòng lặp NextToken giả trong `eip_addresses()`. Bổ sung xử lý ngoại lệ `BotoCoreError` vào `collect_region`. Đã thêm 2 test mới: unit test xác nhận DescribeAddresses không truyền MaxResults và regression test quét toàn bộ nhóm network (EIP, NAT, ALB, NLB). Change Set `guardian-codefix-1792380950` đã được tạo và thực thi an toàn qua AWS MCP. Quét thực tế trên AWS đạt `SUCCEEDED`.
+- **SES:** SES tiếp tục giữ tắt theo yêu cầu.
+- **Multi-tenant isolation:** Chưa kiểm thử đồng thời hai người dùng thật có role riêng biệt.
