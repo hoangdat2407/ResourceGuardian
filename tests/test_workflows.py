@@ -32,6 +32,9 @@ class Workflows(unittest.TestCase):
         )
         self.table_patch = patch.object(app, "table", self.db.Table("test-table"))
         self.table_patch.start()
+        self.now = datetime(2026, 10, 26, 9, 17, tzinfo=timezone.utc)
+        self.clock_patch = patch.object(app.time, "time", return_value=self.now.timestamp())
+        self.clock_patch.start()
         self.profile = {
             "pk": "TENANT#alice", "sk": "PROFILE", "external_id": "ext",
             "settings": app.config({}), "service_groups": list(app.SERVICE_GROUPS),
@@ -97,6 +100,7 @@ class Workflows(unittest.TestCase):
 
     def tearDown(self):
         self.session_patch.stop()
+        self.clock_patch.stop()
         self.table_patch.stop()
         self.aws.stop()
 
@@ -122,7 +126,8 @@ class Workflows(unittest.TestCase):
         )
 
     def observation(self, rid):
-        return app.get(self.profile["pk"], "OBS#" + self.profile["connection_version"] + "#ap-southeast-1#" + rid)
+        kind = 'EBS' if rid.startswith('vol-') else 'EIP'
+        return app.get(self.profile["pk"], "OBS#" + self.profile["connection_version"] + "#ap-southeast-1#" + kind + "#" + rid)
 
     def add_orphan(self, kind, rid):
         if kind == "EBS":
@@ -132,6 +137,117 @@ class Workflows(unittest.TestCase):
             item = {"AllocationId": rid}
             self.addresses.append(item)
         return item
+
+    def add_metric_resources(self):
+        old = self.now - timedelta(days=8)
+        self.instances.append({'InstanceId': 'i-demo', 'State': {'Name': 'running'}, 'LaunchTime': old})
+        self.rds_instances.append({'DBInstanceIdentifier': 'db-demo', 'DBInstanceArn': 'arn:db',
+                                   'DBInstanceStatus': 'available', 'InstanceCreateTime': old,
+                                   'Engine': 'postgres', 'DBInstanceClass': 'db.t4g.micro'})
+        self.nats.append({'NatGatewayId': 'nat-demo', 'State': 'available', 'CreateTime': old,
+                          'VpcId': 'vpc-demo', 'SubnetId': 'subnet-demo'})
+        for name, kind, path in (('alb-demo', 'application', 'app'), ('nlb-demo', 'network', 'net')):
+            self.load_balancers.append({'Type': kind, 'State': {'Code': 'active'}, 'CreatedTime': old,
+                                        'LoadBalancerName': name, 'Scheme': 'internet-facing',
+                                        'LoadBalancerArn': 'arn:aws:elasticloadbalancing:ap-southeast-1:123456789012:loadbalancer/' + path + '/' + name + '/id'})
+
+    @staticmethod
+    def zero_metric_response(**kwargs):
+        timestamps = [kwargs['EndTime'] - timedelta(hours=hour + 1) for hour in range(24)]
+        return {'MetricDataResults': [{'Id': query['Id'], 'StatusCode': 'Complete',
+                                       'Values': [0] * 24, 'Timestamps': timestamps}
+                                      for query in kwargs['MetricDataQueries']]}
+
+    def test_all_nine_types_have_context_thresholds_and_persisted_explanations(self):
+        settings = {'cpu_percent': 7, 'network_mib_hour': 2, 'rds_cpu_percent': 8,
+                    'rds_connections': 3, 'nat_mib_hour': 4, 'alb_requests_hour': 5,
+                    'nlb_new_flows_hour': 6, 'orphan_hours': 12, 'snapshot_days': 60}
+        self.profile['settings'] = app.config(settings)
+        app.put(self.profile)
+        self.add_metric_resources()
+        self.add_orphan('EBS', 'vol-demo')
+        self.add_orphan('EIP', 'eipalloc-demo')
+        self.snapshots.append({'SnapshotId': 'snap-demo', 'State': 'completed', 'VolumeSize': 40,
+                               'StartTime': self.now - timedelta(days=100)})
+        self.s3.list_buckets.return_value = {'Buckets': [{'Name': 'demo', 'BucketRegion': 'ap-southeast-1'}]}
+        self.uploads.append({'Key': 'nested/object', 'UploadId': 'upload-demo', 'Initiated': self.now - timedelta(days=8)})
+        self.cw.get_metric_data.side_effect = self.zero_metric_response
+        result = self.scan_at(int(self.now.timestamp()))
+        self.assertEqual(result['status'], 'SUCCEEDED')
+        self.assertEqual(result['errors'], [])
+        findings = {item['type']: item for item in result['findings']}
+        self.assertEqual(set(findings), {'EC2', 'EBS', 'EIP', 'SNAPSHOT', 'RDS', 'S3_MULTIPART', 'NAT_GATEWAY', 'ALB', 'NLB'})
+        thresholds = {
+            'EC2': {'cpu_percent': 7, 'network_mib_hour': 2},
+            'RDS': {'rds_cpu_percent': 8, 'rds_connections': 3},
+            'NAT_GATEWAY': {'nat_mib_hour': 4}, 'ALB': {'alb_requests_hour': 5},
+            'NLB': {'nlb_new_flows_hour': 6}, 'EBS': {'orphan_hours': 12},
+            'EIP': {'orphan_hours': 12}, 'SNAPSHOT': {'snapshot_days': 60},
+            'S3_MULTIPART': {'multipart_days': 7},
+        }
+        statistics = {'EC2': {'cpu': 'Maximum', 'netin': 'Sum', 'netout': 'Sum'},
+                      'RDS': {'cpu': 'Maximum', 'connections': 'Maximum'},
+                      'NAT_GATEWAY': {'source': 'Sum', 'destination': 'Sum'},
+                      'ALB': {'requests': 'Sum'}, 'NLB': {'flows': 'Sum'}}
+        for kind, finding in findings.items():
+            with self.subTest(kind=kind):
+                for key in ('rule_id', 'reason', 'recommendation', 'resource_id', 'finding_id'):
+                    self.assertTrue(finding[key])
+                evidence = finding['evidence']
+                self.assertEqual(evidence['thresholds'], thresholds[kind])
+                for key, value in {'account_id': '123456789012', 'region': 'ap-southeast-1',
+                                   'evaluated_at': self.now.isoformat()}.items():
+                    self.assertEqual(finding[key], value)
+                    self.assertEqual(evidence[key], value)
+                if kind in statistics:
+                    end = self.now.replace(minute=0)
+                    self.assertEqual(evidence['observation_start'], (end - timedelta(hours=24)).isoformat())
+                    self.assertEqual(evidence['observation_end'], end.isoformat())
+                    self.assertEqual(evidence['metric_period_seconds'], 3600)
+                    self.assertEqual(evidence['metric_statistics'], statistics[kind])
+                    self.assertEqual(evidence['sample_counts'], dict.fromkeys(statistics[kind], 24))
+                    self.assertEqual(evidence['missing_metrics'], [])
+                    self.assertEqual(evidence['invalid_metrics'], [])
+                    self.assertEqual(evidence['calculation_errors'], [])
+        for path in ('/findings', '/scans/' + result['scan_id'], '/history'):
+            with self.subTest(path=path):
+                reply = app.api(event('GET', path), None)
+                self.assertEqual(reply['statusCode'], 200)
+                rows = json.loads(reply['body'])['results']
+                stored = next(row for row in rows if row['scan_id'] == result['scan_id'])
+                self.assertNotIn('candidates', stored)
+                self.assertEqual(stored['findings'], result['findings'])
+                json.dumps(stored, allow_nan=False)
+
+    def test_young_or_missing_creation_metric_resources_do_not_query_cloudwatch(self):
+        self.add_metric_resources()
+        resources = [(self.instances[0], 'LaunchTime'), (self.rds_instances[0], 'InstanceCreateTime'),
+                     (self.nats[0], 'CreateTime'), *[(item, 'CreatedTime') for item in self.load_balancers]]
+        for issue in ('RESOURCE_TOO_YOUNG', 'MISSING_CREATION_TIME'):
+            with self.subTest(issue=issue):
+                for resource, key in resources:
+                    if issue == 'RESOURCE_TOO_YOUNG':
+                        resource[key] = self.now - timedelta(hours=1)
+                    else:
+                        resource.pop(key, None)
+                self.cw.reset_mock()
+                result = self.scan()
+                self.assertEqual(result['status'], 'SUCCEEDED')
+                self.assertEqual({finding['type'] for finding in result['findings']}, {'EC2', 'RDS', 'NAT_GATEWAY', 'ALB', 'NLB'})
+                for finding in result['findings']:
+                    self.assertEqual(finding['level'], 'INSUFFICIENT_DATA')
+                    self.assertIn(issue, finding['evidence']['data_issues'])
+                self.cw.get_metric_data.assert_not_called()
+
+    def test_s3_seven_day_boundary_is_strict_using_scan_clock(self):
+        self.s3.list_buckets.return_value = {'Buckets': [{'Name': 'demo', 'BucketRegion': 'ap-southeast-1'}]}
+        for seconds, expected in ((7 * 86400 - 1, 0), (7 * 86400, 0), (7 * 86400 + 1, 1)):
+            with self.subTest(age_seconds=seconds):
+                self.uploads[:] = [{'Key': 'object', 'UploadId': 'upload-demo', 'Initiated': self.now - timedelta(seconds=seconds)}]
+                result = self.scan_at(int(self.now.timestamp()))
+                self.assertEqual(len(result['findings']), expected)
+                if expected:
+                    self.assertEqual(result['findings'][0]['level'], 'REVIEW')
 
     def test_empty_scan_completes_and_history_written(self):
         result = self.scan()
@@ -155,13 +271,13 @@ class Workflows(unittest.TestCase):
         self.assertEqual(self.scan()["findings"][0]["level"], "OBSERVING")
 
     def test_snapshot_referenced_by_ami_is_not_flagged(self):
-        self.snapshots.append({"SnapshotId": "snap-used", "StartTime": datetime.now(timezone.utc) - timedelta(days=100), "State": "completed", "VolumeSize": 40})
+        self.snapshots.append({"SnapshotId": "snap-used", "StartTime": self.now - timedelta(days=100), "State": "completed", "VolumeSize": 40})
         self.images.append({"BlockDeviceMappings": [{"Ebs": {"SnapshotId": "snap-used"}}]})
         self.assertFalse(any(item["type"] == "SNAPSHOT" for item in self.scan()["findings"]))
 
     def test_snapshot_referenced_by_disabled_ami_is_not_flagged(self):
         for rid in ("snap-disabled-ami", "snap-unused"):
-            self.snapshots.append({"SnapshotId": rid, "StartTime": datetime.now(timezone.utc) - timedelta(days=100), "State": "completed", "VolumeSize": 40})
+            self.snapshots.append({"SnapshotId": rid, "StartTime": self.now - timedelta(days=100), "State": "completed", "VolumeSize": 40})
         disabled_image = {"ImageId": "ami-disabled", "State": "disabled", "BlockDeviceMappings": [{"Ebs": {"SnapshotId": "snap-disabled-ami"}}]}
         image_paginator = MagicMock()
         image_paginator.paginate.side_effect = lambda **kwargs: [{"Images": [disabled_image] if kwargs.get("IncludeDisabled") is True else []}]
@@ -175,7 +291,7 @@ class Workflows(unittest.TestCase):
         image_paginator.paginate.assert_called_once_with(Owners=["self"], IncludeDisabled=True)
 
     def test_partial_permission_error_retains_ec2_results(self):
-        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "stopped"}, "LaunchTime": datetime.now(timezone.utc) - timedelta(days=4)})
+        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "stopped"}, "LaunchTime": self.now - timedelta(days=4)})
         self.ec2.describe_addresses.side_effect = ClientError({"Error": {"Code": "UnauthorizedOperation", "Message": "denied"}}, "DescribeAddresses")
         result = self.scan()
         self.assertEqual(result["status"], "PARTIAL")
@@ -183,14 +299,14 @@ class Workflows(unittest.TestCase):
         self.assertIn({"type": "EIP", "code": "UnauthorizedOperation"}, result["errors"])
 
     def test_missing_ec2_and_rds_metrics_are_insufficient(self):
-        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": datetime.now(timezone.utc) - timedelta(days=4)})
-        self.rds_instances.append({"DBInstanceIdentifier": "db-demo", "DBInstanceArn": "arn:db", "DBInstanceStatus": "available", "InstanceCreateTime": datetime.now(timezone.utc) - timedelta(days=4), "Engine": "postgres", "DBInstanceClass": "db.t4g.micro"})
+        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": self.now - timedelta(days=4)})
+        self.rds_instances.append({"DBInstanceIdentifier": "db-demo", "DBInstanceArn": "arn:db", "DBInstanceStatus": "available", "InstanceCreateTime": self.now - timedelta(days=4), "Engine": "postgres", "DBInstanceClass": "db.t4g.micro"})
         findings = self.scan()["findings"]
         self.assertEqual({item["type"]: item["level"] for item in findings}, {"EC2": "INSUFFICIENT_DATA", "RDS": "INSUFFICIENT_DATA"})
 
     def test_nat_real_zero_is_review(self):
-        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": datetime.now(timezone.utc) - timedelta(days=4), "VpcId": "vpc-1", "SubnetId": "subnet-1"})
-        timestamps = [datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=index + 1) for index in range(20)]
+        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": self.now - timedelta(days=4), "VpcId": "vpc-1", "SubnetId": "subnet-1"})
+        timestamps = [self.now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=index + 1) for index in range(20)]
         self.cw.get_metric_data.side_effect = lambda **kwargs: {"MetricDataResults": [{"Id": query["Id"], "StatusCode": "Complete", "Values": [0] * 20, "Timestamps": timestamps} for query in kwargs["MetricDataQueries"]]}
         finding = next(item for item in self.scan()["findings"] if item["type"] == "NAT_GATEWAY")
         self.assertEqual(finding["level"], "REVIEW")
@@ -198,7 +314,7 @@ class Workflows(unittest.TestCase):
 
     def test_stale_s3_multipart_is_review_and_structurally_identified(self):
         self.s3.list_buckets.return_value = {"Buckets": [{"Name": "demo", "BucketRegion": "ap-southeast-1"}]}
-        self.uploads.append({"Key": "a/b", "UploadId": "upload#1", "Initiated": datetime.now(timezone.utc) - timedelta(days=8)})
+        self.uploads.append({"Key": "a/b", "UploadId": "upload#1", "Initiated": self.now - timedelta(days=8)})
         finding = next(item for item in self.scan()["findings"] if item["type"] == "S3_MULTIPART")
         self.assertEqual(finding["resource_id"], "s3://demo/a/b")
         self.assertRegex(finding["finding_id"], r"^[0-9a-f]{64}$")
@@ -211,7 +327,7 @@ class Workflows(unittest.TestCase):
         self.assertIn({"type": "ELB", "code": "AccessDenied"}, result["errors"])
 
     def test_metric_pagination_deduplicates_real_zero(self):
-        end = datetime.now(timezone.utc)
+        end = self.now
         start = end - timedelta(hours=24)
         timestamp = start + timedelta(hours=1)
         self.cw.get_metric_data.side_effect = [
@@ -220,6 +336,109 @@ class Workflows(unittest.TestCase):
         ]
         values = collectors.metric_series(self.cw, [{"Id": "cpu"}], start, end)
         self.assertEqual(values, {"cpu": [0]})
+
+    def test_metric_series_ignores_outside_window_and_keeps_real_boundary_zero(self):
+        end = self.now.replace(minute=0)
+        start = end - timedelta(hours=24)
+        self.cw.get_metric_data.side_effect = None
+        self.cw.get_metric_data.return_value = {'MetricDataResults': [{
+            'Id': 'cpu', 'StatusCode': 'Complete',
+            'Timestamps': [start - timedelta(hours=1), start, end - timedelta(hours=1), end],
+            'Values': [100, 0, 1, 100],
+        }]}
+        self.assertEqual(collectors.metric_series(self.cw, [{'Id': 'cpu'}], start, end), {'cpu': [0, 1]})
+
+    def test_metric_series_rejects_samples_outside_hourly_grid(self):
+        end = self.now.replace(minute=0)
+        start = end - timedelta(hours=24)
+        self.cw.get_metric_data.side_effect = None
+        for offset in (timedelta(minutes=1), timedelta(seconds=1), timedelta(microseconds=1)):
+            with self.subTest(offset=offset):
+                self.cw.get_metric_data.return_value = {'MetricDataResults': [{
+                    'Id': 'cpu', 'StatusCode': 'Complete',
+                    'Timestamps': [start + offset], 'Values': [0],
+                }]}
+                with self.assertRaisesRegex(ValueError, 'hourly grid'):
+                    collectors.metric_series(self.cw, [{'Id': 'cpu'}], start, end)
+
+    def test_dense_minute_samples_cannot_claim_hourly_coverage_for_metric_rules(self):
+        self.add_metric_resources()
+        self.add_orphan('EBS', 'vol-demo')
+        cases = (
+            ('AWS/EC2', 'EC2', 'EC2'), ('AWS/RDS', 'RDS', 'RDS'),
+            ('AWS/NATGateway', 'NAT_GATEWAY', 'NAT_GATEWAY'),
+            ('AWS/ApplicationELB', 'ALB', 'ELB'), ('AWS/NetworkELB', 'NLB', 'ELB'),
+        )
+        all_types = {'EC2', 'EBS', 'RDS', 'NAT_GATEWAY', 'ALB', 'NLB'}
+        for namespace, kind, error_type in cases:
+            with self.subTest(kind=kind):
+                def metrics(**kwargs):
+                    response = self.zero_metric_response(**kwargs)
+                    if kwargs['MetricDataQueries'][0]['MetricStat']['Metric']['Namespace'] == namespace:
+                        for series in response['MetricDataResults']:
+                            series['Timestamps'] = [kwargs['EndTime'] - timedelta(minutes=index + 1)
+                                                    for index in range(24)]
+                    return response
+
+                self.cw.get_metric_data.side_effect = metrics
+                result = self.scan()
+                self.assertEqual(result['status'], 'PARTIAL')
+                self.assertIn({'type': error_type, 'code': 'METRIC_DATA_ERROR'}, result['errors'])
+                findings = {item['type']: item for item in result['findings']}
+                self.assertNotIn(kind, findings)
+                # An ALB error ends the shared ELB collector before NLB evaluation.
+                excluded = {kind, 'NLB'} if kind == 'ALB' else {kind}
+                self.assertEqual(set(findings), all_types - excluded)
+                self.assertEqual(findings['EBS']['level'], 'OBSERVING')
+                self.assertTrue(all(item['level'] == 'REVIEW' for name, item in findings.items()
+                                    if name != 'EBS'))
+
+    def test_metric_series_rejects_malformed_status_and_conflicting_duplicates(self):
+        end = self.now.replace(minute=0)
+        start = end - timedelta(hours=24)
+        valid = {'Id': 'cpu', 'StatusCode': 'Complete', 'Timestamps': [start], 'Values': [0]}
+        malformed = (
+            None, {'MetricDataResults': {}}, {'MetricDataResults': [None]},
+            {'MetricDataResults': [{**valid, 'Id': 'unexpected'}]},
+            {'MetricDataResults': [{**valid, 'StatusCode': 'InternalError'}]},
+            {'MetricDataResults': [{**valid, 'StatusCode': 'Forbidden'}]},
+            {'MetricDataResults': [{**valid, 'StatusCode': None}]},
+            {'MetricDataResults': [{**valid, 'Values': []}]},
+            {'MetricDataResults': [{**valid, 'Values': None}]},
+            {'MetricDataResults': [{**valid, 'Timestamps': ['2026-10-01T00:00:00Z']}]},
+            {'MetricDataResults': [{**valid, 'Timestamps': [start.replace(tzinfo=None)]}]},
+            {'MetricDataResults': [{**valid, 'Timestamps': [start, start], 'Values': [0, 1]}]},
+            {'MetricDataResults': [{**valid, 'Timestamps': [start, start], 'Values': [0, False]}]},
+            {'MetricDataResults': [valid], 'NextToken': 123},
+        )
+        self.cw.get_metric_data.side_effect = None
+        for page in malformed:
+            with self.subTest(page=page):
+                self.cw.get_metric_data.return_value = page
+                with self.assertRaises(ValueError):
+                    collectors.metric_series(self.cw, [{'Id': 'cpu'}], start, end)
+        self.cw.get_metric_data.side_effect = [
+            {'MetricDataResults': [valid], 'NextToken': 'repeated'},
+            {'MetricDataResults': [valid], 'NextToken': 'repeated'},
+        ]
+        with self.assertRaises(ValueError):
+            collectors.metric_series(self.cw, [{'Id': 'cpu'}], start, end)
+
+    def test_malformed_cloudwatch_response_is_partial_without_false_idle_finding(self):
+        self.add_metric_resources()
+        self.add_orphan('EBS', 'vol-demo')
+
+        def metrics(**kwargs):
+            if kwargs['MetricDataQueries'][0]['MetricStat']['Metric']['Namespace'] == 'AWS/RDS':
+                return {'MetricDataResults': [{'Id': 'cpu', 'StatusCode': 'Forbidden', 'Values': [], 'Timestamps': []}]}
+            return self.zero_metric_response(**kwargs)
+
+        self.cw.get_metric_data.side_effect = metrics
+        result = self.scan()
+        self.assertEqual(result['status'], 'PARTIAL')
+        self.assertIn({'type': 'RDS', 'code': 'METRIC_DATA_ERROR'}, result['errors'])
+        self.assertEqual({item['type'] for item in result['findings']}, {'EC2', 'EBS', 'NAT_GATEWAY', 'ALB', 'NLB'})
+        self.assertTrue(all(item['level'] == 'REVIEW' for item in result['findings'] if item['type'] != 'EBS'))
 
     def test_scan_id_is_scoped_to_authenticated_tenant(self):
         scan_id = str(uuid.uuid4())
@@ -279,8 +498,33 @@ class Workflows(unittest.TestCase):
         self.assertEqual(result["counts"]["EBS"], 100)
         self.assertEqual(result["finding_count"], 100)
         self.assertEqual(len(result["findings"]), 50)
+        self.assertEqual(result['total_candidate_count'], 100)
+        self.assertEqual(len(result['candidates']), 100)
         self.assertEqual(result["status"], "PARTIAL")
         self.assertIn({"type": "EBS", "code": "RESOURCE_LIMIT"}, result["errors"])
+
+    def test_candidate_byte_budget_reports_partial_and_keeps_history_readable(self):
+        findings = [
+            {'type': 'EBS', 'resource_id': 'vol-' + str(index), 'region': 'ap-southeast-1',
+             'finding_id': collectors.finding_id('EBS', 'ap-southeast-1', 'vol-' + str(index)),
+             'level': 'REVIEW', 'rule_id': 'EBS_UNATTACHED', 'reason': 'Unattached volume',
+             'recommendation': 'Confirm retention with owner', 'evidence': {'details': 'x' * (40 * 1024)}}
+            for index in range(5)
+        ]
+        with patch.object(app, 'collect_region', return_value={'counts': {'EBS': 5}, 'findings': findings,
+                                                             'errors': [], 'partial': False}):
+            result = self.scan()
+        retained = len(result['candidates'])
+        self.assertGreater(retained, 0)
+        self.assertLess(retained, len(findings))
+        self.assertEqual(result['total_candidate_count'], 5)
+        self.assertEqual(result['finding_count'], retained)
+        self.assertEqual(result['status'], 'PARTIAL')
+        self.assertIn({'type': 'FINDING', 'code': 'CANDIDATE_LIMIT'}, result['errors'])
+        self.assertLessEqual(len(json.dumps(result, ensure_ascii=False).encode('utf-8')), app.RESULT_BYTE_LIMIT)
+        detail = json.loads(app.api(event('GET', '/scans/' + result['scan_id']), None)['body'])['results'][0]
+        self.assertEqual(detail['findings'], result['findings'])
+        self.assertNotIn('candidates', detail)
 
     def test_time_budget_marks_current_and_remaining_collectors(self):
         self.context.get_remaining_time_in_millis.return_value = 20000
@@ -296,7 +540,7 @@ class Workflows(unittest.TestCase):
             {"Buckets": []},
         ]
         paginator = MagicMock()
-        initiated = datetime.now(timezone.utc) - timedelta(days=8)
+        initiated = self.now - timedelta(days=8)
         paginator.paginate.return_value = [
             {"Uploads": [{"Key": "same", "UploadId": "first", "Initiated": initiated}]},
             {"Uploads": [{"Key": "same", "UploadId": "second", "Initiated": initiated}]},
@@ -310,13 +554,13 @@ class Workflows(unittest.TestCase):
         paginator.paginate.assert_called_once_with(Bucket="demo", ExpectedBucketOwner="123456789012")
 
     def test_rds_alb_and_nlb_real_zero_are_review(self):
-        old = datetime.now(timezone.utc) - timedelta(days=4)
+        old = self.now - timedelta(days=4)
         self.rds_instances.append({"DBInstanceIdentifier": "db-demo", "DBInstanceArn": "arn:db", "DBInstanceStatus": "available", "InstanceCreateTime": old, "Engine": "postgres", "DBInstanceClass": "db.t4g.micro"})
         self.load_balancers.extend([
             {"Type": "application", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "alb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/app/alb-demo/id", "Scheme": "internet-facing"},
             {"Type": "network", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "nlb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/net/nlb-demo/id", "Scheme": "internal"},
         ])
-        timestamps = [datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=index + 1) for index in range(20)]
+        timestamps = [self.now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=index + 1) for index in range(20)]
         self.cw.get_metric_data.side_effect = lambda **kwargs: {"MetricDataResults": [{"Id": query["Id"], "StatusCode": "Complete", "Values": [0] * 20, "Timestamps": timestamps} for query in kwargs["MetricDataQueries"]]}
         levels = {item["type"]: item["level"] for item in self.scan()["findings"]}
         self.assertEqual(levels["RDS"], "REVIEW")
@@ -396,6 +640,50 @@ class Workflows(unittest.TestCase):
         for rid in ("vol-demo", "eipalloc-demo"):
             self.assertEqual(self.observation(rid)["first"], later)
 
+    def test_expired_or_future_observations_restart_orphan_window(self):
+        clock = int(self.now.timestamp())
+        self.add_orphan('EBS', 'vol-demo')
+        self.add_orphan('EIP', 'eipalloc-demo')
+        for issue, overrides in (
+            ('expired', {'expires': clock}),
+            ('future_last', {'last': clock + 1}),
+            ('future_first', {'first': clock + 1}),
+        ):
+            with self.subTest(issue=issue):
+                for kind, ident in (('EBS', 'vol-demo'), ('EIP', 'eipalloc-demo')):
+                    app.put({'pk': self.profile['pk'], 'sk': 'OBS#v1#ap-southeast-1#' + kind + '#' + ident,
+                             'first': clock - 30 * 3600, 'last': clock - 3600,
+                             'expires': clock + 7 * 86400, **overrides})
+                restarted = self.scan_at(clock)
+                self.assertEqual({item['type']: item['level'] for item in restarted['findings']},
+                                 {'EBS': 'OBSERVING', 'EIP': 'OBSERVING'})
+                for item in restarted['findings']:
+                    self.assertEqual(item['evidence']['observed_hours'], 0)
+                    self.assertEqual(self.observation(item['resource_id'])['first'], clock)
+                at_threshold = self.scan_at(clock + 24 * 3600)
+                self.assertEqual({item['type']: item['level'] for item in at_threshold['findings']},
+                                 {'EBS': 'REVIEW', 'EIP': 'REVIEW'})
+
+    def test_observation_migrates_native_legacy_prefix_and_separates_resource_types(self):
+        clock = int(self.now.timestamp())
+        self.add_orphan('EBS', 'vol-demo')
+        legacy_key = 'OBS#v1#ap-southeast-1#vol-demo'
+        app.put({'pk': self.profile['pk'], 'sk': legacy_key, 'first': clock - 30 * 3600,
+                 'last': clock - 3600, 'expires': clock + 86400})
+        result = self.scan_at(clock)
+        self.assertEqual(result['findings'][0]['level'], 'REVIEW')
+        self.assertEqual(self.observation('vol-demo')['first'], clock - 30 * 3600)
+        self.assertEqual(app.get(self.profile['pk'], legacy_key), {})
+        self.volumes.clear()
+        self.add_orphan('EBS', 'shared-id')
+        self.add_orphan('EIP', 'shared-id')
+        self.scan_at(clock)
+        self.volumes[0].update(State='in-use', Attachments=[{'InstanceId': 'i-demo'}])
+        next_scan = self.scan_at(clock + 24 * 3600)
+        self.assertEqual([(item['type'], item['level']) for item in next_scan['findings']], [('EIP', 'REVIEW')])
+        self.assertEqual(app.get(self.profile['pk'], 'OBS#v1#ap-southeast-1#EBS#shared-id'), {})
+        self.assertEqual(app.get(self.profile['pk'], 'OBS#v1#ap-southeast-1#EIP#shared-id')['first'], clock)
+
     def test_all_exceptions_hide_findings_but_preserve_orphan_observation(self):
         clock = int(app.time.time())
         for kind in ("EBS", "EIP"):
@@ -452,7 +740,7 @@ class Workflows(unittest.TestCase):
         self.assertEqual(self.scan_at(clock + 25 * 3600)["findings"], [])
 
     def test_snapshot_incomplete_ami_inventory_never_produces_review(self):
-        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": datetime.now(timezone.utc) - timedelta(days=100), "State": "completed", "VolumeSize": 40})
+        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": self.now - timedelta(days=100), "State": "completed", "VolumeSize": 40})
         self.images.extend({"ImageId": "ami-%03d" % index} for index in range(101))
         result = self.scan()
         self.assertEqual(result["status"], "PARTIAL")
@@ -461,7 +749,7 @@ class Workflows(unittest.TestCase):
 
     def test_snapshot_ami_access_denied_keeps_other_service_evidence(self):
         self.add_orphan("EBS", "vol-demo")
-        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": datetime.now(timezone.utc) - timedelta(days=100), "State": "completed", "VolumeSize": 40})
+        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": self.now - timedelta(days=100), "State": "completed", "VolumeSize": 40})
         self.inventory_errors["describe_images"] = ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "DescribeImages")
         result = self.scan()
         self.assertEqual(result["status"], "PARTIAL")
@@ -472,11 +760,11 @@ class Workflows(unittest.TestCase):
         clock = int(app.time.time())
         self.add_orphan("EBS", "vol-demo")
         self.add_orphan("EIP", "eipalloc-demo")
-        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": datetime.now(timezone.utc) - timedelta(days=8)})
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": self.now - timedelta(days=8)})
+        end = self.now.replace(minute=0, second=0, microsecond=0)
         timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
         self.cw.get_metric_data.side_effect = lambda **kwargs: {"MetricDataResults": [{"Id": ident, "StatusCode": "Complete", "Values": [0] * 24, "Timestamps": timestamps} for ident in ("cpu", "netin", "netout")]}
-        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": datetime.now(timezone.utc) - timedelta(days=100), "State": "completed", "VolumeSize": 40})
+        self.snapshots.append({"SnapshotId": "snap-demo", "StartTime": self.now - timedelta(days=100), "State": "completed", "VolumeSize": 40})
         first = self.scan_at(clock)
         findings = first["findings"]
         required = {"type", "resource_id", "region", "level", "reason", "evidence", "rule_id", "recommendation"}
@@ -496,8 +784,8 @@ class Workflows(unittest.TestCase):
                 self.assertEqual(selected["findings"], findings if path != "/findings" else second["findings"])
 
     def test_nonfinite_or_negative_metrics_remain_json_safe(self):
-        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": datetime.now(timezone.utc) - timedelta(days=8)})
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self.instances.append({"InstanceId": "i-demo", "State": {"Name": "running"}, "LaunchTime": self.now - timedelta(days=8)})
+        end = self.now.replace(minute=0, second=0, microsecond=0)
         timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
         for value in (float("nan"), float("inf"), -1):
             with self.subTest(value=value):
@@ -505,17 +793,22 @@ class Workflows(unittest.TestCase):
                 self.scan_sequence += 1
                 result = self.scan(f"{self.scan_sequence:08d}-0000-0000-0000-000000000000")
                 self.assertEqual(result["findings"][0]["level"], "INSUFFICIENT_DATA")
+                evidence = result['findings'][0]['evidence']
+                self.assertEqual(evidence['sample_counts'], {'cpu': 23, 'netin': 24, 'netout': 24})
+                self.assertEqual(evidence['invalid_metrics'], ['cpu'])
+                self.assertEqual(evidence['missing_metrics'], [])
+                self.assertEqual(evidence['calculation_errors'], [])
                 json.dumps(result, allow_nan=False)
 
     def test_invalid_rds_nat_alb_and_nlb_metrics_persist_as_insufficient(self):
-        old = datetime.now(timezone.utc) - timedelta(days=4)
+        old = self.now - timedelta(days=4)
         self.rds_instances.append({"DBInstanceIdentifier": "db-demo", "DBInstanceArn": "arn:db", "DBInstanceStatus": "available", "InstanceCreateTime": old, "Engine": "postgres", "DBInstanceClass": "db.t4g.micro"})
         self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": old, "VpcId": "vpc-1", "SubnetId": "subnet-1"})
         self.load_balancers.extend([
             {"Type": "application", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "alb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/app/alb-demo/id", "Scheme": "internet-facing"},
             {"Type": "network", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "nlb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/net/nlb-demo/id", "Scheme": "internal"},
         ])
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        end = self.now.replace(minute=0, second=0, microsecond=0)
         timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
         invalid_values = (("negative", -1), ("boolean", False), ("null", None), ("string", "0"), ("nan", float("nan")), ("infinity", float("inf")), ("huge_integer", 10 ** 1000))
         expected = {kind: "INSUFFICIENT_DATA" for kind in ("RDS", "NAT_GATEWAY", "ALB", "NLB")}
@@ -532,11 +825,57 @@ class Workflows(unittest.TestCase):
                     self.assertEqual(result["status"], "SUCCEEDED")
                     self.assertEqual(result["errors"], [])
                     self.assertEqual({item["type"]: item["level"] for item in result["findings"]}, expected)
+                    for finding in result['findings']:
+                        evidence = finding['evidence']
+                        invalid_names = set(evidence['sample_counts']) & set(invalid_ids)
+                        self.assertEqual(set(evidence['invalid_metrics']), invalid_names)
+                        self.assertEqual(evidence['missing_metrics'], [])
+                        self.assertEqual(evidence['calculation_errors'], [])
+                        self.assertEqual(evidence['coverage'], round(23 / 24, 3))
+                        self.assertEqual(evidence['sample_counts'], {key: 23 if key in invalid_names else 24 for key in evidence['sample_counts']})
+                    detail = json.loads(app.api(event('GET', '/scans/' + result['scan_id']), None)['body'])
+                    self.assertEqual(detail['results'][0]['findings'], result['findings'])
+                    self.assertNotIn('candidates', detail['results'][0])
                     json.dumps(result, allow_nan=False)
 
+    def test_aggregate_overflow_diagnostics_survive_history_without_raw_samples(self):
+        self.add_metric_resources()
+
+        def metrics(**kwargs):
+            page = self.zero_metric_response(**kwargs)
+            for row in page['MetricDataResults']:
+                if row['Id'] in {'netin', 'netout', 'source', 'destination', 'requests', 'flows'}:
+                    row['Values'] = [1e308] * 24
+            return page
+
+        self.cw.get_metric_data.side_effect = metrics
+        result = self.scan()
+        self.assertEqual(result['status'], 'SUCCEEDED')
+        self.assertEqual(result['errors'], [])
+        self.assertEqual({finding['type'] for finding in result['findings']}, {'EC2', 'RDS', 'NAT_GATEWAY', 'ALB', 'NLB'})
+        for finding in result['findings']:
+            with self.subTest(kind=finding['type']):
+                evidence = finding['evidence']
+                if finding['type'] == 'RDS':
+                    self.assertEqual(finding['level'], 'REVIEW')
+                    continue
+                self.assertEqual(finding['level'], 'INSUFFICIENT_DATA')
+                self.assertEqual(evidence['calculation_errors'], ['AGGREGATE_OVERFLOW'])
+                self.assertTrue(evidence['invalid_metrics'])
+                self.assertEqual(evidence['missing_metrics'], [])
+                self.assertTrue(all(count == 24 for count in evidence['sample_counts'].values()))
+                self.assertNotIn('values', evidence)
+                self.assertNotIn('samples', evidence)
+        for path in ('/scans/' + result['scan_id'], '/history'):
+            reply = app.api(event('GET', path), None)
+            stored = next(row for row in json.loads(reply['body'])['results'] if row['scan_id'] == result['scan_id'])
+            self.assertEqual(stored['findings'], result['findings'])
+            self.assertNotIn('candidates', stored)
+            json.dumps(stored, allow_nan=False)
+
     def test_nat_unequal_direction_sample_counts_use_each_direction_average(self):
-        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": datetime.now(timezone.utc) - timedelta(days=4), "VpcId": "vpc-1", "SubnetId": "subnet-1"})
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": self.now - timedelta(days=4), "VpcId": "vpc-1", "SubnetId": "subnet-1"})
+        end = self.now.replace(minute=0, second=0, microsecond=0)
         timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
         for source_count, destination_count in ((24, 20), (20, 24)):
             with self.subTest(source_count=source_count, destination_count=destination_count):
@@ -569,7 +908,7 @@ class Workflows(unittest.TestCase):
         self.nats.append({
             "NatGatewayId": "nat-net-1",
             "State": "available",
-            "CreateTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "CreateTime": self.now - timedelta(days=5),
             "VpcId": "vpc-net-1",
             "SubnetId": "subnet-net-1",
         })
@@ -578,7 +917,7 @@ class Workflows(unittest.TestCase):
             "LoadBalancerName": "alb-net-1",
             "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-southeast-1:123456789012:loadbalancer/app/alb-net-1/111",
             "State": {"Code": "active"},
-            "CreatedTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "CreatedTime": self.now - timedelta(days=5),
             "Scheme": "internet-facing",
         })
         self.load_balancers.append({
@@ -586,10 +925,10 @@ class Workflows(unittest.TestCase):
             "LoadBalancerName": "nlb-net-1",
             "LoadBalancerArn": "arn:aws:elasticloadbalancing:ap-southeast-1:123456789012:loadbalancer/net/nlb-net-1/222",
             "State": {"Code": "active"},
-            "CreatedTime": datetime.now(timezone.utc) - timedelta(days=5),
+            "CreatedTime": self.now - timedelta(days=5),
             "Scheme": "internet-facing",
         })
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        end = self.now.replace(minute=0, second=0, microsecond=0)
         timestamps = [end - timedelta(hours=i + 1) for i in range(24)]
         self.cw.get_metric_data.side_effect = lambda **kwargs: {
             "MetricDataResults": [

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+from datetime import datetime
 
 DEFAULTS = {
     "cpu_percent": 5,
@@ -68,12 +69,19 @@ def keep(tags):
     return any(t.get("Key") == "guardian:keep" and t.get("Value", "").lower() == "true" for t in tags)
 
 
-def idle(cpu, net_in, net_out, hours, cfg):
-    """Require >=80% of hourly samples for all three metrics, including real zeros."""
-    required = math.ceil(hours * .8)
+def _metric_data(series, hours, thresholds, units):
+    """Validate every sample and retain diagnostics without copying raw invalid data."""
+    required = math.ceil(hours * 0.8)
     values, invalid = {}, []
-    for name, samples in (("cpu", cpu), ("netin", net_in), ("netout", net_out)):
+    received, invalid_counts = {}, {}
+    for name, samples in series.items():
         values[name] = []
+        received[name] = len(samples) if isinstance(samples, (list, tuple)) else 0
+        invalid_counts[name] = 0
+        if not isinstance(samples, (list, tuple)):
+            invalid.append(name)
+            invalid_counts[name] = 1
+            continue
         for sample in samples:
             try:
                 valid = not isinstance(sample, bool) and isinstance(sample, (int, float)) and math.isfinite(sample) and sample >= 0
@@ -81,30 +89,52 @@ def idle(cpu, net_in, net_out, hours, cfg):
                 valid = False
             if not valid:
                 if name not in invalid: invalid.append(name)
+                invalid_counts[name] += 1
             else:
                 values[name].append(sample)
     counts = {name: len(samples) for name, samples in values.items()}
     missing = [name for name, count in counts.items() if count < required]
     evidence = {"window_hours": hours,
-                "thresholds": {"cpu_percent": cfg["cpu_percent"], "network_mib_hour": cfg["network_mib_hour"]},
+                "thresholds": dict(thresholds), "metric_units": dict(units),
                 "sample_counts": counts, "required_samples": required,
+                "received_sample_counts": received, "invalid_sample_counts": invalid_counts,
                 "missing_metrics": missing, "invalid_metrics": invalid,
-                "coverage": round(min(counts.values()) / hours, 3)}
-    if missing or invalid:
+                "coverage": round(min(counts.values()) / hours, 3),
+                "calculation_errors": [], "data_issues": []}
+    return values, evidence
+
+
+def _unusable(evidence):
+    return bool(evidence["missing_metrics"] or evidence["invalid_metrics"])
+
+
+def _overflow(evidence, metrics):
+    evidence["invalid_metrics"] = list(metrics)
+    evidence["calculation_errors"] = ["AGGREGATE_OVERFLOW"]
+    return "INSUFFICIENT_DATA", evidence
+
+
+def idle(cpu, net_in, net_out, hours, cfg):
+    """Require >=80% of hourly samples for all three metrics, including real zeros."""
+    values, evidence = _metric_data(
+        {"cpu": cpu, "netin": net_in, "netout": net_out}, hours,
+        {"cpu_percent": cfg["cpu_percent"], "network_mib_hour": cfg["network_mib_hour"]},
+        {"cpu": "Percent", "netin": "Bytes", "netout": "Bytes"},
+    )
+    if _unusable(evidence):
         return "INSUFFICIENT_DATA", evidence
     ordered = sorted(values["cpu"])
     p95 = ordered[max(0, math.ceil(.95 * len(ordered)) - 1)]
     try:
         # Each hourly Sum is averaged only over hours actually measured in that
         # direction; missing hours must not dilute traffic as if they were zero.
-        incoming_hour = math.fsum(values["netin"]) / counts["netin"]
-        outgoing_hour = math.fsum(values["netout"]) / counts["netout"]
+        incoming_hour = math.fsum(values["netin"]) / len(values["netin"])
+        outgoing_hour = math.fsum(values["netout"]) / len(values["netout"])
         mib_hour = (incoming_hour + outgoing_hour) / 1048576
     except OverflowError:
-        mib_hour = float("inf")
+        return _overflow(evidence, ("netin", "netout"))
     if not math.isfinite(mib_hour):
-        evidence["invalid_metrics"] = ["netin", "netout"]
-        return "INSUFFICIENT_DATA", evidence
+        return _overflow(evidence, ("netin", "netout"))
     evidence.update({"cpu_p95": round(p95, 3), "network_mib_hour": round(mib_hour, 3)})
     return ("REVIEW" if p95 < cfg["cpu_percent"] and mib_hour < cfg["network_mib_hour"] else "OK"), evidence
 
@@ -130,11 +160,15 @@ def _finding(kind, resource_id, level, reason, evidence):
 
 def evaluate_ec2(instance, metric_values, cfg, window_start):
     """Evaluate hourly, deduplicated CPU/NetworkIn/NetworkOut samples from a collector."""
-    if keep(instance.get("Tags", [])) or instance["State"]["Name"] != "running": return None
+    if keep(instance.get("Tags", [])) or instance.get("State", {}).get("Name") != "running": return None
     level, evidence = idle(*metric_values, cfg["window_hours"], cfg)
-    evidence.update({"observation_start": window_start.isoformat(), "launch_time": instance["LaunchTime"].isoformat()})
-    if instance["LaunchTime"] > window_start:
-        return _finding("EC2", instance["InstanceId"], "INSUFFICIENT_DATA", "Instance younger than observation window", evidence)
+    launch = instance.get("LaunchTime")
+    evidence.update({"observation_start": window_start.isoformat(), "launch_time": _iso(launch)})
+    issue = _creation_issue(launch, window_start)
+    if issue:
+        evidence["data_issues"].append(issue)
+        reason = "Instance younger than observation window" if issue == "RESOURCE_TOO_YOUNG" else "Resource creation time unavailable; not classified as idle"
+        return _finding("EC2", instance["InstanceId"], "INSUFFICIENT_DATA", reason, evidence)
     if level == "OK": return None
     reason = "Low CPU and network; confirm intended workload" if level == "REVIEW" else "Missing CloudWatch metrics; not classified as idle"
     return _finding("EC2", instance["InstanceId"], level, reason, evidence)
@@ -145,14 +179,16 @@ def evaluate_ebs(volume, observed_hours, cfg):
     if keep(volume.get("Tags", [])) or volume["State"] != "available" or volume["Attachments"]: return None
     level = "REVIEW" if observed_hours >= cfg["orphan_hours"] else "OBSERVING"
     return _finding("EBS", volume["VolumeId"], level, "Unattached volume; validate data retention",
-                    {"size_gib": volume["Size"], "observed_hours": round(observed_hours, 1), "threshold_hours": cfg["orphan_hours"]})
+                    {"size_gib": volume["Size"], "observed_hours": round(observed_hours, 1), "threshold_hours": cfg["orphan_hours"],
+                     "thresholds": {"orphan_hours": cfg["orphan_hours"]}})
 
 
 def evaluate_eip(address, observed_hours, cfg):
     if not address.get("AllocationId") or keep(address.get("Tags", [])) or address.get("AssociationId"): return None
     level = "REVIEW" if observed_hours >= cfg["orphan_hours"] else "OBSERVING"
     return _finding("EIP", address["AllocationId"], level, "Unassociated public IPv4; may be intentionally reserved",
-                    {"observed_hours": round(observed_hours, 1), "threshold_hours": cfg["orphan_hours"]})
+                    {"observed_hours": round(observed_hours, 1), "threshold_hours": cfg["orphan_hours"],
+                     "thresholds": {"orphan_hours": cfg["orphan_hours"]}})
 
 
 def evaluate_snapshot(snapshot, referenced_snapshot_ids, relationships_complete, cfg, now):
@@ -165,39 +201,27 @@ def evaluate_snapshot(snapshot, referenced_snapshot_ids, relationships_complete,
     return _finding("SNAPSHOT", rid, "REVIEW", "Old snapshot not referenced by listed AMIs; backup purpose requires review",
                     {"age_days": int(age_days), "snapshot_days": cfg["snapshot_days"],
                      "volume_id": snapshot.get("VolumeId"), "logical_volume_gib": snapshot["VolumeSize"],
-                     "relationships_complete": True})
-
-
-def _coverage(series, hours):
-    """Require enough hourly samples and reject a series containing invalid data."""
-    required = math.ceil(hours * 0.8)
-    try:
-        valid = all(
-            not isinstance(sample, bool)
-            and isinstance(sample, (int, float))
-            and math.isfinite(sample)
-            and sample >= 0
-            for sample in series
-        )
-    except OverflowError:
-        valid = False
-    return valid and len(series) >= required, round(len(series) / hours, 3)
+                     "relationships_complete": True, "thresholds": {"snapshot_days": cfg["snapshot_days"]},
+                     "snapshot_started_at": snapshot["StartTime"].isoformat(),
+                     "relationship_scope": "owned AMIs including disabled AMIs; backup/retention requires review"})
 
 
 def rds_idle(cpu, connections, hours, cfg):
-    cpu_ok, cpu_coverage = _coverage(cpu, hours)
-    connection_ok, connection_coverage = _coverage(connections, hours)
-    if not cpu_ok or not connection_ok:
-        return "INSUFFICIENT_DATA", None
-    cpu_ordered = sorted(cpu)
-    connection_ordered = sorted(connections)
+    values, evidence = _metric_data(
+        {"cpu": cpu, "connections": connections}, hours,
+        {"rds_cpu_percent": cfg["rds_cpu_percent"], "rds_connections": cfg["rds_connections"]},
+        {"cpu": "Percent", "connections": "Count"},
+    )
+    if _unusable(evidence):
+        return "INSUFFICIENT_DATA", evidence
+    cpu_ordered = sorted(values["cpu"])
+    connection_ordered = sorted(values["connections"])
     cpu_p95 = cpu_ordered[max(0, math.ceil(0.95 * len(cpu_ordered)) - 1)]
     connection_p95 = connection_ordered[max(0, math.ceil(0.95 * len(connection_ordered)) - 1)]
-    evidence = {
+    evidence.update({
         "cpu_p95": round(cpu_p95, 3),
         "connections_p95": round(connection_p95, 3),
-        "coverage": min(cpu_coverage, connection_coverage),
-    }
+    })
     status = (
         "REVIEW"
         if cpu_p95 < cfg["rds_cpu_percent"] and connection_p95 < cfg["rds_connections"]
@@ -206,49 +230,120 @@ def rds_idle(cpu, connections, hours, cfg):
     return status, evidence
 
 
-def _average_rule(values, hours, threshold, evidence_key, divisor=1):
-    enough, coverage = _coverage(values, hours)
-    if not enough:
-        return "INSUFFICIENT_DATA", None
+def _average_rule(samples, hours, threshold, evidence_key, metric_name, threshold_key):
+    values, evidence = _metric_data({metric_name: samples}, hours, {threshold_key: threshold}, {metric_name: "Count"})
+    if _unusable(evidence):
+        return "INSUFFICIENT_DATA", evidence
     try:
-        average = math.fsum(values) / len(values) / divisor
+        average = math.fsum(values[metric_name]) / len(values[metric_name])
     except OverflowError:
-        return "INSUFFICIENT_DATA", None
+        return _overflow(evidence, (metric_name,))
     if not math.isfinite(average):
-        return "INSUFFICIENT_DATA", None
-    evidence = {evidence_key: round(average, 3), "coverage": coverage}
+        return _overflow(evidence, (metric_name,))
+    evidence[evidence_key] = round(average, 3)
     return ("REVIEW" if average < threshold else "OK"), evidence
 
 
 def nat_idle(source_bytes, destination_bytes, hours, cfg):
-    source_ok, source_coverage = _coverage(source_bytes, hours)
-    destination_ok, destination_coverage = _coverage(destination_bytes, hours)
-    if not source_ok or not destination_ok:
-        return "INSUFFICIENT_DATA", None
+    values, evidence = _metric_data(
+        {"source": source_bytes, "destination": destination_bytes}, hours,
+        {"nat_mib_hour": cfg["nat_mib_hour"]}, {"source": "Bytes", "destination": "Bytes"},
+    )
+    if _unusable(evidence):
+        return "INSUFFICIENT_DATA", evidence
     try:
-        source_hour = math.fsum(source_bytes) / len(source_bytes)
-        destination_hour = math.fsum(destination_bytes) / len(destination_bytes)
+        source_hour = math.fsum(values["source"]) / len(values["source"])
+        destination_hour = math.fsum(values["destination"]) / len(values["destination"])
         average = (source_hour + destination_hour) / 1048576
     except OverflowError:
-        return "INSUFFICIENT_DATA", None
+        return _overflow(evidence, ("source", "destination"))
     if not math.isfinite(average):
-        return "INSUFFICIENT_DATA", None
-    evidence = {
-        "nat_mib_hour": round(average, 3),
-        "coverage": min(source_coverage, destination_coverage),
-    }
+        return _overflow(evidence, ("source", "destination"))
+    evidence["nat_mib_hour"] = round(average, 3)
     return ("REVIEW" if average < cfg["nat_mib_hour"] else "OK"), evidence
 
 
 def alb_idle(requests, hours, cfg):
-    return _average_rule(requests, hours, cfg["alb_requests_hour"], "requests_hour")
+    return _average_rule(requests, hours, cfg["alb_requests_hour"], "requests_hour", "requests", "alb_requests_hour")
 
 
 def nlb_idle(flows, hours, cfg):
-    return _average_rule(flows, hours, cfg["nlb_new_flows_hour"], "new_flows_hour")
+    return _average_rule(flows, hours, cfg["nlb_new_flows_hour"], "new_flows_hour", "flows", "nlb_new_flows_hour")
 
 
 def stale_multipart(initiated, now):
     return ("REVIEW" if (now - initiated).total_seconds() > 7 * 86400 else "OK"), {
-        "age_days": round((now - initiated).total_seconds() / 86400, 3)
+        "age_days": round((now - initiated).total_seconds() / 86400, 3),
+        "threshold_days": 7, "thresholds": {"multipart_days": 7},
+        "initiated_at": initiated.isoformat(),
     }
+
+
+def _iso(value):
+    return value.isoformat() if isinstance(value, datetime) and value.utcoffset() is not None else None
+
+
+def _creation_issue(created, window_start):
+    if _iso(created) is None:
+        return "MISSING_CREATION_TIME"
+    return "RESOURCE_TOO_YOUNG" if created > window_start else None
+
+
+def _metric_finding(kind, resource_id, created, level, evidence, window_start, reason):
+    evidence.update(created_at=_iso(created), observation_start=window_start.isoformat())
+    issue = _creation_issue(created, window_start)
+    if issue:
+        evidence["data_issues"].append(issue)
+        level = "INSUFFICIENT_DATA"
+        reason = "Resource younger than observation window" if issue == "RESOURCE_TOO_YOUNG" else "Resource creation time unavailable; not classified as idle"
+    if level == "OK":
+        return None
+    if level == "INSUFFICIENT_DATA" and not issue:
+        reason = "Missing CloudWatch metrics; not classified as idle"
+    return _finding(kind, resource_id, level, reason, evidence)
+
+
+def evaluate_rds(instance, metric_values, cfg, window_start):
+    if instance.get("DBInstanceStatus") != "available" or keep(instance.get("TagList", [])):
+        return None
+    level, evidence = rds_idle(*metric_values, cfg["window_hours"], cfg)
+    evidence.update(engine=instance.get("Engine"), instance_class=instance.get("DBInstanceClass"))
+    return _metric_finding("RDS", instance["DBInstanceIdentifier"], instance.get("InstanceCreateTime"),
+                           level, evidence, window_start, "Low database activity; confirm intended workload")
+
+
+def evaluate_nat_gateway(gateway, metric_values, cfg, window_start):
+    if gateway.get("State") != "available" or keep(gateway.get("Tags", [])):
+        return None
+    level, evidence = nat_idle(*metric_values, cfg["window_hours"], cfg)
+    evidence.update(vpc_id=gateway.get("VpcId"), subnet_id=gateway.get("SubnetId"))
+    return _metric_finding("NAT_GATEWAY", gateway["NatGatewayId"], gateway.get("CreateTime"),
+                           level, evidence, window_start, "Low NAT traffic; confirm intended workload")
+
+
+def evaluate_load_balancer(load_balancer, metric_values, cfg, window_start):
+    kind = {"application": "ALB", "network": "NLB"}.get(load_balancer.get("Type"))
+    if not kind or load_balancer.get("State", {}).get("Code") != "active" or keep(load_balancer.get("Tags", [])):
+        return None
+    evaluator = alb_idle if kind == "ALB" else nlb_idle
+    level, evidence = evaluator(*metric_values, cfg["window_hours"], cfg)
+    evidence["scheme"] = load_balancer.get("Scheme")
+    reason = "Low ALB request volume; confirm intended workload" if kind == "ALB" else "Low NLB flow volume; confirm intended workload"
+    return _metric_finding(kind, load_balancer["LoadBalancerName"], load_balancer.get("CreatedTime"),
+                           level, evidence, window_start, reason)
+
+
+def evaluate_s3_multipart(bucket, upload, now):
+    initiated = upload.get("Initiated")
+    evidence = {"bucket": bucket, "key": upload.get("Key"), "upload_id": upload.get("UploadId"),
+                "threshold_days": 7, "thresholds": {"multipart_days": 7}, "initiated_at": _iso(initiated)}
+    if _iso(initiated) is None or initiated > now:
+        evidence["data_issues"] = ["INVALID_INITIATION_TIME"]
+        return _finding("S3_MULTIPART", "s3://" + bucket + "/" + upload["Key"], "INSUFFICIENT_DATA",
+                        "Multipart initiation time unavailable; not classified as stale", evidence)
+    level, age_evidence = stale_multipart(initiated, now)
+    if level == "OK":
+        return None
+    evidence.update(age_evidence)
+    return _finding("S3_MULTIPART", "s3://" + bucket + "/" + upload["Key"], level,
+                    "Multipart upload older than 7 days; confirm whether it is still needed", evidence)

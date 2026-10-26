@@ -1,5 +1,46 @@
 # Validation matrix
 
+## Task 7 — nghiệm thu chín loại hiện có, 26/10/2026
+
+**Hoàn tất ở lớp code và kiểm thử local trong phạm vi người dùng đã chốt:** EC2, EBS volume, EIP, EBS snapshot, S3 multipart, RDS instance, NAT Gateway, ALB và NLB. Kiểm tra trên nhánh `duc`, sau commit nền `d9a3b26`, bằng Python 3.12.14; commit bàn giao và head được xác nhận trong PR. Kết quả này thay thế snapshot local cũ bên dưới khi đánh giá hành vi hiện tại.
+
+Theo PDF trang 17, Task 7 là luật đánh giá và bằng chứng, nhận dữ liệu từ Task 6. Báo cáo định hướng sáu nhóm dịch vụ và đối chiếu chi phí; chín loại đang có thuộc bốn nhóm. **THIẾU ĐẦU VÀO / chưa triển khai:** collector cho nhóm AI/analytics, giám sát/tích hợp, các dịch vụ khác chưa có trong bốn nhóm và billing/cost. Cần Task 6 bàn giao dữ liệu/quan hệ/quyền đọc cùng bộ rule được chốt trước khi nghiệm thu các phần này. Dashboard hiển thị đầy đủ evidence thuộc Task 9, ngoài phạm vi backend đã chốt cho lượt này. Xem [RULES.md](RULES.md) để biết hợp đồng chi tiết.
+
+| Tiêu chí Task 7 | Kết quả và bằng chứng hiện tại | Lớp xác minh |
+|---|---|---|
+| Evaluator và finding cho đủ chín loại | Mỗi finding có rule ID, lý do, khuyến nghị, ngưỡng, account/region/mốc scan; metric có đơn vị, statistic, cửa sổ và counts. `test_all_nine_types_have_context_thresholds_and_persisted_explanations` đối chiếu collector → worker → API/scan status/history | Unit + mock/Moto PASS |
+| Metric lỗi không dẫn đến ít hoạt động | Âm, boolean, sai kiểu, None, NaN/infinity, số nguyên cực lớn và aggregate overflow trả insufficient với diagnostics JSON hợp lệ; không lưu mẫu lỗi thô. Mẫu zero thật vẫn hợp lệ | `test_rules.py`, `test_workflows.py` PASS |
+| Độ phủ và ngưỡng đúng | Mỗi metric đủ 20/24 hoặc 135/168 mẫu; kiểm tra trước/bằng/sau ngưỡng, p95 nearest-rank, mean và NAT/EC2 trung bình riêng hai chiều. Tài nguyên mới/thiếu ngày tạo trả insufficient, không gọi CloudWatch | Unit + mock/Moto PASS |
+| Chất lượng timestamp và pagination | Giữ zero, lọc `[start,end)`, khử trùng timestamp; từ chối duplicate xung đột, sai status/ID/shape, token lặp và timestamp lệch lưới giờ. 24 điểm zero trong 24 phút không được coi là 24 giờ; test riêng năm namespace, phần dịch vụ hợp lệ vẫn được giữ | Mock/Moto PASS |
+| EBS/EIP và snapshot/S3 | Tách observation theo type/connection/region, migrate key cũ chỉ khi native ID nhận diện được loại; kiểm tra reset khi dùng lại, gap >48 giờ, expiry/clock rollback. Snapshot bỏ AMI tham chiếu, AMI disabled và AWS Backup; lỗi/truncation AMI không tạo review. Multipart đúng 7 ngày chưa stale | Unit + mock/Moto PASS |
+| Ngoại lệ và phục hồi finding | Tag suppression cho sáu loại có tag đầu vào; phản hồi nội bộ dùng ID ổn định cho mọi finding. Private candidates giữ finding bị feedback ẩn qua scan để clear/expiry có thể hiện lại; acknowledged/kept/ignore độc lập; lịch sử bất biến; API không lộ candidates | API + mock/Moto PASS |
+| Lỗi, giới hạn và lưu trữ | Lỗi theo dịch vụ tạo PARTIAL, giữ phần kết quả có bằng chứng. Cap 100 tài nguyên/loại, 50 hiển thị, 100 candidates và result JSON 300 KiB; truncation ghi rõ PARTIAL/CANDIDATE_LIMIT và giới hạn số đếm | Mock/Moto PASS |
+| Isolation và quyền đọc | Auth/tenant/connection/region, feedback ownership, observation và legacy migration được regression; hai bản target role được test invariant chỉ đọc | API + mock/Moto + static PASS |
+
+**Kết quả chạy trên source cuối:** 134 test, **133 PASS, 1 SKIPPED**, 0 failure/error; gồm 57 rule, 25 API, 49 workflow, 2 read-only contract và 1 AWS E2E bị tắt. Số lượng là phương thức test, chưa tính các subtest. Log AccessDenied/Throttling trong suite là dữ liệu mock của ca lỗi/retry có chủ đích.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B -c "import os, unittest; os.environ['CRG_AWS_E2E'] = '0'; suite = unittest.defaultTestLoader.discover('tests'); result = unittest.TextTestRunner(verbosity=1).run(suite); raise SystemExit(not result.wasSuccessful())"
+```
+
+AST parse của sáu file Python sửa đổi PASS; `git diff --check` PASS. Checker tài liệu offline kiểm tra 13 file, không có link hỏng. Review độc lập đọc diff ba module, kiểm tra oracle regression và chạy riêng 82 test rule/API PASS; verdict APPROVE, không còn phát hiện actionable trong phạm vi được giao.
+
+**CHƯA CHẠY:** AWS E2E với CloudWatch/inventory thật, Cognito/STS và deployment. Không có cloud mutation trong lượt này. Không chạy lại UI/browser hoặc SAM build vì không sửa UI/hạ tầng; kết quả UI cũ ở dưới là bằng chứng lịch sử. Local/mock/Moto không chứng minh hoàn tất release hoặc toàn bộ sáu nhóm của PDF.
+
+### Điểm chặn và điều kiện gỡ
+
+Không còn lỗi chặn đã biết đối với commit/push và review code trong phạm vi chín loại đã chốt. Các mục dưới đây chặn nghiệm thu AWS hoặc toàn bộ phạm vi PDF; không chuyển chúng thành PASS từ kết quả local.
+
+| Mục | Trạng thái / phạm vi bị chặn | Điều kiện gỡ |
+|---|---|---|
+| Revision Task 7 trên AWS | CHƯA XÁC MINH — release AWS của bản thay đổi này | Reviewer và executor khác nhau xác nhận commit, account/region/stack, template/IAM diff, UserPool không bị replace, Cognito admin-only và <=5 user, allowlist chỉ đọc; executor triển khai đúng revision đã review theo manual release gate bên dưới |
+| Finding thật và luồng tích hợp | CHƯA CHẠY — nghiệm thu rule trên AWS | Chạy harness sau deploy với hai tenant và manifest hợp lệ; có finding thật EC2/EBS/EIP/snapshot/S3 multipart, đủ thời gian quan sát/metric. RDS/NAT/ALB/NLB có evidence hoặc lý do skip chính xác `RESOURCE_NOT_AVAILABLE`/`COST_NOT_APPROVED`. Xác minh sai ExternalId, isolation, lỗi quyền PARTIAL và metric thiếu không thành REVIEW; các ca lỗi không do harness tự kiểm tra cần bằng chứng manual riêng. Lưu bằng chứng đã loại secrets |
+| Dịch vụ và chi phí còn thiếu trong PDF | THIẾU ĐẦU VÀO — nghiệm thu toàn bộ sáu nhóm/cost | Task 6 bổ sung collector, schema, quan hệ, quyền đọc và dữ liệu cost cho phần chưa hỗ trợ; sau đó chốt rule/ngưỡng, triển khai và kiểm thử tương ứng |
+
+Task 9 (dashboard hiển thị/thao tác đầy đủ) nằm ngoài phạm vi backend Task 7 đã chốt, cần nghiệm thu riêng. Tag chưa được đọc cho ALB/NLB/S3 multipart và việc chỉ phục hồi ứng viên còn giữ sau truncation là giới hạn đã công bố trong [RULES.md](RULES.md), không phải tính năng đã xác minh trên AWS.
+
+[DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md) có lịch sử triển khai/quét AWS trước đây; inventory rỗng hoặc bằng chứng của revision cũ không xác minh rule mới hay finding thật của lượt Task 7 này. Không lấy các vấn đề trong preflight cũ (ví dụ reserved concurrency đã được bỏ) làm blocker code hiện tại.
+
 ## Gia cố metric RDS/NAT/ALB/NLB — 26/10/2026
 
 Phạm vi: kiểm tra tính hợp lệ của mẫu, độ phủ, ngưỡng và công thức NAT trong helper thuần, cùng đường collector → worker → DynamoDB mô phỏng. Không đổi API, UI, IAM hoặc triển khai AWS.

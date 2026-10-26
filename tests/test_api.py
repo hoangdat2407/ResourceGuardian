@@ -207,6 +207,88 @@ class ApiTest(unittest.TestCase):
             visible = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"][0]["findings"]
             self.assertEqual(len(visible), 1)
 
+    def test_findings_and_feedback_are_empty_before_connecting(self):
+        profile = {key: value for key, value in self.profile.items() if key != "connection_version"}
+        for route in ("/findings", "/feedback"):
+            with self.subTest(route=route), patch.object(app, "get", return_value=profile), patch.object(app, "all_items") as query:
+                reply = app.api(event("GET", route), None)
+                self.assertEqual(reply["statusCode"], 200)
+                self.assertEqual(json.loads(reply["body"])["results"], [])
+                query.assert_not_called()
+
+    def test_feedback_clear_restores_worker_candidate_without_rewriting_history(self):
+        clock = int(time.time())
+        ident = "a" * 64
+        finding = {"finding_id": ident, "type": "EBS", "resource_id": "vol-demo", "level": "REVIEW"}
+        collected = {"findings": [finding], "counts": {"EBS": 1}, "errors": [], "partial": False}
+        context = MagicMock()
+        context.get_remaining_time_in_millis.return_value = 200000
+        for field, active, clear in (("kept", True, False), ("ignoreUntil", datetime_iso(clock + 3600), None)):
+            with self.subTest(field=field):
+                stored = {"PROFILE": self.profile}
+
+                def fake_get(pk, sk):
+                    return dict(stored.get(sk, {}))
+
+                def fake_put(item):
+                    stored[item["sk"]] = dict(item)
+
+                def fake_items(pk, prefix):
+                    return [value for key, value in stored.items() if key.startswith(prefix)]
+
+                def scan(scan_id):
+                    stored["RESULT#ap-southeast-1"] = {
+                        "pk": self.profile["pk"], "sk": "RESULT#ap-southeast-1", "status": "QUEUED",
+                        "scan_id": scan_id, "started_at": clock, "connection_version": "v1",
+                    }
+                    app.scan({"pk": self.profile["pk"], "region": "ap-southeast-1", "scan_id": scan_id, "connection_version": "v1"}, context)
+
+                with patch.object(app, "get", side_effect=fake_get), patch.object(app, "put", side_effect=fake_put), patch.object(app, "all_items", side_effect=fake_items), patch.object(app, "table") as table, patch.object(app, "session"), patch.object(app, "collect_region", return_value=collected), patch.object(app.time, "time", return_value=clock):
+                    table.put_item.side_effect = lambda **kwargs: fake_put(kwargs["Item"])
+                    scan("first")
+                    payload = {"region": "ap-southeast-1", "finding_id": ident, field: active}
+                    self.assertEqual(app.api(event("PUT", "/feedback", body=payload), None)["statusCode"], 200)
+                    scan("second")
+                    self.assertEqual(stored["RESULT#ap-southeast-1"]["findings"], [])
+                    snapshot = next(value for key, value in stored.items() if key.startswith("HISTORY#") and value["scan_id"] == "second")
+                    self.assertNotIn("candidates", snapshot)
+                    if field == "ignoreUntil":
+                        for offset, expected in ((3599, []), (3600, [finding])):
+                            with patch.object(app.time, "time", return_value=clock + offset):
+                                current = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"][0]
+                                self.assertEqual(current["findings"], expected)
+                        self.assertEqual(snapshot["findings"], [])
+                    payload[field] = clear
+                    self.assertEqual(app.api(event("PUT", "/feedback", body=payload), None)["statusCode"], 200)
+                    current = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"][0]
+                    self.assertEqual(current["findings"], [finding])
+                    self.assertEqual(current["finding_count"], 1)
+                    self.assertNotIn("candidates", current)
+                    self.assertEqual(snapshot["findings"], [])
+
+    def test_feedback_overlay_caps_restored_candidates_and_preserves_snapshot(self):
+        findings = [{"finding_id": f"{index:064x}", "resource_id": f"vol-{index}"} for index in range(60)]
+        row = {"status": "SUCCEEDED", "findings": [], "candidates": findings, "finding_count": 0}
+        visible = app.apply_feedback(row, {})
+        self.assertEqual(visible["finding_count"], 60)
+        self.assertEqual(len(visible["findings"]), 50)
+        self.assertEqual(visible["status"], "PARTIAL")
+        self.assertNotIn("candidates", visible)
+        self.assertEqual(row["findings"], [])
+
+    def test_scan_status_and_history_never_expose_private_candidates(self):
+        scan_id = str(uuid.uuid4())
+        row = {
+            "status": "SUCCEEDED", "scan_id": scan_id, "connection_version": "v1",
+            "findings": [], "candidates": [{"finding_id": "a" * 64}],
+        }
+        for path in ("/scans/" + scan_id, "/history"):
+            with self.subTest(path=path), patch.object(app, "get", return_value=self.profile), patch.object(app, "all_items", return_value=[row]), patch.object(app, "page_rows", return_value=([row], None)):
+                reply = app.api(event("GET", path), None)
+                self.assertEqual(reply["statusCode"], 200)
+                self.assertNotIn("candidates", json.loads(reply["body"])["results"][0])
+        self.assertIn("candidates", row)
+
     def test_feedback_rejects_unknown_finding_and_cross_region(self):
         payload = {"region": "ap-southeast-2", "finding_id": "a" * 64, "kept": True}
         with patch.object(app, "get", return_value=self.profile), patch.object(app, "put") as put:

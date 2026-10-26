@@ -36,6 +36,9 @@ STATIC_ROUTES = {
 }
 BODY_LIMIT = 10240
 FINDING_ID_RE = re.compile(r"[0-9a-f]{64}")
+FINDING_LIMIT = 50
+CANDIDATE_LIMIT = 100
+RESULT_BYTE_LIMIT = 300 * 1024
 
 
 def tenant_key(event):
@@ -224,19 +227,32 @@ def feedback_records(pk, profile, region=None):
     }
 
 
-def apply_feedback(row, feedback):
-    result = dict(row)
+def feedback_findings(candidates, feedback, now):
     findings = []
-    now = time.time()
-    for finding in row.get("findings", []):
+    for finding in candidates:
         item = dict(finding)
+        item.pop("acknowledged", None)
         record = feedback.get(item.get("finding_id"))
         if record and (record.get("kept") or record.get("ignore_until", 0) > now):
             continue
         if record and record.get("acknowledged"):
             item["acknowledged"] = True
         findings.append(item)
-    result["findings"] = findings
+    return findings
+
+
+def apply_feedback(row, feedback):
+    result = dict(row)
+    findings = feedback_findings(row.get("candidates", row.get("findings", [])), feedback, time.time())
+    result["findings"] = findings[:FINDING_LIMIT]
+    result["finding_count"] = len(findings)
+    if len(findings) > FINDING_LIMIT:
+        result["status"] = "PARTIAL"
+        errors = list(row.get("errors", []))
+        limit_error = {"type": "FINDING", "code": "RESOURCE_LIMIT"}
+        if limit_error not in errors:
+            errors.append(limit_error)
+        result["errors"] = errors
     return visible_result(result)
 
 
@@ -292,7 +308,7 @@ def _upsert_feedback(pk, profile, body):
         finding.get("finding_id") == ident
         for row in all_items(pk, "RESULT#")
         if row.get("region") == region and row.get("connection_version") == profile["connection_version"]
-        for finding in row.get("findings", [])
+        for finding in row.get("candidates", row.get("findings", []))
     )
     if not displayed and not existing:
         return None
@@ -396,6 +412,8 @@ def api(event, context):
             scan_id = enqueue(profile, now)
             return response(202 if scan_id else 409, {"scan_id": scan_id, "message": "Queued" if scan_id else "Scan lease is active"})
         if route == "/findings":
+            if not profile.get("connection_version"):
+                return response(200, {"results": []})
             regions = set(profile.get("regions", []))
             feedback = feedback_records(pk, profile)
             rows = [
@@ -407,7 +425,7 @@ def api(event, context):
         if route == "/history":
             limit, token = parse_limit(event)
             rows, next_token = page_rows(pk, "HISTORY#", profile, limit, token)
-            return response(200, {"results": rows, "next_token": next_token})
+            return response(200, {"results": [visible_result(row) for row in rows], "next_token": next_token})
         if route == "scan_status":
             scan_id = _valid_scan_id(path.rsplit("/", 1)[-1])
             rows = [
@@ -426,6 +444,8 @@ def api(event, context):
             return response(200, {"scan_id": scan_id, "results": [visible_result(row) for row in rows]})
         if route == "/feedback" and method == "GET":
             limit, token = parse_limit(event)
+            if not profile.get("connection_version"):
+                return response(200, {"results": [], "next_token": None})
             rows, next_token = page_rows(pk, feedback_prefix(profile), profile, limit, token)
             return response(200, {"results": rows, "next_token": next_token})
         if route == "/feedback":
@@ -479,6 +499,7 @@ def api(event, context):
 
 
 def visible_result(row):
+    row = {key: value for key, value in row.items() if key != "candidates"}
     if row.get("status") in ("QUEUED", "RUNNING") and time.time() - row.get("started_at", time.time()) > 900:
         return {**row, "status": "TIMED_OUT", "error": "Scan did not complete within 15 minutes. Check Lambda failure queue and retry."}
     return row
@@ -531,14 +552,27 @@ def scan(job, context):
     sess = session(profile)
 
     def observed(kind, ident, bad):
-        sk = "OBS#" + profile["connection_version"] + "#" + region + "#" + ident
+        prefix = "OBS#" + profile["connection_version"] + "#" + region + "#"
+        sk = prefix + kind + "#" + ident
         old = get(pk, sk)
+        # Old observations lacked the resource type. Only native AWS prefixes
+        # identify their owner safely during this one-way migration.
+        legacy_sk = prefix + ident
+        legacy_prefix = {"EBS": "vol-", "EIP": "eipalloc-"}.get(kind)
+        legacy = get(pk, legacy_sk) if legacy_prefix and ident.startswith(legacy_prefix) else {}
+        if not old:
+            old = legacy
         if not bad:
             if old:
                 table.delete_item(Key={"pk": pk, "sk": sk})
+            if legacy:
+                table.delete_item(Key={"pk": pk, "sk": legacy_sk})
             return 0
-        first = old.get("first", now) if now - old.get("last", now) <= 48 * 3600 else now
+        recent = old.get("expires", now + 1) > now and 0 <= now - old.get("last", now) <= 48 * 3600
+        first = old.get("first", now) if recent and old.get("first", now) <= now else now
         put({"pk": pk, "sk": sk, "first": first, "last": now, "expires": now + 7 * 86400})
+        if legacy:
+            table.delete_item(Key={"pk": pk, "sk": legacy_sk})
         return (now - first) / 3600
 
     def time_check():
@@ -547,19 +581,29 @@ def scan(job, context):
 
     collected = collect_region(
         sess, region, profile.get("account_id", ""), profile["settings"],
-        profile["service_groups"], datetime.now(timezone.utc), time_check, observed,
+        profile["service_groups"], datetime.fromtimestamp(now, timezone.utc), time_check, observed,
     )
     skip = {r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "IGNORE#" + profile["connection_version"] + "#" + region + "#") if r.get("expires", 0) > now}
     skip.update(r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "KEEP#" + profile["connection_version"] + "#" + region + "#") if r.get("enabled") is True)
     feedback = feedback_records(pk, profile, region)
-    actionable = [
+    candidates = [
         finding for finding in collected["findings"]
         if finding.get("resource_id") not in skip
-        and not feedback.get(finding["finding_id"], {}).get("kept")
-        and feedback.get(finding["finding_id"], {}).get("ignore_until", 0) <= now
     ]
+    actionable = feedback_findings(candidates, feedback, now)
+    # Retain feedback-hidden candidates so clearing feedback can restore them
+    # immediately. Keep currently displayed findings first when storage is full.
+    retained, seen = [], set()
+    displayed_ids = {finding["finding_id"] for finding in actionable[:FINDING_LIMIT]}
+    preferred = [finding for finding in candidates if finding["finding_id"] in displayed_ids]
+    for finding in preferred + candidates:
+        if finding["finding_id"] not in seen:
+            seen.add(finding["finding_id"])
+            retained.append(finding)
+    truncated_candidates = len(retained) > CANDIDATE_LIMIT
+    retained = retained[:CANDIDATE_LIMIT]
     errors = list(collected["errors"])
-    too_many_findings = len(actionable) > 50
+    too_many_findings = len(actionable) > FINDING_LIMIT
     if too_many_findings:
         errors.append({"type": "FINDING", "code": "RESOURCE_LIMIT"})
     current_profile = get(pk, "PROFILE")
@@ -570,10 +614,26 @@ def scan(job, context):
         "status": "PARTIAL" if collected["partial"] or too_many_findings else "SUCCEEDED",
         "started_at": marker.get("started_at", now), "completed_at": int(time.time()),
         "connection_version": profile["connection_version"], "counts": collected["counts"],
-        "findings": actionable[:50], "finding_count": len(actionable), "errors": errors,
+        "findings": actionable[:FINDING_LIMIT], "finding_count": len(actionable), "errors": errors,
+        "candidates": retained, "total_candidate_count": len(candidates),
         "note": "Limit 100 resources/type and 50 displayed findings/region. Only selected regions scanned.",
         "expires": now + 30 * 86400,
     }
+    # DynamoDB allows 400 KiB per item. Leave room for its attribute encoding
+    # and notification metadata, and report every retention limit as partial.
+    while True:
+        retained_findings = feedback_findings(retained, feedback, now)
+        result["findings"] = retained_findings[:FINDING_LIMIT]
+        result["finding_count"] = len(retained_findings)
+        if truncated_candidates:
+            result["status"] = "PARTIAL"
+            limit_error = {"type": "FINDING", "code": "CANDIDATE_LIMIT"}
+            if limit_error not in errors:
+                errors.append(limit_error)
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= RESULT_BYTE_LIMIT or not retained:
+            break
+        retained.pop()
+        truncated_candidates = True
     table.put_item(
         Item=json.loads(json.dumps(result), parse_float=Decimal),
         ConditionExpression="scan_id = :id AND run_token = :token",
@@ -585,7 +645,7 @@ def scan(job, context):
         ConditionExpression="scan_id = :id",
         ExpressionAttributeValues={":n": result["notification"], ":id": job["scan_id"]},
     )
-    put({**result, "sk": "HISTORY#" + str(now) + "#" + region + "#" + job["scan_id"]})
+    put({**visible_result(result), "sk": "HISTORY#" + str(now) + "#" + region + "#" + job["scan_id"]})
 
 def notify(profile, result):
     settings = profile.get("notifications", {})

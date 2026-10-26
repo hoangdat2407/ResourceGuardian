@@ -1,6 +1,6 @@
 # Cloud Resource Guardian — MVP
 
-Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Chưa có stack hoặc website công khai trên AWS: cần đăng nhập account của bạn để triển khai.
+Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
 
 ## 1. Thử ngay tại máy, không cần AWS
 
@@ -26,7 +26,7 @@ Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày
 | Theo dõi tiến độ | API trạng thái và frontend tự lấy kết quả mỗi năm giây |
 | Quét định kỳ | EventBridge kích hoạt Lambda scheduler mỗi giờ, chọn profile đến hạn |
 | Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, phân trang 20 lần quét region mặc định |
-| Phản hồi & Ngoại lệ | Tag `guardian:keep=true`; API `/feedback` (acknowledged, kept, ignoreUntil tối đa 30 ngày); hỗ trợ API `/keep` và `/ignore` nội bộ |
+| Phản hồi & Ngoại lệ | Tag `guardian:keep=true` cho EC2/EBS/EIP/snapshot/RDS/NAT; API `/feedback` cho cả chín loại (acknowledged, kept, ignoreUntil tối đa 30 ngày); handler `/keep` và `/ignore` tương thích ngược chỉ dùng nội bộ |
 | Email tùy chọn | SES mặc định tắt; khi được cấu hình, gửi tới email Cognito đã xác minh nếu danh sách REVIEW thay đổi |
 | Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry, SQS chỉ là failure destination |
 
@@ -109,16 +109,19 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 - **Snapshot:** tuổi >=ngưỡng, trạng thái completed, không có tag giữ lại và không tham chiếu bởi các AMI đã đọc (bao gồm AMI bị vô hiệu hóa); bỏ qua dấu hiệu AWS Backup. Nếu danh sách AMI bị cắt, báo PARTIAL với INVENTORY_TRUNCATED, không đánh dấu snapshot là không được tham chiếu.
 - **S3 multipart:** cảnh báo upload chưa hoàn tất có tuổi **lớn hơn** 7 ngày. Scanner không gọi ListParts/Complete/Abort và không suy diễn dung lượng hay chi phí.
 - **RDS:** instance available và đủ tuổi cửa sổ; CPUUtilization p95 và DatabaseConnections p95 đều dưới ngưỡng. Dùng hourly Maximum.
-- **NAT Gateway:** gateway available và đủ tuổi; trung bình hourly Sum của BytesInFromSource + BytesInFromDestination dưới ngưỡng.
+- **NAT Gateway:** gateway available và đủ tuổi; tính trung bình hourly Sum riêng cho BytesInFromSource và BytesInFromDestination theo số mẫu thực đo của từng chiều, cộng rồi đổi thành MiB/giờ để so ngưỡng.
 - **ALB/NLB:** load balancer active và đủ tuổi; ALB dùng RequestCount/Sum, NLB dùng NewFlowCount/Sum. Scanner không gọi DescribeTags.
-- Mọi metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ. Sample 0 thật được tính; thiếu mẫu tạo `INSUFFICIENT_DATA`, không được thay bằng 0 hoặc phân loại REVIEW.
+- Mọi metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ hợp lệ. Sample 0 thật được tính; thiếu mẫu, số âm, boolean, kiểu sai, NaN/infinity hoặc phép tính overflow tạo `INSUFFICIENT_DATA`. Tài nguyên thiếu thời điểm tạo hoặc chưa tồn tại đủ cửa sổ cũng có trạng thái này. Evidence giữ ngưỡng, đơn vị, số mẫu nhận/hợp lệ/lỗi và nguyên nhân; dữ liệu thiếu/lỗi không được thay bằng 0 hoặc dùng để kết luận ít hoạt động.
+- Collector lọc timestamp theo `[observation_start, observation_end)`, yêu cầu đúng lưới giờ và khử trùng điểm cùng timestamp. Phản hồi CloudWatch sai cấu trúc, timestamp xung đột hoặc phân trang lỗi làm scan `PARTIAL`, không sinh kết luận ít hoạt động từ chuỗi lỗi.
 - Bốn nhóm dịch vụ: `compute` (EC2), `storage` (EBS/Snapshot/S3 multipart), `database` (RDS), `network` (EIP/NAT/ALB/NLB). Profile cũ mặc định bật đủ bốn nhóm.
-- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region và 50 findings hiển thị/region; vượt giới hạn báo PARTIAL. Worker time budget 300 giây và dừng AWS reads trước 30 giây còn lại.
+- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn kết quả lưu ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt; `total_candidate_count` ghi số ứng viên trước khi cắt. Worker time budget 300 giây và dừng AWS reads trước 30 giây còn lại.
 - Một account/người dùng, tối đa ba region. Mọi PUT `/connection` tạo connection version mới; result, observation và feedback cũ không áp dụng cho kết nối mới.
 - Quét thủ công tối thiểu 15 phút/lần. Job chưa hoàn tất sau 15 phút hiển thị TIMED_OUT; async delivery có thể lặp nhưng worker lease và scan_id ngăn ghi đè kết quả mới.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
 Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
+
+Phạm vi Task 7 được chốt cho chín loại trên. Báo cáo còn nêu các dịch vụ khác trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, cùng dữ liệu billing/cost; cần đầu vào collector của Task 6 và bộ rule tương ứng trước khi nghiệm thu các phần này. Hoàn thiện hiển thị/thao tác dashboard thuộc Task 9; kiểm thử local chưa chứng minh đã chạy trên AWS thật.
 
 ## 6. API contract
 
@@ -131,15 +134,17 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 | PUT | /settings | Partial update cho 11 ngưỡng số; merge với setting hiện tại và kiểm tra min/max/type |
 | POST | /scans | Body rỗng; 202 + scan_id, 409 nếu đang chạy, 429 nếu chưa đủ 15 phút |
 | GET | /scans/{scanId} | Trạng thái/kết quả retained của scan thuộc tenant và kết nối hiện tại |
-| GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện |
+| GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện; bỏ keep/ignore khôi phục ứng viên còn được lưu |
 | GET | /history | Snapshot bất biến; `limit` 1–100, mặc định 20; `next_token` tenant-bound |
 | GET | /feedback | Feedback của kết nối hiện tại; `limit`/`next_token` như history |
 | PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; clear cũng dùng PUT |
 | PUT | /notifications | Chỉ `enabled` boolean; email nhận lấy từ Cognito GetUser |
-| PUT | /keep | `region`, `resource_id`, `enabled` boolean; bật/tắt giữ lại nội bộ (tương thích ngược) |
-| PUT | /ignore | `region`, `resource_id`, `days`; bỏ qua 1–30 ngày (tương thích ngược) |
+| PUT | /keep | Handler nội bộ tương thích ngược: `region`, `resource_id`, `enabled` boolean; template hiện không xuất bản route |
+| PUT | /ignore | Handler nội bộ tương thích ngược: `region`, `resource_id`, `days` 1–30; template hiện không xuất bản route |
 
-Frontend poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` theo dõi một job. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. Bản nâng cấp xóa cleanly `/ignore`; feedback cũ theo resource_id không được migrate và người dùng có thể cần áp dụng lại. SUCCEEDED chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
+Frontend poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` theo dõi một job. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. `SUCCEEDED` chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
+
+Worker giữ ứng viên bị `/feedback` che trong kết quả nội bộ, nên bỏ keep hoặc ignore hết hạn có thể làm chúng hiện lại mà không cần quét mới, kể cả sau lượt quét tiếp theo. Khả năng khôi phục giới hạn trong ứng viên được giữ; dữ liệu cũ chưa lưu ứng viên cần một lượt quét mới. API không xuất trường `candidates`. `/history` và `/scans/{scanId}` giữ snapshot lúc quét; phản hồi mới chỉ overlay `/findings`, không sửa lịch sử. Handler `/keep` và `/ignore` cũ dùng resource ID và chỉ tác động lượt quét sau; đây là cơ chế độc lập với `/feedback`.
 
 ## 7. Kiểm thử
 
