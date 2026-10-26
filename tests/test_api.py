@@ -9,7 +9,9 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
+import boto3
 from botocore.exceptions import ClientError
+from moto import mock_aws
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 os.environ.update(TABLE="test-table", WORKER_FUNCTION="test-worker", API_PRINCIPAL="test-api-role", SCAN_PRINCIPAL="test-worker-role")
@@ -37,6 +39,15 @@ class ApiTest(unittest.TestCase):
             "settings": app.config({}), "regions": ["ap-southeast-1"],
             "service_groups": list(app.SERVICE_GROUPS), "connection_version": "v1",
         }
+
+    @staticmethod
+    def dynamodb_table():
+        return boto3.resource("dynamodb", region_name="ap-southeast-1").create_table(
+            TableName="api-contract-table",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
 
     def test_body_cannot_select_another_tenant(self):
         with patch.object(app, "get", return_value=self.profile), patch.object(app, "all_items", return_value=[]) as query:
@@ -78,14 +89,25 @@ class ApiTest(unittest.TestCase):
 
     def test_connection_validates_allowlist_account_and_rotates(self):
         sts = MagicMock()
-        sts.client.return_value.get_caller_identity.return_value = {"Account": "123456789012"}
         payload = {"role_arn": "arn:aws:iam::123456789012:role/GuardianReadRole-demo", "regions": ["ap-southeast-1"], "service_groups": ["compute"]}
-        with patch.object(app, "get", return_value=self.profile), patch.object(app, "session", return_value=sts), patch.object(app, "all_items", return_value=[]), patch.object(app, "put") as put:
+        def identity():
+            # A scheduler may queue a scan while connection validation is in flight.
+            app.table.update_item(Key={"pk": self.profile["pk"], "sk": "PROFILE"},
+                                  UpdateExpression="SET last_queued = :now", ExpressionAttributeValues={":now": 1234})
+            return {"Account": "123456789012"}
+
+        sts.client.return_value.get_caller_identity.side_effect = identity
+        with mock_aws(), patch.object(app, "table", self.dynamodb_table()), patch.object(app, "session", return_value=sts):
+            app.put(self.profile)
             reply = app.api(event("PUT", "/connection", body=payload), None)
+            saved = app.get(self.profile["pk"], "PROFILE")
         self.assertEqual(reply["statusCode"], 200)
-        saved = put.call_args.args[0]
         self.assertEqual(saved["service_groups"], ["compute"])
         self.assertNotEqual(saved["connection_version"], "v1")
+        self.assertEqual(saved["account_id"], "123456789012")
+        self.assertEqual(saved["last_queued"], 1234)
+        self.assertEqual(saved["settings"], self.profile["settings"])
+        self.assertEqual(saved["external_id"], self.profile["external_id"])
 
     def test_connection_account_mismatch_is_rejected(self):
         sts = MagicMock()
@@ -224,33 +246,24 @@ class ApiTest(unittest.TestCase):
         context = MagicMock()
         context.get_remaining_time_in_millis.return_value = 200000
         for field, active, clear in (("kept", True, False), ("ignoreUntil", datetime_iso(clock + 3600), None)):
-            with self.subTest(field=field):
-                stored = {"PROFILE": self.profile}
-
-                def fake_get(pk, sk):
-                    return dict(stored.get(sk, {}))
-
-                def fake_put(item):
-                    stored[item["sk"]] = dict(item)
-
-                def fake_items(pk, prefix):
-                    return [value for key, value in stored.items() if key.startswith(prefix)]
-
+            with self.subTest(field=field), mock_aws(), patch.object(app, "table", self.dynamodb_table()):
+                app.put(self.profile)
+                first, second = str(uuid.uuid4()), str(uuid.uuid4())
                 def scan(scan_id):
-                    stored["RESULT#ap-southeast-1"] = {
+                    app.put({
                         "pk": self.profile["pk"], "sk": "RESULT#ap-southeast-1", "status": "QUEUED",
                         "scan_id": scan_id, "started_at": clock, "connection_version": "v1",
-                    }
+                        "region": "ap-southeast-1",
+                    })
                     app.scan({"pk": self.profile["pk"], "region": "ap-southeast-1", "scan_id": scan_id, "connection_version": "v1"}, context)
 
-                with patch.object(app, "get", side_effect=fake_get), patch.object(app, "put", side_effect=fake_put), patch.object(app, "all_items", side_effect=fake_items), patch.object(app, "table") as table, patch.object(app, "session"), patch.object(app, "collect_region", return_value=collected), patch.object(app.time, "time", return_value=clock):
-                    table.put_item.side_effect = lambda **kwargs: fake_put(kwargs["Item"])
-                    scan("first")
+                with patch.object(app, "session"), patch.object(app, "collect_region", return_value=collected), patch.object(app.time, "time", return_value=clock):
+                    scan(first)
                     payload = {"region": "ap-southeast-1", "finding_id": ident, field: active}
                     self.assertEqual(app.api(event("PUT", "/feedback", body=payload), None)["statusCode"], 200)
-                    scan("second")
-                    self.assertEqual(stored["RESULT#ap-southeast-1"]["findings"], [])
-                    snapshot = next(value for key, value in stored.items() if key.startswith("HISTORY#") and value["scan_id"] == "second")
+                    scan(second)
+                    self.assertEqual(app.get(self.profile["pk"], "RESULT#ap-southeast-1")["findings"], [])
+                    snapshot = next(row for row in app.all_items(self.profile["pk"], "HISTORY#") if row["scan_id"] == second)
                     self.assertNotIn("candidates", snapshot)
                     if field == "ignoreUntil":
                         for offset, expected in ((3599, []), (3600, [finding])):
@@ -265,6 +278,7 @@ class ApiTest(unittest.TestCase):
                     self.assertEqual(current["finding_count"], 1)
                     self.assertNotIn("candidates", current)
                     self.assertEqual(snapshot["findings"], [])
+                    self.assertEqual(app.get(self.profile["pk"], snapshot["sk"]), snapshot)
 
     def test_feedback_overlay_caps_restored_candidates_and_preserves_snapshot(self):
         findings = [{"finding_id": f"{index:064x}", "resource_id": f"vol-{index}"} for index in range(60)]
@@ -313,10 +327,24 @@ class ApiTest(unittest.TestCase):
 
     def test_revoked_role_returns_failed_worker_status(self):
         error = ClientError({"Error": {"Code": "AccessDenied", "Message": "Denied"}}, "AssumeRole")
-        job = {"pk": "TENANT#alice", "region": "ap-southeast-1", "scan_id": "s1", "connection_version": "v1"}
-        with patch.object(app, "scan", side_effect=error), patch.object(app, "table") as table:
-            result = app.worker(job, None)
-        self.assertEqual(table.put_item.call_args.kwargs["Item"]["status"], "FAILED")
+        now = int(time.time())
+        job = {"pk": "TENANT#alice", "region": "ap-southeast-1", "scan_id": str(uuid.uuid4()), "connection_version": "v1"}
+        context = MagicMock()
+        context.get_remaining_time_in_millis.return_value = 200000
+        with mock_aws(), patch.object(app, "table", self.dynamodb_table()), patch.object(app, "session", side_effect=error):
+            app.put(self.profile)
+            app.put({**job, "sk": "RESULT#ap-southeast-1", "status": "QUEUED", "started_at": now})
+            result = app.worker(job, context)
+            saved = app.get(job["pk"], "RESULT#ap-southeast-1")
+            history = list(app.all_items(job["pk"], "HISTORY#"))
+        self.assertEqual(saved["status"], "FAILED")
+        self.assertEqual(saved["error_code"], "ASSUME_ROLE_DENIED")
+        self.assertEqual(saved["started_at"], now)
+        self.assertGreater(saved["expires"], saved["completed_at"])
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["status"], "FAILED")
+        self.assertEqual(history[0]["scan_id"], job["scan_id"])
+        self.assertNotIn("Denied", json.dumps(saved))
         self.assertEqual(result, {"failed": True})
 
 

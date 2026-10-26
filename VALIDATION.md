@@ -1,5 +1,50 @@
 # Validation matrix
 
+## Task 8 — bàn giao local và harness, 27/10/2026
+
+**Hoàn tất phạm vi local + harness theo lựa chọn của người dùng; AWS acceptance chưa chạy.** Nhánh `codex/task-8-scheduling-recovery`, nền `767f32ad3da911f803f221ff271631a51ed66809`. Revision bàn giao là head của PR Task 8; SHA nền không đại diện cho thay đổi Task 8. PR đặt base `duc` trong khi PR Task 7 chưa merge vào `main`, để diff chỉ bao gồm Task 8. `AGENTS.md` có sẵn và vẫn giữ untracked. Xem [hợp đồng/ma trận/runbook Task 8](TASK8.md) và [quy trình harness AWS](TASK8-AWS.md).
+
+Thay đổi gồm admission/worker lease có điều kiện theo tenant/connection, RESULT + HISTORY nguyên tử, lịch theo tenant được cô lập lỗi và phân trang, giới hạn thời gian trước STS/từng trang collector, SQS recovery và đối soát deadline. SAM thêm recovery/reconcile, DLQ vận hành, đường lỗi delivery/async, IAM theo bảng/queue và alarm. `deploy.py --artifact` dùng nguyên byte ZIP đã review; validation tùy chọn này và mọi thử nghiệm deploy trong unittest đều dùng SDK mock, không upload AWS.
+
+| Kiểm tra trên source bàn giao | Kết quả và giới hạn |
+|---|---|
+| Toàn bộ backend, Python 3.12.14 | **194 test: 193 PASS, 1 AWS E2E SKIPPED**, 0 failure/error, 35.016 giây. Gồm 28 regression Task 8, 9 collector budget, 6 template invariant và 17 harness/deploy offline mới; giữ các suite rule/API/workflow hiện có |
+| SDK trong artifact cuối | **111/111 PASS**, 67.735 giây: API/workflow/Task 8/collector budget dùng boto3 1.43.111 và botocore 1.43.118 giải nén từ ZIP cuối; source được đối chiếu byte với ZIP. AWS vẫn mock/Moto, không phải chạy Lambda thật |
+| Bốn regression trước sửa | 2 FAIL + 2 ERROR trên nền: history transaction chưa có, terminal race vẫn đọc AWS, STS denial thiếu metadata/history, profile lỗi chặn scheduler. Sau sửa đều PASS |
+| UI smoke | PASS bằng Chrome headless trên máy: polling, feedback, cấu hình, history, mobile, phiên hết hạn |
+| UI fixture acceptance | PASS: trạng thái queued/running/failed/timed-out/partial/success-zero, lỗi/cooldown/phục hồi, 320/390/768/1440 px; đã xem ảnh timeout desktop và overview mobile |
+| Template | `cfn-lint template.yaml target-role.yaml --regions ap-southeast-1` PASS; 6 invariant PASS |
+| SAM transform offline | Reviewer dùng aws-sam-translator 1.115.0 trong môi trường công cụ riêng: PASS, 50 resource, không cycle trong đồ thị dependency. Thay CodeUri trong RAM bằng URI giả, không gọi AWS |
+| Review độc lập app/SAM | APPROVE sau khi đóng lỗi claim connection race, lease release khi GetItem lỗi, metadata/history, IAM DeleteItem và metric EventBridge |
+| Review độc lập harness/deploy | Không còn phát hiện actionable local/static; 17 offline tests PASS. Hard timeout phải có log runtime khớp request ID; exhausted phải có retry/condition/error code đúng; không lấy hết tuổi sự kiện làm bằng chứng hard timeout |
+| JavaScript/AST/docs/whitespace | `node --check web/app.js`, AST Python liên quan, checker Markdown và `git diff --check` PASS |
+| AWS | **CHƯA CHẠY**, không có cloud mutation. Không có profile/credentials khả dụng; người dùng chọn bàn giao local + harness trước |
+
+Lệnh backend cuối đã chạy với `CRG_AWS_E2E=0` trong tiến trình kiểm thử; log có AccessDenied/Throttling là dữ liệu mock có chủ đích. Bằng chứng cục bộ bị gitignore: `.preflight/task8/backend-final.txt`, `backend-final.json`, `artifact-sdk-tests.txt`, `artifact-sdk-tests.json`, `local-validation.json`; ảnh dưới `.preflight/task8/ui-smoke/` và `ui-fixture/`. Playwright bundled Chromium chưa được cài nên lần launch đầu không chạy được; chạy lại thành công bằng `CHROMIUM_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe`.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B -c "import os,unittest; os.environ['CRG_AWS_E2E']='0'; r=unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.discover('tests')); raise SystemExit(not r.wasSuccessful())"
+$env:CHROMIUM_EXECUTABLE = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$env:UI_QA_DIR = '.preflight/task8/ui-smoke'
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_smoke.py
+$env:UI_QA_DIR = '.preflight/task8/ui-fixture'
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_redesign.py
+.\.venv\Scripts\cfn-lint.exe template.yaml target-role.yaml --regions ap-southeast-1
+node --check web/app.js
+node .agents/skills/resourceguardian-delivering-task/scripts/check-doc-links.mjs
+git diff --check
+```
+
+Artifact đã đóng gói cho Python 3.12/Linux x86_64 từ `src/requirements.txt`, dùng Python runtime có pip vì `.venv` hiện không có pip. Gói cuối `.preflight/task8-artifacts/task8-final.zip`, **16.774.834 byte**, không chứa fault wrapper. Gói gây lỗi riêng chỉ thêm `task8_faults.py`. `artifacts.json` lưu snapshot tại thời điểm đóng gói trước commit: từng source hash, Git SHA nền, cờ `source_dirty=true`, tree hash và cả hai ZIP hash. Khi bàn giao commit, đối chiếu source tree/ZIP dưới đây với head PR:
+
+```text
+source_tree_sha256: 3d17a178a82f7811967c1443167ad28039c19c5723e4d20d3e39b9b7f665c1e6
+final_zip_sha256:   e059c4785ff216819ae4125780b6bcd19846e7b0278f017df0a6dd91cdcf1c50
+fault_zip_sha256:   e646b4d11767428462ecec829f3a9a03628d783e9d092a9036f519fd3db5073d
+```
+
+Khi có môi trường cloud: commit source đã review trước nghiệm thu, xác nhận account/stack test/region và hai user/role riêng, deploy đúng ZIP hash qua change set đã review, chạy đủ scenario và smoke lại artifact cuối sau khi loại wrapper. Harness từ chối AWS acceptance nếu source/template chưa commit. SHA commit có thể đổi sau bàn giao nhưng source tree/ZIP phải vẫn khớp manifest. Bộ kiểm tra local và artifact tồn tại không xác nhận IAM enforcement, tick EventBridge, async retry, hard timeout, SQS/redrive hoặc isolation trên AWS thật.
+
 ## Task 7 — nghiệm thu chín loại hiện có, 26/10/2026
 
 **Hoàn tất ở lớp code và kiểm thử local trong phạm vi người dùng đã chốt:** EC2, EBS volume, EIP, EBS snapshot, S3 multipart, RDS instance, NAT Gateway, ALB và NLB. Kiểm tra trên nhánh `duc`, sau commit nền `d9a3b26`, bằng Python 3.12.14; commit bàn giao và head được xác nhận trong PR. Kết quả này thay thế snapshot local cũ bên dưới khi đánh giá hành vi hiện tại.

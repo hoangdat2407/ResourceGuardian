@@ -2,6 +2,8 @@
 
 Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
 
+Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
+
 ## 1. Thử ngay tại máy, không cần AWS
 
 Cài Python 3.12, giải nén ZIP rồi mở terminal tại thư mục `Cloud-Resource-Guardian-MVP`:
@@ -28,7 +30,7 @@ Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày
 | Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, phân trang 20 lần quét region mặc định |
 | Phản hồi & Ngoại lệ | Tag `guardian:keep=true` cho EC2/EBS/EIP/snapshot/RDS/NAT; API `/feedback` cho cả chín loại (acknowledged, kept, ignoreUntil tối đa 30 ngày); handler `/keep` và `/ignore` tương thích ngược chỉ dùng nội bộ |
 | Email tùy chọn | SES mặc định tắt; khi được cấu hình, gửi tới email Cognito đã xác minh nếu danh sách REVIEW thay đổi |
-| Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry, SQS chỉ là failure destination |
+| Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry → SQS failure destination → recovery; đối soát TIMED_OUT mỗi 5 phút; DLQ vận hành |
 
 Ứng dụng không có quyền dừng hoặc xóa tài nguyên account cần quét. Người dùng kiểm tra cảnh báo rồi xử lý trong AWS Console.
 
@@ -116,7 +118,7 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 - Bốn nhóm dịch vụ: `compute` (EC2), `storage` (EBS/Snapshot/S3 multipart), `database` (RDS), `network` (EIP/NAT/ALB/NLB). Profile cũ mặc định bật đủ bốn nhóm.
 - Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn kết quả lưu ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt; `total_candidate_count` ghi số ứng viên trước khi cắt. Worker time budget 300 giây và dừng AWS reads trước 30 giây còn lại.
 - Một account/người dùng, tối đa ba region. Mọi PUT `/connection` tạo connection version mới; result, observation và feedback cũ không áp dụng cho kết nối mới.
-- Quét thủ công tối thiểu 15 phút/lần. Job chưa hoàn tất sau 15 phút hiển thị TIMED_OUT; async delivery có thể lặp nhưng worker lease và scan_id ngăn ghi đè kết quả mới.
+- Quét thủ công tối thiểu 15 phút/lần. Job có deadline 15 phút; API hiển thị TIMED_OUT khi quá hạn và reconciler lưu trạng thái/history ở lượt đối soát kế tiếp khi hạ tầng hoạt động bình thường. Admission, connection version và run token ngăn job trùng/cũ ghi đè kết quả mới. Không đủ 60 giây trước STS thì worker kết thúc TIMED_OUT; hết budget trong collector tạo PARTIAL với dữ liệu hợp lệ đã có.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
 Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
