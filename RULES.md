@@ -1,6 +1,6 @@
 # Mục 7 — Luật đánh giá và bằng chứng
 
-Giai đoạn này hỗ trợ EC2, EBS volume, Elastic IP và EBS snapshot bằng collector hiện có. Finding là đề nghị xem xét kèm bằng chứng, không phải quyết định dừng hoặc xóa tài nguyên. Collector cho các nhóm dịch vụ khác trong báo cáo chưa được hỗ trợ.
+Phần hợp đồng giai đoạn đầu bên dưới mô tả EC2, EBS volume, Elastic IP và EBS snapshot. Checkout hiện tại có thêm collector S3 multipart, RDS, NAT Gateway, ALB và NLB; mục “Rule metric mở rộng” đặc tả phần gia cố RDS/NAT/ALB/NLB. Các loại đang có chưa bao phủ toàn bộ nhóm dịch vụ và dữ liệu chi phí trong báo cáo. Finding là đề nghị xem xét kèm bằng chứng, không phải quyết định dừng hoặc xóa tài nguyên.
 
 `src/rules.py` chứa các hàm thuần, không gọi AWS, đọc/ghi DynamoDB hay lấy thời gian hệ thống. Worker trong `src/app.py` thu thập dữ liệu, truyền cấu hình/thời điểm, quản lý quan sát và áp dụng ngoại lệ. Mục 6 bàn giao collector theo hợp đồng bên dưới; mục 5 phối hợp API; mục 9 dùng finding và API phản hồi để hoàn thiện dashboard. Scheduler/retry và collector mới nằm ngoài phần thay đổi này.
 
@@ -40,6 +40,30 @@ network_mib_hour = (sum(NetworkIn) / count(NetworkIn)
 ```
 
 Chỉ tính khi cả ba metric đạt độ phủ yêu cầu và không có mẫu lỗi. Ví dụ, 20 giờ đo được đều có NetworkIn 1.1 MiB/giờ trong cửa sổ 24 giờ, NetworkOut bằng 0, vẫn được tính là 1.1 MiB/giờ; bốn giờ thiếu không kéo trung bình xuống như zero. Nếu số mẫu hai chiều khác nhau, mỗi chiều dùng mẫu số riêng. Đây là trung bình của các giờ thực đo, không khẳng định lưu lượng trong các giờ thiếu. Điều kiện đủ 80% không có nghĩa đủ mọi giờ; bằng chứng luôn công bố số mẫu thực tế. Instance mới hơn đầu cửa sổ có `INSUFFICIENT_DATA`, không kết luận ít hoạt động. Kết quả lịch sử đã lưu không được tính lại; công thức sửa áp dụng cho lượt quét mới.
+
+### Rule metric mở rộng: RDS, NAT Gateway, ALB và NLB
+
+`src/collectors.py` gọi trực tiếp `rds_idle`, `nat_idle`, `alb_idle`, `nlb_idle` trong `src/rules.py`. Các helper giữ hợp đồng trả `(status, evidence)`; trạng thái là `REVIEW`, `OK` hoặc `INSUFFICIENT_DATA`. Worker không công bố finding `OK`.
+
+Mỗi chuỗi metric bắt buộc cần ít nhất `ceil(window_hours × 0.8)` mẫu hợp lệ: 20 mẫu cho 24 giờ, 135 mẫu cho 168 giờ. Mẫu hợp lệ là `int`/`float` hữu hạn, không âm và không phải boolean; zero thật vẫn hợp lệ. Có bất kỳ mẫu âm, sai kiểu (kể cả `None`), boolean, NaN/infinity hoặc số nguyên quá lớn không chuyển được sang float thì cả rule trả `INSUFFICIENT_DATA`, ngay cả khi các mẫu còn lại đã đủ độ phủ. Không thay mẫu lỗi/thiếu bằng zero hoặc bỏ mẫu lỗi rồi tiếp tục phân loại.
+
+| Helper | Metric và phép tính | Điều kiện `REVIEW` |
+|---|---|---|
+| `rds_idle` | CPUUtilization và DatabaseConnections, hourly Maximum rồi p95 theo nearest rank | Cả CPU p95 và connections p95 thấp hơn `rds_cpu_percent` và `rds_connections` |
+| `nat_idle` | BytesInFromSource và BytesInFromDestination, hourly Sum; trung bình riêng từng chiều rồi cộng, đổi sang MiB/giờ | Nhỏ hơn `nat_mib_hour` |
+| `alb_idle` | RequestCount, hourly Sum rồi trung bình theo số giờ thực đo | Nhỏ hơn `alb_requests_hour` |
+| `nlb_idle` | NewFlowCount, hourly Sum rồi trung bình theo số giờ thực đo | Nhỏ hơn `nlb_new_flows_hour` |
+
+Giá trị bằng ngưỡng trả `OK`; quyết định dùng giá trị trước làm tròn. Mặc định các ngưỡng lần lượt là CPU RDS 5%, connections 1, NAT 1 MiB/giờ, ALB 1 request/giờ và NLB 1 new flow/giờ; cấu hình được validate bằng `config()`.
+
+```text
+nat_mib_hour = (sum(BytesInFromSource) / count(BytesInFromSource)
+              + sum(BytesInFromDestination) / count(BytesInFromDestination)) / 1048576
+```
+
+Ví dụ 24 mẫu source và 20 mẫu destination, mỗi mẫu tương ứng 0.48 MiB, cho tổng 0.96 MiB/giờ. Không chia tổng hai chiều cho số mẫu nhỏ hơn và không coi bốn giờ thiếu là zero. Cả hai chuỗi vẫn phải đạt độ phủ riêng; phép tính chỉ phản ánh các giờ đã đo, không khẳng định các giờ thiếu có mức sử dụng tương tự.
+
+Thiếu/lỗi metric hoặc phép tổng/trung bình bị overflow trả `("INSUFFICIENT_DATA", None)`; không đưa NaN/infinity vào evidence. Khi đủ dữ liệu, giữ các trường evidence hiện có: RDS có `cpu_p95`, `connections_p95`, `coverage`; NAT có `nat_mib_hour`, `coverage`; ALB/NLB có `requests_hour`/`new_flows_hour`, `coverage`. Collector có thể bổ sung metadata tài nguyên. Thay đổi công thức áp dụng cho lượt quét mới; không tính lại snapshot lịch sử đã lưu.
 
 ## 2. Finding và hợp đồng collector
 

@@ -507,6 +507,56 @@ class Workflows(unittest.TestCase):
                 self.assertEqual(result["findings"][0]["level"], "INSUFFICIENT_DATA")
                 json.dumps(result, allow_nan=False)
 
+    def test_invalid_rds_nat_alb_and_nlb_metrics_persist_as_insufficient(self):
+        old = datetime.now(timezone.utc) - timedelta(days=4)
+        self.rds_instances.append({"DBInstanceIdentifier": "db-demo", "DBInstanceArn": "arn:db", "DBInstanceStatus": "available", "InstanceCreateTime": old, "Engine": "postgres", "DBInstanceClass": "db.t4g.micro"})
+        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": old, "VpcId": "vpc-1", "SubnetId": "subnet-1"})
+        self.load_balancers.extend([
+            {"Type": "application", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "alb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/app/alb-demo/id", "Scheme": "internet-facing"},
+            {"Type": "network", "State": {"Code": "active"}, "CreatedTime": old, "LoadBalancerName": "nlb-demo", "LoadBalancerArn": "arn:aws:elasticloadbalancing:x:1:loadbalancer/net/nlb-demo/id", "Scheme": "internal"},
+        ])
+        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
+        invalid_values = (("negative", -1), ("boolean", False), ("null", None), ("string", "0"), ("nan", float("nan")), ("infinity", float("inf")), ("huge_integer", 10 ** 1000))
+        expected = {kind: "INSUFFICIENT_DATA" for kind in ("RDS", "NAT_GATEWAY", "ALB", "NLB")}
+        for label, value in invalid_values:
+            for invalid_ids in (("cpu", "source", "requests", "flows"), ("connections", "destination", "requests", "flows")):
+                with self.subTest(value=label, invalid_ids=invalid_ids):
+                    self.cw.get_metric_data.side_effect = lambda **kwargs: {
+                        "MetricDataResults": [
+                            {"Id": query["Id"], "StatusCode": "Complete", "Values": [value] + [0] * 23 if query["Id"] in invalid_ids else [0] * 24, "Timestamps": timestamps}
+                            for query in kwargs["MetricDataQueries"]
+                        ]
+                    }
+                    result = self.scan()
+                    self.assertEqual(result["status"], "SUCCEEDED")
+                    self.assertEqual(result["errors"], [])
+                    self.assertEqual({item["type"]: item["level"] for item in result["findings"]}, expected)
+                    json.dumps(result, allow_nan=False)
+
+    def test_nat_unequal_direction_sample_counts_use_each_direction_average(self):
+        self.nats.append({"NatGatewayId": "nat-demo", "State": "available", "CreateTime": datetime.now(timezone.utc) - timedelta(days=4), "VpcId": "vpc-1", "SubnetId": "subnet-1"})
+        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        timestamps = [end - timedelta(hours=hour + 1) for hour in range(24)]
+        for source_count, destination_count in ((24, 20), (20, 24)):
+            with self.subTest(source_count=source_count, destination_count=destination_count):
+                counts = {"source": source_count, "destination": destination_count}
+                self.cw.get_metric_data.side_effect = lambda **kwargs: {
+                    "MetricDataResults": [
+                        {"Id": query["Id"], "StatusCode": "Complete", "Values": [0.48 * 1048576] * counts[query["Id"]], "Timestamps": timestamps[:counts[query["Id"]]]}
+                        for query in kwargs["MetricDataQueries"]
+                    ]
+                }
+                result = self.scan()
+                self.assertEqual(result["status"], "SUCCEEDED")
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(len(result["findings"]), 1)
+                finding, = result["findings"]
+                self.assertEqual(finding["type"], "NAT_GATEWAY")
+                self.assertEqual(finding["level"], "REVIEW")
+                self.assertAlmostEqual(finding["evidence"]["nat_mib_hour"], 0.96)
+                json.dumps(result, allow_nan=False)
+
     def test_describe_addresses_called_without_max_results(self):
         self.addresses.append({"AllocationId": "eipalloc-test", "PublicIp": "203.0.113.10"})
         result = self.scan()

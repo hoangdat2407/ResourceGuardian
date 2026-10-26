@@ -359,5 +359,170 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(resources, before)
 
 
+class MetricRuleValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config({})
+        self.rules = (
+            ('RDS', rds_idle, ('cpu', 'connections'), ('cpu_p95', 'connections_p95')),
+            ('NAT', nat_idle, ('source_bytes', 'destination_bytes'), ('nat_mib_hour',)),
+            ('ALB', alb_idle, ('requests',), ('requests_hour',)),
+            ('NLB', nlb_idle, ('flows',), ('new_flows_hour',)),
+        )
+
+    def test_zero_samples_preserve_existing_tuple_and_evidence_schema(self):
+        for name, evaluator, metrics, evidence_keys in self.rules:
+            with self.subTest(rule=name):
+                series = [[0] * 24 for _ in metrics]
+                evidence = {key: 0 for key in evidence_keys}
+                evidence['coverage'] = 1
+                self.assertEqual(evaluator(*series, 24, self.cfg), ('REVIEW', evidence))
+
+    def test_each_metric_requires_ceil_eighty_percent_coverage(self):
+        for name, evaluator, metrics, _ in self.rules:
+            for hours, required in ((24, 20), (168, 135)):
+                cfg = config({'window_hours': hours})
+                with self.subTest(rule=name, hours=hours, count=required):
+                    series = [[0] * required for _ in metrics]
+                    level, evidence = evaluator(*series, hours, cfg)
+                    self.assertEqual(level, 'REVIEW')
+                    self.assertEqual(evidence['coverage'], round(required / hours, 3))
+                for index, metric in enumerate(metrics):
+                    with self.subTest(rule=name, hours=hours, metric=metric, count=required - 1):
+                        series = [[0] * hours for _ in metrics]
+                        series[index] = [0] * (required - 1)
+                        self.assertEqual(evaluator(*series, hours, cfg), ('INSUFFICIENT_DATA', None))
+
+    def test_missing_metric_is_not_replaced_with_zero(self):
+        for name, evaluator, metrics, _ in self.rules:
+            for index, metric in enumerate(metrics):
+                with self.subTest(rule=name, metric=metric):
+                    series = [[0] * 24 for _ in metrics]
+                    series[index] = []
+                    self.assertEqual(evaluator(*series, 24, self.cfg), ('INSUFFICIENT_DATA', None))
+
+    def test_any_invalid_sample_fails_closed_even_after_enough_valid_samples(self):
+        invalid_samples = (
+            -1, True, False, None, '0', {}, float('nan'), float('inf'), float('-inf'), 10**400,
+        )
+        for name, evaluator, metrics, _ in self.rules:
+            for index, metric in enumerate(metrics):
+                for invalid in invalid_samples:
+                    with self.subTest(rule=name, metric=metric, invalid=repr(invalid)):
+                        series = [[0] * 24 for _ in metrics]
+                        series[index].append(invalid)
+                        self.assertEqual(evaluator(*series, 24, self.cfg), ('INSUFFICIENT_DATA', None))
+
+    def test_rds_thresholds_are_strict_for_both_metrics(self):
+        cfg = config({'rds_cpu_percent': 7, 'rds_connections': 3})
+        for index, (metric, threshold, evidence_key) in enumerate((
+            ('cpu', 7, 'cpu_p95'), ('connections', 3, 'connections_p95'),
+        )):
+            for value, expected in ((threshold - 1, 'REVIEW'), (threshold, 'OK'), (threshold + 1, 'OK')):
+                with self.subTest(metric=metric, value=value):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [value] * 24
+                    level, evidence = rds_idle(*series, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], value)
+
+    def test_rds_preserves_nearest_rank_p95_for_both_metrics(self):
+        for index, (metric, threshold, evidence_key) in enumerate((
+            ('cpu', self.cfg['rds_cpu_percent'], 'cpu_p95'),
+            ('connections', self.cfg['rds_connections'], 'connections_p95'),
+        )):
+            for spikes, expected_value, expected in ((1, 0, 'REVIEW'), (2, threshold, 'OK')):
+                with self.subTest(metric=metric, spikes=spikes):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [0] * (24 - spikes) + [threshold] * spikes
+                    level, evidence = rds_idle(*series, 24, self.cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], expected_value)
+
+    def test_alb_and_nlb_thresholds_are_strict(self):
+        cfg = config({'alb_requests_hour': 20, 'nlb_new_flows_hour': 30})
+        for name, evaluator, threshold, evidence_key in (
+            ('ALB', alb_idle, 20, 'requests_hour'), ('NLB', nlb_idle, 30, 'new_flows_hour'),
+        ):
+            for value, expected in ((threshold - 1, 'REVIEW'), (threshold, 'OK'), (threshold + 1, 'OK')):
+                with self.subTest(rule=name, value=value):
+                    level, evidence = evaluator([value] * 24, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], value)
+
+    def test_alb_and_nlb_preserve_arithmetic_hourly_mean(self):
+        for name, evaluator, evidence_key in (
+            ('ALB', alb_idle, 'requests_hour'), ('NLB', nlb_idle, 'new_flows_hour'),
+        ):
+            for spike, expected_value, expected in ((12, 0.5, 'REVIEW'), (24, 1, 'OK')):
+                with self.subTest(rule=name, spike=spike):
+                    level, evidence = evaluator([0] * 23 + [spike], 24, self.cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], expected_value)
+
+    def test_nat_threshold_is_strict_for_either_direction(self):
+        cfg = config({'nat_mib_hour': 2})
+        for index, direction in enumerate(('source_bytes', 'destination_bytes')):
+            for rate, expected in ((1.5, 'REVIEW'), (2, 'OK'), (2.5, 'OK')):
+                with self.subTest(direction=direction, rate=rate):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [rate * 1048576] * 24
+                    level, evidence = nat_idle(*series, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence['nat_mib_hour'], rate)
+
+    def test_nat_partial_coverage_preserves_each_direction_measured_rate(self):
+        for hours, required in ((24, 20), (168, 135)):
+            cfg = config({'window_hours': hours})
+            for index, direction in enumerate(('source_bytes', 'destination_bytes')):
+                for rate, expected in ((0.5, 'REVIEW'), (1, 'OK'), (1.5, 'OK')):
+                    with self.subTest(hours=hours, direction=direction, rate=rate):
+                        series = [[0] * required, [0] * required]
+                        series[index] = [rate * 1048576] * required
+                        level, evidence = nat_idle(*series, hours, cfg)
+                        self.assertEqual(level, expected)
+                        self.assertEqual(evidence['nat_mib_hour'], rate)
+                        self.assertEqual(evidence['coverage'], round(required / hours, 3))
+
+    def test_nat_unequal_coverage_uses_each_direction_observed_hours(self):
+        for hours, required in ((24, 20), (168, 135)):
+            cfg = config({'window_hours': hours})
+            for source_count, destination_count in ((required, hours), (hours, required)):
+                for source_rate, destination_rate, expected_rate, expected in (
+                    (0.6, 0.3, 0.9, 'REVIEW'), (0.6, 0.4, 1, 'OK'), (0.6, 0.5, 1.1, 'OK'),
+                ):
+                    with self.subTest(hours=hours, source_count=source_count,
+                                      destination_count=destination_count, rate=expected_rate):
+                        source = [source_rate * 1048576] * source_count
+                        destination = [destination_rate * 1048576] * destination_count
+                        level, evidence = nat_idle(source, destination, hours, cfg)
+                        self.assertEqual(level, expected)
+                        self.assertAlmostEqual(evidence['nat_mib_hour'], expected_rate)
+                        self.assertEqual(evidence['coverage'], round(required / hours, 3))
+                        self.assertEqual(nat_idle(destination, source, hours, cfg), (level, evidence))
+
+    def test_extreme_finite_samples_never_produce_nonfinite_evidence(self):
+        for name, evaluator, metrics, evidence_keys in self.rules:
+            for index, metric in enumerate(metrics):
+                for value in (1e308, 10**308):
+                    with self.subTest(rule=name, metric=metric, value_type=type(value).__name__):
+                        series = [[0] * 24 for _ in metrics]
+                        series[index] = [value] * 24
+                        level, evidence = evaluator(*series, 24, self.cfg)
+                        self.assertIn(level, ('OK', 'INSUFFICIENT_DATA'))
+                        if level == 'INSUFFICIENT_DATA':
+                            self.assertIsNone(evidence)
+                        else:
+                            self.assertEqual(set(evidence), {*evidence_keys, 'coverage'})
+                            json.dumps(evidence, allow_nan=False)
+
+    def test_nat_combined_direction_overflow_fails_closed(self):
+        level, evidence = nat_idle([9e307] * 24, [9e307] * 24, 24, self.cfg)
+        self.assertIn(level, ('OK', 'INSUFFICIENT_DATA'))
+        if level == 'INSUFFICIENT_DATA':
+            self.assertIsNone(evidence)
+        else:
+            json.dumps(evidence, allow_nan=False)
+
+
 if __name__ == '__main__':
     unittest.main()

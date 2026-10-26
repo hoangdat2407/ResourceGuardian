@@ -169,8 +169,19 @@ def evaluate_snapshot(snapshot, referenced_snapshot_ids, relationships_complete,
 
 
 def _coverage(series, hours):
+    """Require enough hourly samples and reject a series containing invalid data."""
     required = math.ceil(hours * 0.8)
-    return len(series) >= required, round(len(series) / hours, 3)
+    try:
+        valid = all(
+            not isinstance(sample, bool)
+            and isinstance(sample, (int, float))
+            and math.isfinite(sample)
+            and sample >= 0
+            for sample in series
+        )
+    except OverflowError:
+        valid = False
+    return valid and len(series) >= required, round(len(series) / hours, 3)
 
 
 def rds_idle(cpu, connections, hours, cfg):
@@ -199,7 +210,12 @@ def _average_rule(values, hours, threshold, evidence_key, divisor=1):
     enough, coverage = _coverage(values, hours)
     if not enough:
         return "INSUFFICIENT_DATA", None
-    average = sum(values) / len(values) / divisor
+    try:
+        average = math.fsum(values) / len(values) / divisor
+    except OverflowError:
+        return "INSUFFICIENT_DATA", None
+    if not math.isfinite(average):
+        return "INSUFFICIENT_DATA", None
     evidence = {evidence_key: round(average, 3), "coverage": coverage}
     return ("REVIEW" if average < threshold else "OK"), evidence
 
@@ -209,9 +225,14 @@ def nat_idle(source_bytes, destination_bytes, hours, cfg):
     destination_ok, destination_coverage = _coverage(destination_bytes, hours)
     if not source_ok or not destination_ok:
         return "INSUFFICIENT_DATA", None
-    average = (sum(source_bytes) + sum(destination_bytes)) / min(
-        len(source_bytes), len(destination_bytes)
-    ) / 1048576
+    try:
+        source_hour = math.fsum(source_bytes) / len(source_bytes)
+        destination_hour = math.fsum(destination_bytes) / len(destination_bytes)
+        average = (source_hour + destination_hour) / 1048576
+    except OverflowError:
+        return "INSUFFICIENT_DATA", None
+    if not math.isfinite(average):
+        return "INSUFFICIENT_DATA", None
     evidence = {
         "nat_mib_hour": round(average, 3),
         "coverage": min(source_coverage, destination_coverage),
