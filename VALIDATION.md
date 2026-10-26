@@ -6,6 +6,22 @@
 
 Thay đổi gồm admission/worker lease có điều kiện theo tenant/connection, RESULT + HISTORY nguyên tử, lịch theo tenant được cô lập lỗi và phân trang, giới hạn thời gian trước STS/từng trang collector, SQS recovery và đối soát deadline. SAM thêm recovery/reconcile, DLQ vận hành, đường lỗi delivery/async, IAM theo bảng/queue và alarm. `deploy.py --artifact` dùng nguyên byte ZIP đã review; validation tùy chọn này và mọi thử nghiệm deploy trong unittest đều dùng SDK mock, không upload AWS.
 
+### Điểm chặn Task 8 và điều kiện gỡ
+
+**Không còn blocker code/local đã xác minh trong phạm vi bàn giao. Task 8 vẫn chưa được nghiệm thu AWS.** Các mục B1–B4 dưới đây chặn việc chạy hoặc công nhận bằng chứng cloud tương ứng; D1 là phụ thuộc tích hợp vào `main`, không chặn review Task 8 ở base `duc`.
+
+| ID / điểm chặn | Trạng thái và bằng chứng | Phần bị chặn | Điều kiện gỡ |
+|---|---|---|---|
+| B1 — Phiên AWS và account lab | **THIẾU ĐẦU VÀO.** Kiểm tra môi trường ngày 26/10/2026 không có named profile/credentials khả dụng; người dùng chọn bàn giao local + harness trước. Chưa xác minh lại phiên AWS live trong lượt bổ sung tài liệu này | Thực thi kiểm thử AWS | Chuẩn bị phiên AWS hợp lệ tại máy, xác nhận danh tính bằng STS, account lab, region `ap-southeast-1` và quyền executor trong phạm vi stack thử |
+| B2 — Stack và fixture nghiệm thu | **CHƯA XÁC MINH.** Chưa có bằng chứng live cho stack Task 8, hai Cognito subject và hai read role riêng, IAM/SES hoặc ZIP đang triển khai. Không kết luận các tài nguyên này chưa tồn tại | Điều kiện đầu vào của AWS E2E | Xác minh stack `cloud-resource-guardian-task8-test`, hai user/role riêng và manifest; review change set/IAM theo release gate hiện có; SES tắt; cả năm Lambda dùng đúng handler và `CodeSha256` của ZIP đã pin |
+| B3 — Luồng AWS và artifact cuối | **CHƯA CHẠY.** Các kết quả PASS hiện là local/mock/Moto/browser fixture/offline, chưa có evidence AWS Task 8 | Kết luận Task 8 hoàn tất AWS và phát hành revision này | Lưu evidence đạt cho tick EventBridge thật, manual/race/duplicate/reconnect, retry transient/exhausted, hard timeout, OnFailure → SQS → recovery, consumer redrive/DLQ và orphan reconciliation; bỏ wrapper, xác minh hash/config rồi chạy `final-smoke` trên artifact cuối |
+| B4 — Coverage cloud chưa tự động hóa đầy đủ | **CHƯA CÓ EVIDENCE** cho các ca nêu trong [harness AWS](TASK8-AWS.md): STS/service denial thật, dừng tiến trình đúng điểm dispatch, DynamoDB throttling/conflict thật, reconnect chắc chắn khi worker đang đọc, và destination alarm thực sự phát sinh. Local regression không thay thế evidence này | Việc công nhận các tiêu chí cloud tương ứng đã được kiểm chứng; không tự biến tất cả thành gate bắt buộc mới | Khi nghiệm thu phần tương ứng, bổ sung kịch bản manual được review hoặc mở rộng harness; ghi kết quả/evidence hoặc lý do ngoài phạm vi rõ ràng, không đổi ca chưa chạy thành PASS |
+| D1 — Phụ thuộc PR Task 7 #3 | **PHỤ THUỘC TÍCH HỢP VÀO MAIN.** PR Task 8 #4 đang đặt base `duc`; PR #3 chứa nền Task 7 chưa merge vào `main` tại thời điểm kiểm tra | Tích hợp Task 8 vào `main` theo chuỗi PR hiện tại | Merge PR #3 trước, chuyển base PR #4 sang `main`, rồi rà lại diff, dependency và kết quả kiểm tra. Đây không phải xung đột hoặc lỗi chặn review ở `duc` |
+
+**Giới hạn khác:** GitHub hiện chưa có check runs/commit statuses cho commit Task 8; không ghi là CI PASS hay CI FAIL và chưa có bằng chứng required-check gate. Alarm chưa có SNS/người nhận tự động là giới hạn thông báo vận hành đã công bố; chỉ chặn khi phạm vi nghiệm thu bao gồm gửi thông báo tự động. Không có cloud mutation trong lượt bổ sung blocker này.
+
+### Bằng chứng local đã đạt
+
 | Kiểm tra trên source bàn giao | Kết quả và giới hạn |
 |---|---|
 | Toàn bộ backend, Python 3.12.14 | **194 test: 193 PASS, 1 AWS E2E SKIPPED**, 0 failure/error, 35.016 giây. Gồm 28 regression Task 8, 9 collector budget, 6 template invariant và 17 harness/deploy offline mới; giữ các suite rule/API/workflow hiện có |

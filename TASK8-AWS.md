@@ -4,6 +4,8 @@ Harness [tests/task8_aws_harness.py](tests/task8_aws_harness.py) đã được c
 
 Phạm vi ở đây là điều phối, lưu trạng thái/history và đường phục hồi Task 8. Inventory rỗng vẫn có thể chứng minh luồng điều phối; nghiệm thu các rule trên tài nguyên thật thực hiện riêng theo [VALIDATION.md](VALIDATION.md). SES luôn tắt trên stack thử.
 
+**Các điểm chặn và điều kiện gỡ được ghi riêng trong mục Task 8 của [VALIDATION.md](VALIDATION.md):** B1 phiên AWS/account lab; B2 stack và fixture chưa xác minh; B3 luồng AWS/artifact cuối chưa có evidence; B4 coverage cloud chưa tự động hóa đầy đủ; D1 phụ thuộc PR Task 7 trước khi tích hợp `main`. Những mục này không được suy ra là PASS từ các test local bên dưới.
+
 ## Điều kiện trước khi chạy
 
 1. Hoàn tất local validation, review code/template/IAM và commit revision đã review. Harness từ chối nghiệm thu khi `src/` hoặc `template.yaml` còn thay đổi chưa commit; `AGENTS.md` cục bộ không ảnh hưởng kiểm tra này.
