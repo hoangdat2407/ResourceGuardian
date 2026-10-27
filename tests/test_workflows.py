@@ -468,6 +468,7 @@ class Workflows(unittest.TestCase):
         profile = {**self.profile, "notifications": {"enabled": True, "email": "verified@example.com"}}
         result = {"region": "ap-southeast-1", "findings": [{"type": "EBS", "resource_id": "vol-demo", "level": "REVIEW", "reason": "review"}]}
         with patch.dict(os.environ, SES_SENDER="owner@example.com"), patch.object(app.boto3, "client") as client:
+            client.return_value.send_email.return_value = {"MessageId": "message-dedup"}
             self.assertEqual(app.notify(profile, result), "SENT")
             self.assertEqual(app.notify(profile, result), "UNCHANGED")
             client.return_value.send_email.assert_called_once()
@@ -954,6 +955,53 @@ class Workflows(unittest.TestCase):
         finding_types = {f["type"] for f in result["findings"]}
         self.assertEqual(finding_types, {"EIP", "NAT_GATEWAY", "ALB", "NLB"})
 
+    def test_api_worker_multiregion_history_and_tenant_isolation(self):
+        self.profile["regions"] = ["ap-southeast-1", "ap-southeast-2"]
+        app.put(self.profile)
+        bob = {**self.profile, "pk": "TENANT#bob", "connection_version": "bob-v1"}
+        app.put(bob)
+        self.volumes.append({"VolumeId": "vol-shared-id", "State": "available", "Attachments": [], "Size": 40})
+        jobs = []
+
+        def dispatch(**kwargs):
+            jobs.append(json.loads(kwargs["Payload"]))
+            return {"StatusCode": 202}
+
+        with patch.object(app.invoker, "invoke", side_effect=dispatch):
+            queued = app.api(event("POST", "/scans"), None)
+        self.assertEqual(queued["statusCode"], 202)
+        scan_id = json.loads(queued["body"])["scan_id"]
+        for job in reversed(jobs):
+            app.worker(job, self.context)
+        reply = app.api(event("GET", "/scans/" + scan_id), None)
+        rows = json.loads(reply["body"])["results"]
+        self.assertEqual({row["region"] for row in rows}, set(self.profile["regions"]))
+        self.assertTrue(all(row["status"] == "SUCCEEDED" and row["counts"]["EBS"] == 1 for row in rows))
+        self.assertEqual(app.api(event("GET", "/scans/" + scan_id, user="bob"), None)["statusCode"], 404)
+        self.assertEqual(json.loads(app.api(event("GET", "/findings", user="bob"), None)["body"])["results"], [])
+        first = event("GET", "/history")
+        first["queryStringParameters"] = {"limit": "1"}
+        page = json.loads(app.api(first, None)["body"])
+        self.assertEqual(page["results"][0]["scan_id"], scan_id)
+        self.assertIsNotNone(page["next_token"])
+        second = event("GET", "/history")
+        second["queryStringParameters"] = {"limit": "1", "next_token": page["next_token"]}
+        next_page = json.loads(app.api(second, None)["body"])
+        self.assertEqual(next_page["results"][0]["scan_id"], scan_id)
+        self.assertNotEqual(page["results"][0]["region"], next_page["results"][0]["region"])
+        self.assertIsNone(next_page["next_token"])
+        stolen_cursor = event("GET", "/history", user="bob")
+        stolen_cursor["queryStringParameters"] = second["queryStringParameters"]
+        self.assertEqual(app.api(stolen_cursor, None)["statusCode"], 400)
+        ident = rows[0]["findings"][0]["finding_id"]
+        feedback = {"region": rows[0]["region"], "finding_id": ident, "kept": True}
+        self.assertEqual(app.api(event("PUT", "/feedback", user="bob", body=feedback), None)["statusCode"], 404)
+        self.assertEqual(app.api(event("PUT", "/feedback", body=feedback), None)["statusCode"], 200)
+        visible = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"]
+        self.assertEqual(
+            {row["region"]: [finding["resource_id"] for finding in row["findings"]] for row in visible},
+            {rows[0]["region"]: [], rows[1]["region"]: ["vol-shared-id"]},
+        )
 
 if __name__ == "__main__":
     unittest.main()
