@@ -455,7 +455,8 @@ class Workflows(unittest.TestCase):
 
     def test_transient_error_releases_lease_for_retry(self):
         scan_id = str(uuid.uuid4())
-        app.put({"pk": self.profile["pk"], "sk": "RESULT#ap-southeast-1", "scan_id": scan_id, "status": "QUEUED", "region": "ap-southeast-1", "connection_version": "v1"})
+        app.put({"pk": self.profile["pk"], "sk": "RESULT#ap-southeast-1", "scan_id": scan_id,
+                 "status": "QUEUED", "started_at": int(app.time.time()), "region": "ap-southeast-1", "connection_version": "v1"})
         self.session_patch.stop()
         with patch.object(app, "session", side_effect=ClientError({"Error": {"Code": "Throttling", "Message": "temporary"}}, "AssumeRole")):
             with self.assertRaises(ClientError):
@@ -527,11 +528,18 @@ class Workflows(unittest.TestCase):
         self.assertNotIn('candidates', detail)
 
     def test_time_budget_marks_current_and_remaining_collectors(self):
-        self.context.get_remaining_time_in_millis.return_value = 20000
+        remaining_calls = 0
+        def remaining():
+            nonlocal remaining_calls
+            remaining_calls += 1
+            return 200000 if remaining_calls == 1 else 20000
+
+        self.context.get_remaining_time_in_millis.side_effect = remaining
         result = self.scan()
         self.assertEqual(result["status"], "PARTIAL")
         self.assertTrue(result["errors"])
         self.assertTrue(all(error["code"] == "TIME_BUDGET" for error in result["errors"]))
+        self.assertGreater(remaining_calls, 1)
         self.sess.client.assert_not_called()
 
     def test_s3_bucket_and_upload_pagination_preserves_upload_identity(self):

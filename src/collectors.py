@@ -18,17 +18,30 @@ from rules import (
 )
 
 SDK_CONFIG = Config(
-    retries={"mode": "standard", "max_attempts": 5},
-    connect_timeout=5,
-    read_timeout=20,
+    retries={"mode": "standard", "total_max_attempts": 3},
+    connect_timeout=3,
+    read_timeout=10,
 )
 RESOURCE_LIMIT = 100
 
 
-def collect_pages(client, operation, result_key, *, max_items=RESOURCE_LIMIT, transform=None, **kwargs):
+def _pages(client, operation, time_check, **kwargs):
+    pages = iter(client.get_paginator(operation).paginate(**kwargs))
+    while True:
+        # A for-loop fetches the next AWS page before entering its body.
+        if time_check:
+            time_check()
+        try:
+            page = next(pages)
+        except StopIteration:
+            return
+        yield page
+
+
+def collect_pages(client, operation, result_key, *, max_items=RESOURCE_LIMIT, transform=None, time_check=None, **kwargs):
     """Collect at most max_items and detect one extra item without reading another page."""
     values = []
-    for page in client.get_paginator(operation).paginate(**kwargs):
+    for page in _pages(client, operation, time_check, **kwargs):
         items = page.get(result_key, [])
         if transform:
             items = transform(items)
@@ -39,7 +52,7 @@ def collect_pages(client, operation, result_key, *, max_items=RESOURCE_LIMIT, tr
     return values, False
 
 
-def metric_series(cw, queries, start, end):
+def metric_series(cw, queries, start, end, *, time_check=None):
     """Read all metric pages, retaining raw sample values for rule diagnostics."""
     args = {
         "MetricDataQueries": queries,
@@ -50,6 +63,8 @@ def metric_series(cw, queries, start, end):
     values = {query["Id"]: {} for query in queries}
     tokens = set()
     while True:
+        if time_check:
+            time_check()
         page = cw.get_metric_data(**args)
         if not isinstance(page, dict) or not isinstance(page.get("MetricDataResults", []), list):
             raise ValueError("Malformed metric API response")
@@ -177,6 +192,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         resources, truncated = collect_pages(
             client("ec2"), "describe_instances", "Reservations",
             transform=lambda reservations: [item for reservation in reservations for item in reservation.get("Instances", [])],
+            time_check=time_check,
         )
         counts["EC2"] = len(resources)
         limited("EC2", truncated)
@@ -192,12 +208,12 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
                     ("NetworkIn", "Sum", "netin"),
                     ("NetworkOut", "Sum", "netout"),
                 ])
-                series = metric_series(client("cloudwatch"), queries, start, end)
+                series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
                 metric_values = (series["cpu"], series["netin"], series["netout"])
             add(evaluate_ec2(instance, metric_values, cfg, start), resource_id)
 
     def ebs_volumes():
-        resources, truncated = collect_pages(client("ec2"), "describe_volumes", "Volumes")
+        resources, truncated = collect_pages(client("ec2"), "describe_volumes", "Volumes", time_check=time_check)
         counts["EBS"] = len(resources)
         limited("EBS", truncated)
         for volume in resources:
@@ -208,6 +224,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             add(evaluate_ebs(volume, hours, cfg), resource_id)
 
     def eip_addresses():
+        time_check()
         addresses = client("ec2").describe_addresses().get("Addresses", [])
         truncated = len(addresses) > RESOURCE_LIMIT
         resources = addresses[:RESOURCE_LIMIT] if truncated else addresses
@@ -223,10 +240,10 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             add(evaluate_eip(address, hours, cfg), resource_id)
 
     def snapshots():
-        resources, truncated = collect_pages(client("ec2"), "describe_snapshots", "Snapshots", OwnerIds=["self"])
+        resources, truncated = collect_pages(client("ec2"), "describe_snapshots", "Snapshots", time_check=time_check, OwnerIds=["self"])
         counts["SNAPSHOT"] = len(resources)
         limited("SNAPSHOT", truncated)
-        images, images_truncated = collect_pages(client("ec2"), "describe_images", "Images", Owners=["self"], IncludeDisabled=True)
+        images, images_truncated = collect_pages(client("ec2"), "describe_images", "Images", time_check=time_check, Owners=["self"], IncludeDisabled=True)
         if images_truncated:
             limited("SNAPSHOT", True)
             errors[-1]["code"] = "INVENTORY_TRUNCATED"
@@ -241,6 +258,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         s3 = client("s3")
         buckets, token = [], None
         while True:
+            time_check()
             args = {"BucketRegion": region, "MaxBuckets": 1000}
             if token:
                 args["ContinuationToken"] = token
@@ -249,15 +267,19 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             token = page.get("ContinuationToken")
             if not token:
                 break
-        uploads, truncated = [], False
+        count, truncated = 0, False
+        counts["S3_MULTIPART"] = count
         for bucket in buckets:
             try:
-                paginator = s3.get_paginator("list_multipart_uploads")
-                for page in paginator.paginate(Bucket=bucket["Name"], ExpectedBucketOwner=account_id):
-                    room = RESOURCE_LIMIT + 1 - len(uploads)
-                    uploads.extend((bucket["Name"], upload) for upload in page.get("Uploads", [])[:room])
-                    if len(uploads) > RESOURCE_LIMIT:
-                        uploads, truncated = uploads[:RESOURCE_LIMIT], True
+                for page in _pages(s3, "list_multipart_uploads", time_check, Bucket=bucket["Name"], ExpectedBucketOwner=account_id):
+                    for upload in page.get("Uploads", []):
+                        if count == RESOURCE_LIMIT:
+                            truncated = True
+                            break
+                        count += 1
+                        counts["S3_MULTIPART"] = count
+                        add(evaluate_s3_multipart(bucket["Name"], upload, now), [bucket["Name"], upload["Key"], upload["UploadId"]])
+                    if truncated:
                         break
                 if truncated:
                     break
@@ -265,14 +287,10 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
                 nonlocal partial
                 partial = True
                 errors.append({"type": "S3_MULTIPART", "code": _error_code(error), "resource_id": bucket["Name"]})
-        counts["S3_MULTIPART"] = len(uploads)
         limited("S3_MULTIPART", truncated)
-        for bucket, upload in uploads:
-            time_check()
-            add(evaluate_s3_multipart(bucket, upload, now), [bucket, upload["Key"], upload["UploadId"]])
 
     def rds_instances():
-        resources, truncated = collect_pages(client("rds"), "describe_db_instances", "DBInstances")
+        resources, truncated = collect_pages(client("rds"), "describe_db_instances", "DBInstances", time_check=time_check)
         counts["RDS"] = len(resources)
         limited("RDS", truncated)
         for instance in resources:
@@ -283,12 +301,12 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             metric_values = ([], [])
             if has_full_window(instance.get("InstanceCreateTime")):
                 queries = _queries("AWS/RDS", "DBInstanceIdentifier", resource_id, [("CPUUtilization", "Maximum", "cpu"), ("DatabaseConnections", "Maximum", "connections")])
-                series = metric_series(client("cloudwatch"), queries, start, end)
+                series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
                 metric_values = (series["cpu"], series["connections"])
             add(evaluate_rds(instance, metric_values, cfg, start), instance["DBInstanceArn"])
 
     def nat_gateways():
-        resources, truncated = collect_pages(client("ec2"), "describe_nat_gateways", "NatGateways")
+        resources, truncated = collect_pages(client("ec2"), "describe_nat_gateways", "NatGateways", time_check=time_check)
         counts["NAT_GATEWAY"] = len(resources)
         limited("NAT_GATEWAY", truncated)
         for gateway in resources:
@@ -299,13 +317,13 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             metric_values = ([], [])
             if has_full_window(gateway.get("CreateTime")):
                 queries = _queries("AWS/NATGateway", "NatGatewayId", resource_id, [("BytesInFromSource", "Sum", "source"), ("BytesInFromDestination", "Sum", "destination")])
-                series = metric_series(client("cloudwatch"), queries, start, end)
+                series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
                 metric_values = (series["source"], series["destination"])
             add(evaluate_nat_gateway(gateway, metric_values, cfg, start), resource_id)
 
     def load_balancers():
         partitions = {"ALB": [], "NLB": []}
-        for page in client("elbv2").get_paginator("describe_load_balancers").paginate():
+        for page in _pages(client("elbv2"), "describe_load_balancers", time_check):
             for item in page.get("LoadBalancers", []):
                 kind = {"application": "ALB", "network": "NLB"}.get(item.get("Type"))
                 if kind and len(partitions[kind]) <= RESOURCE_LIMIT:
@@ -330,7 +348,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
                     else:
                         queries = _queries("AWS/NetworkELB", "LoadBalancer", dimension, [("NewFlowCount", "Sum", "flows")])
                         metric_id = "flows"
-                    series = metric_series(client("cloudwatch"), queries, start, end)
+                    series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
                     metric_values = (series[metric_id],)
                 add(evaluate_load_balancer(load_balancer, metric_values, cfg, start), load_balancer["LoadBalancerArn"])
 

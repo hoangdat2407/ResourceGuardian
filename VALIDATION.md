@@ -1,5 +1,66 @@
 # Validation matrix
 
+## Task 8 — bàn giao local và harness, 27/10/2026
+
+**Hoàn tất phạm vi local + harness theo lựa chọn của người dùng; AWS acceptance chưa chạy.** Nhánh `codex/task-8-scheduling-recovery`, nền `767f32ad3da911f803f221ff271631a51ed66809`. Revision bàn giao là head của PR Task 8; SHA nền không đại diện cho thay đổi Task 8. PR đặt base `duc` trong khi PR Task 7 chưa merge vào `main`, để diff chỉ bao gồm Task 8. `AGENTS.md` có sẵn và vẫn giữ untracked. Xem [hợp đồng/ma trận/runbook Task 8](TASK8.md) và [quy trình harness AWS](TASK8-AWS.md).
+
+Thay đổi gồm admission/worker lease có điều kiện theo tenant/connection, RESULT + HISTORY nguyên tử, lịch theo tenant được cô lập lỗi và phân trang, giới hạn thời gian trước STS/từng trang collector, SQS recovery và đối soát deadline. SAM thêm recovery/reconcile, DLQ vận hành, đường lỗi delivery/async, IAM theo bảng/queue và alarm. `deploy.py --artifact` dùng nguyên byte ZIP đã review; validation tùy chọn này và mọi thử nghiệm deploy trong unittest đều dùng SDK mock, không upload AWS.
+
+### Điểm chặn Task 8 và điều kiện gỡ
+
+**Không còn blocker code/local đã xác minh trong phạm vi bàn giao. Task 8 vẫn chưa được nghiệm thu AWS.** Các mục B1–B4 dưới đây chặn việc chạy hoặc công nhận bằng chứng cloud tương ứng; D1 là phụ thuộc tích hợp vào `main`, không chặn review Task 8 ở base `duc`.
+
+| ID / điểm chặn | Trạng thái và bằng chứng | Phần bị chặn | Điều kiện gỡ |
+|---|---|---|---|
+| B1 — Phiên AWS và account lab | **THIẾU ĐẦU VÀO.** Kiểm tra môi trường ngày 26/10/2026 không có named profile/credentials khả dụng; người dùng chọn bàn giao local + harness trước. Chưa xác minh lại phiên AWS live trong lượt bổ sung tài liệu này | Thực thi kiểm thử AWS | Chuẩn bị phiên AWS hợp lệ tại máy, xác nhận danh tính bằng STS, account lab, region `ap-southeast-1` và quyền executor trong phạm vi stack thử |
+| B2 — Stack và fixture nghiệm thu | **CHƯA XÁC MINH.** Chưa có bằng chứng live cho stack Task 8, hai Cognito subject và hai read role riêng, IAM/SES hoặc ZIP đang triển khai. Không kết luận các tài nguyên này chưa tồn tại | Điều kiện đầu vào của AWS E2E | Xác minh stack `cloud-resource-guardian-task8-test`, hai user/role riêng và manifest; review change set/IAM theo release gate hiện có; SES tắt; cả năm Lambda dùng đúng handler và `CodeSha256` của ZIP đã pin |
+| B3 — Luồng AWS và artifact cuối | **CHƯA CHẠY.** Các kết quả PASS hiện là local/mock/Moto/browser fixture/offline, chưa có evidence AWS Task 8 | Kết luận Task 8 hoàn tất AWS và phát hành revision này | Lưu evidence đạt cho tick EventBridge thật, manual/race/duplicate/reconnect, retry transient/exhausted, hard timeout, OnFailure → SQS → recovery, consumer redrive/DLQ và orphan reconciliation; bỏ wrapper, xác minh hash/config rồi chạy `final-smoke` trên artifact cuối |
+| B4 — Coverage cloud chưa tự động hóa đầy đủ | **CHƯA CÓ EVIDENCE** cho các ca nêu trong [harness AWS](TASK8-AWS.md): STS/service denial thật, dừng tiến trình đúng điểm dispatch, DynamoDB throttling/conflict thật, reconnect chắc chắn khi worker đang đọc, và destination alarm thực sự phát sinh. Local regression không thay thế evidence này | Việc công nhận các tiêu chí cloud tương ứng đã được kiểm chứng; không tự biến tất cả thành gate bắt buộc mới | Khi nghiệm thu phần tương ứng, bổ sung kịch bản manual được review hoặc mở rộng harness; ghi kết quả/evidence hoặc lý do ngoài phạm vi rõ ràng, không đổi ca chưa chạy thành PASS |
+| D1 — Phụ thuộc PR Task 7 #3 | **PHỤ THUỘC TÍCH HỢP VÀO MAIN.** PR Task 8 #4 đang đặt base `duc`; PR #3 chứa nền Task 7 chưa merge vào `main` tại thời điểm kiểm tra | Tích hợp Task 8 vào `main` theo chuỗi PR hiện tại | Merge PR #3 trước, chuyển base PR #4 sang `main`, rồi rà lại diff, dependency và kết quả kiểm tra. Đây không phải xung đột hoặc lỗi chặn review ở `duc` |
+
+**Giới hạn khác:** GitHub hiện chưa có check runs/commit statuses cho commit Task 8; không ghi là CI PASS hay CI FAIL và chưa có bằng chứng required-check gate. Alarm chưa có SNS/người nhận tự động là giới hạn thông báo vận hành đã công bố; chỉ chặn khi phạm vi nghiệm thu bao gồm gửi thông báo tự động. Không có cloud mutation trong lượt bổ sung blocker này.
+
+### Bằng chứng local đã đạt
+
+| Kiểm tra trên source bàn giao | Kết quả và giới hạn |
+|---|---|
+| Toàn bộ backend, Python 3.12.14 | **194 test: 193 PASS, 1 AWS E2E SKIPPED**, 0 failure/error, 35.016 giây. Gồm 28 regression Task 8, 9 collector budget, 6 template invariant và 17 harness/deploy offline mới; giữ các suite rule/API/workflow hiện có |
+| SDK trong artifact cuối | **111/111 PASS**, 67.735 giây: API/workflow/Task 8/collector budget dùng boto3 1.43.111 và botocore 1.43.118 giải nén từ ZIP cuối; source được đối chiếu byte với ZIP. AWS vẫn mock/Moto, không phải chạy Lambda thật |
+| Bốn regression trước sửa | 2 FAIL + 2 ERROR trên nền: history transaction chưa có, terminal race vẫn đọc AWS, STS denial thiếu metadata/history, profile lỗi chặn scheduler. Sau sửa đều PASS |
+| UI smoke | PASS bằng Chrome headless trên máy: polling, feedback, cấu hình, history, mobile, phiên hết hạn |
+| UI fixture acceptance | PASS: trạng thái queued/running/failed/timed-out/partial/success-zero, lỗi/cooldown/phục hồi, 320/390/768/1440 px; đã xem ảnh timeout desktop và overview mobile |
+| Template | `cfn-lint template.yaml target-role.yaml --regions ap-southeast-1` PASS; 6 invariant PASS |
+| SAM transform offline | Reviewer dùng aws-sam-translator 1.115.0 trong môi trường công cụ riêng: PASS, 50 resource, không cycle trong đồ thị dependency. Thay CodeUri trong RAM bằng URI giả, không gọi AWS |
+| Review độc lập app/SAM | APPROVE sau khi đóng lỗi claim connection race, lease release khi GetItem lỗi, metadata/history, IAM DeleteItem và metric EventBridge |
+| Review độc lập harness/deploy | Không còn phát hiện actionable local/static; 17 offline tests PASS. Hard timeout phải có log runtime khớp request ID; exhausted phải có retry/condition/error code đúng; không lấy hết tuổi sự kiện làm bằng chứng hard timeout |
+| JavaScript/AST/docs/whitespace | `node --check web/app.js`, AST Python liên quan, checker Markdown và `git diff --check` PASS |
+| AWS | **CHƯA CHẠY**, không có cloud mutation. Không có profile/credentials khả dụng; người dùng chọn bàn giao local + harness trước |
+
+Lệnh backend cuối đã chạy với `CRG_AWS_E2E=0` trong tiến trình kiểm thử; log có AccessDenied/Throttling là dữ liệu mock có chủ đích. Bằng chứng cục bộ bị gitignore: `.preflight/task8/backend-final.txt`, `backend-final.json`, `artifact-sdk-tests.txt`, `artifact-sdk-tests.json`, `local-validation.json`; ảnh dưới `.preflight/task8/ui-smoke/` và `ui-fixture/`. Playwright bundled Chromium chưa được cài nên lần launch đầu không chạy được; chạy lại thành công bằng `CHROMIUM_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe`.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B -c "import os,unittest; os.environ['CRG_AWS_E2E']='0'; r=unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.discover('tests')); raise SystemExit(not r.wasSuccessful())"
+$env:CHROMIUM_EXECUTABLE = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$env:UI_QA_DIR = '.preflight/task8/ui-smoke'
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_smoke.py
+$env:UI_QA_DIR = '.preflight/task8/ui-fixture'
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_redesign.py
+.\.venv\Scripts\cfn-lint.exe template.yaml target-role.yaml --regions ap-southeast-1
+node --check web/app.js
+node .agents/skills/resourceguardian-delivering-task/scripts/check-doc-links.mjs
+git diff --check
+```
+
+Artifact đã đóng gói cho Python 3.12/Linux x86_64 từ `src/requirements.txt`, dùng Python runtime có pip vì `.venv` hiện không có pip. Gói cuối `.preflight/task8-artifacts/task8-final.zip`, **16.774.834 byte**, không chứa fault wrapper. Gói gây lỗi riêng chỉ thêm `task8_faults.py`. `artifacts.json` lưu snapshot tại thời điểm đóng gói trước commit: từng source hash, Git SHA nền, cờ `source_dirty=true`, tree hash và cả hai ZIP hash. Khi bàn giao commit, đối chiếu source tree/ZIP dưới đây với head PR:
+
+```text
+source_tree_sha256: 3d17a178a82f7811967c1443167ad28039c19c5723e4d20d3e39b9b7f665c1e6
+final_zip_sha256:   e059c4785ff216819ae4125780b6bcd19846e7b0278f017df0a6dd91cdcf1c50
+fault_zip_sha256:   e646b4d11767428462ecec829f3a9a03628d783e9d092a9036f519fd3db5073d
+```
+
+Khi có môi trường cloud: commit source đã review trước nghiệm thu, xác nhận account/stack test/region và hai user/role riêng, deploy đúng ZIP hash qua change set đã review, chạy đủ scenario và smoke lại artifact cuối sau khi loại wrapper. Harness từ chối AWS acceptance nếu source/template chưa commit. SHA commit có thể đổi sau bàn giao nhưng source tree/ZIP phải vẫn khớp manifest. Bộ kiểm tra local và artifact tồn tại không xác nhận IAM enforcement, tick EventBridge, async retry, hard timeout, SQS/redrive hoặc isolation trên AWS thật.
+
 ## Task 7 — nghiệm thu chín loại hiện có, 26/10/2026
 
 **Hoàn tất ở lớp code và kiểm thử local trong phạm vi người dùng đã chốt:** EC2, EBS volume, EIP, EBS snapshot, S3 multipart, RDS instance, NAT Gateway, ALB và NLB. Kiểm tra trên nhánh `duc`, sau commit nền `d9a3b26`, bằng Python 3.12.14; commit bàn giao và head được xác nhận trong PR. Kết quả này thay thế snapshot local cũ bên dưới khi đánh giá hành vi hiện tại.
