@@ -10,7 +10,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config
 from rules import config, keep, evaluate_ec2, evaluate_ebs, evaluate_eip, evaluate_snapshot
 from collectors import SDK_CONFIG, collect_region
@@ -590,28 +590,132 @@ def scan(job, context):
 def notify(profile, result):
     settings = profile.get("notifications", {})
     sender = os.environ.get("SES_SENDER", "")
-    if not settings.get("enabled") or not sender: return "DISABLED"
-    candidates = sorted({f["type"] + ":" + f["resource_id"] for f in result["findings"] if f["level"] == "REVIEW"})
-    # Track even an empty set, so resources that resolve then reappear alert again.
-    digest = hashlib.sha256(json.dumps(candidates).encode()).hexdigest()
-    key = "NOTICE#" + profile["connection_version"] + "#" + result["region"]
-    previous = get(profile["pk"], key)
-    if previous.get("fingerprint") == digest: return "UNCHANGED"
-    if not candidates:
-        put({"pk": profile["pk"], "sk": key, "fingerprint": digest})
-        return "NO_NEW_FINDINGS"
+    if not settings.get("enabled") or not sender:
+        return "DISABLED"
+    recipient = settings.get("email")
+    if not recipient:
+        return "DISABLED"
+    candidates = [finding for finding in result["findings"] if finding["level"] == "REVIEW"]
+    identities = sorted({
+        json.dumps([finding["type"], finding["resource_id"], finding.get("rule_id", "")])
+        for finding in candidates
+    })
+    digest = hashlib.sha256(json.dumps(identities).encode()).hexdigest()
+    # A new verified recipient must not inherit another recipient's dedup state.
+    recipient_key = hashlib.sha256(recipient.encode()).hexdigest()
+    key = "NOTICE#" + profile["connection_version"] + "#" + result["region"] + "#" + recipient_key
+    now = int(time.time())
     try:
-        lines = ["Cloud Resource Guardian", "Region: " + result["region"], "Các tài nguyên cần kiểm tra:"]
-        lines += [f['type'] + " " + f['resource_id'] + ": " + f['reason'] for f in result["findings"] if f["level"] == "REVIEW"]
-        lines += ["Mở dashboard: " + os.environ.get("WEB_URL", ""), "Đây là ứng viên cần kiểm tra; hệ thống không tự dừng hoặc xóa."]
-        boto3.client("ses", config=SDK_CONFIG).send_email(Source=sender, Destination={"ToAddresses": [settings["email"]]},
+        previous = get(profile["pk"], key)
+    except (ClientError, BotoCoreError):
+        log.exception("Could not read notification state; no SES request made")
+        return "STATE_FAILED"
+    if previous.get("fingerprint") == digest:
+        return "UNCHANGED"
+    if previous.get("status") == "SENDING" and previous.get("cooldown_until", 0) > now:
+        return "IN_PROGRESS"
+    if candidates and previous.get("cooldown_until", 0) > now:
+        return "COOLDOWN"
+
+    token = str(uuid.uuid4())
+    record = {**previous, "pk": profile["pk"], "sk": key, "attempt_token": token}
+    if candidates:
+        record.update(
+            status="SENDING", attempted_at=now, attempt_fingerprint=digest,
+            cooldown_until=now + config(profile.get("settings", {}))["interval_hours"] * 3600,
+            scan_id=result.get("scan_id", ""),
+        )
+        record.pop("message_id", None)
+        record.pop("error_code", None)
+    else:
+        # Resolution resets dedup, but never resets the last attempt's cooldown.
+        record["fingerprint"] = digest
+        record.setdefault("status", "NO_NEW_FINDINGS")
+        if record["status"] == "SENDING":
+            record.update(status="UNKNOWN", error_code="AcceptanceNotRecorded")
+    condition = "attempt_token = :previous" if previous.get("attempt_token") else "attribute_not_exists(attempt_token)"
+    claim = {"ConditionExpression": condition}
+    if previous.get("attempt_token"):
+        claim["ExpressionAttributeValues"] = {":previous": previous["attempt_token"]}
+    try:
+        table.put_item(Item=json.loads(json.dumps(record), parse_float=Decimal), **claim)
+    except ClientError as error:
+        if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return "IN_PROGRESS"
+        log.exception("Could not claim notification; no SES request made")
+        return "STATE_FAILED"
+    except BotoCoreError:
+        log.exception("Could not claim notification; no SES request made")
+        return "STATE_FAILED"
+    if not candidates:
+        return "NO_NEW_FINDINGS"
+
+    lines = [
+        "Cloud Resource Guardian",
+        "Account: " + profile.get("account_id", "unknown"),
+        "Region: " + result["region"],
+        "Scan: " + result.get("scan_id", "unknown"),
+        "Scan status: " + result.get("status", "unknown"),
+        "Completed (UTC): " + datetime.fromtimestamp(result.get("completed_at", now), timezone.utc).isoformat(),
+        "Resource counts: " + json.dumps(result.get("counts", {}), sort_keys=True),
+        "Displayed REVIEW findings: " + str(len(candidates)),
+        "Total findings (all levels): " + str(result.get("finding_count", len(result["findings"]))),
+        "Các tài nguyên cần kiểm tra:",
+    ]
+    for finding in candidates:
+        lines.append(finding["type"] + " " + finding["resource_id"] + ": " + finding["reason"])
+        if finding.get("rule_id"):
+            lines.append("  Rule: " + finding["rule_id"])
+        if finding.get("evidence"):
+            lines.append("  Evidence: " + json.dumps(finding["evidence"], sort_keys=True, default=str))
+    if result.get("errors"):
+        lines.append("Scan warnings: " + json.dumps(result["errors"], sort_keys=True))
+    lines += [
+        result.get("note", "Only selected regions and displayed findings are included."),
+        "Mở dashboard: " + os.environ.get("WEB_URL", ""),
+        "Đây là ứng viên cần kiểm tra; hệ thống không tự dừng hoặc xóa.",
+    ]
+    status, message_id, error_code = "SENT", "", ""
+    try:
+        # SES has no idempotency key: SDK retries could duplicate an accepted send.
+        ses_config = SDK_CONFIG.merge(Config(retries={"total_max_attempts": 1}))
+        reply = boto3.client("ses", config=ses_config).send_email(
+            Source=sender, Destination={"ToAddresses": [recipient]},
             Message={"Subject": {"Data": "Cloud Resource Guardian: tài nguyên cần kiểm tra", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": "\n".join(lines), "Charset": "UTF-8"}}})
-        put({"pk": profile["pk"], "sk": key, "fingerprint": digest, "sent_at": int(time.time())})
-        return "SENT"
-    except ClientError:
-        log.exception("Email delivery request failed")
-        return "FAILED"  # Scan result remains available; retry email on next scan.
+                     "Body": {"Text": {"Data": "\n".join(lines), "Charset": "UTF-8"}}},
+        )
+        message_id = reply.get("MessageId", "")
+        if not message_id:
+            status, error_code = "UNKNOWN", "MissingMessageId"
+    except ClientError as error:
+        error_code = error.response["Error"]["Code"]
+        http_status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+        status = "UNKNOWN" if http_status >= 500 or error_code in ("RequestTimeout", "RequestTimeoutException") else "FAILED"
+        log.exception("SES request ended with status %s", status)
+    except BotoCoreError as error:
+        # A lost response does not prove SES rejected the message.
+        status, error_code = "UNKNOWN", type(error).__name__
+        log.exception("SES acceptance is unknown")
+
+    record["status"] = status
+    if status == "SENT":
+        record.update(
+            fingerprint=digest, message_id=message_id, sent_at=int(time.time()),
+            last_message_id=message_id, last_sent_at=int(time.time()),
+        )
+    else:
+        record["error_code"] = error_code
+    try:
+        table.put_item(
+            Item=json.loads(json.dumps(record), parse_float=Decimal), ConditionExpression="attempt_token = :token",
+            ExpressionAttributeValues={":token": token},
+        )
+    except (ClientError, BotoCoreError):
+        # The durable SENDING claim still enforces cooldown. Retrying later can
+        # duplicate mail if SES accepted it: SES and DynamoDB are not atomic.
+        log.exception("Could not persist SES status %s (MessageId=%s)", status, message_id)
+        return "SENT_UNRECORDED" if status == "SENT" else status
+    return status
 
 def worker(job, context):
     try:

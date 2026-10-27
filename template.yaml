@@ -224,6 +224,163 @@ Resources:
   ScheduleLogs:
     Type: AWS::Logs::LogGroup
     Properties: {LogGroupName: !Sub '/aws/lambda/${ScheduleFunction}', RetentionInDays: 7}
+  ApiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API invocation error; inspect API logs and tenant-visible response.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Ref ApiFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  ApiThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Lambda throttled; inspect regional concurrency before retrying.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{Name: FunctionName, Value: !Ref ApiFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  WorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Worker invocation error; correlate scan status, retries and failure queue.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  WorkerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Worker throttled; inspect concurrency and async event age before recovery.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  ScheduleErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler invocation error; inspect logs and last queued scans.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Ref ScheduleFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  ScheduleThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler throttled; inspect concurrency and missed tenant intervals.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{Name: FunctionName, Value: !Ref ScheduleFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  WorkerAsyncDroppedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Worker async event exhausted retries or age; inspect failure queue and scan markers.
+      Namespace: AWS/Lambda
+      MetricName: AsyncEventsDropped
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  WorkerDestinationFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda could not deliver failure record to SQS; an empty queue is not proof of success.
+      Namespace: AWS/Lambda
+      MetricName: DestinationDeliveryFailures
+      Dimensions: [{Name: FunctionName, Value: !Ref WorkerFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  ScheduleAsyncDroppedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Scheduler async event dropped; scheduler has no failure destination, inspect logs and history.
+      Namespace: AWS/Lambda
+      MetricName: AsyncEventsDropped
+      Dimensions: [{Name: FunctionName, Value: !Ref ScheduleFunction}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  ScheduleDeliveryFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: EventBridge failed to deliver scheduled invocation; inspect rule target and Lambda permission.
+      Namespace: AWS/Events
+      MetricName: FailedInvocations
+      # SAM generates this rule from ScheduleFunction.Events.Tick.
+      Dimensions: [{Name: RuleName, Value: !Ref ScheduleFunctionTick}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  DeadLettersBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Failure queue has visible messages; inspect metadata without receiving or deleting messages.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{Name: QueueName, Value: !GetAtt DeadLetters.QueueName}]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+  DeadLettersAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Oldest failure message is at least five minutes old; preserve evidence before the 14-day retention expires.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions: [{Name: QueueName, Value: !GetAtt DeadLetters.QueueName}]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
   WebBucket:
     Type: AWS::S3::Bucket
     Properties:

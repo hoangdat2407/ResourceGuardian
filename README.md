@@ -83,7 +83,9 @@ Template hiện không đặt ReservedConcurrentExecutions cho worker để phù
 
 Thêm `--sender-email email-cua-ban@example.com` vào lệnh deploy. CloudFormation tạo SES EmailIdentity; mở thư xác minh được AWS gửi tới địa chỉ đó. Nếu SES đang trong sandbox, địa chỉ người nhận cũng phải được xác minh tại SES **ap-southeast-1**. Địa chỉ nhận của ứng dụng lấy từ email Cognito đã xác minh; người dùng không nhập tùy ý người nhận.
 
-Trên web, mở Cấu hình & cảnh báo → bật email. Gửi email thất bại không làm mất kết quả quét; dashboard hiển thị lỗi và thử lại ở lần quét sau. Dedup theo danh sách resource REVIEW, không theo từng thay đổi nhỏ của CPU. SES không cung cấp giao dịch chung với DynamoDB; trường hợp hiếm khi gửi thành công nhưng lưu dấu gửi thất bại có thể dẫn tới email trùng.
+Trên web, mở Cấu hình & cảnh báo → bật email. Digest gửi sau lượt quét, theo region và địa chỉ Cognito đã xác minh; lịch gửi đi cùng lịch quét, không thêm scheduler riêng. Conditional write giữ quyền gửi cho một worker; cooldown bằng `interval_hours` hạn chế gửi lại khi tập REVIEW thay đổi. Dedup theo loại tài nguyên, resource ID và rule, không theo dao động CPU; đổi kết nối hoặc người nhận không dùng lại dấu gửi cũ.
+
+Thông báo lưu trạng thái, thời điểm, fingerprint và SES `message_id` trong bản ghi `NOTICE#...`. `SENT` chỉ có nghĩa SES nhận yêu cầu, không chứng minh email đã vào hộp thư. `FAILED` là lỗi SES rõ ràng; `UNKNOWN` là chưa biết SES đã nhận hay chưa; `STATE_FAILED` là lỗi trạng thái trước khi gọi SES; `SENT_UNRECORDED` là SES đã nhận nhưng chưa ghi được kết quả vào DynamoDB. Kết quả quét vẫn được giữ. Cooldown áp dụng cả lỗi/không rõ kết quả; lần quét sau đủ hạn mới thử lại. Không bảo đảm exactly-once vì SES và DynamoDB không có giao dịch chung; kiểm tra log và NOTICE trước khi gửi lại thủ công.
 
 ## 4. Kết nối AWS account cần quét
 

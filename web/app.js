@@ -109,7 +109,18 @@ function resultMessage(){
  if(results.some(r=>r.status==='PARTIAL'))return 'Một phần tài nguyên, metrics hoặc cảnh báo chưa được đọc đầy đủ. Số liệu chỉ tính phần kết quả đã nhận.';
  return 'Kết quả chỉ phản ánh các region và loại tài nguyên trong phạm vi quét. Kiểm tra bằng chứng trước khi xử lý; không có cảnh báo không đồng nghĩa không có chi phí.';
 }
-function appendResultNotes(container,r){if(r.error)container.append(node('p',friendlyError(r.error),'footnote'));if(r.status==='PARTIAL')container.append(node('p','Kết quả chưa đầy đủ. Giới hạn: 100 tài nguyên mỗi loại, 50 cảnh báo mỗi region; một phần quyền đọc hoặc metrics cũng có thể thiếu.','footnote'));for(const e of r.errors||[])container.append(node('p',e.type+': '+e.code,'footnote'));if(r.notification==='FAILED')container.append(node('p','Kết quả đã lưu nhưng gửi email thất bại. Liên hệ quản trị viên; cảnh báo vẫn xem được tại đây.','footnote'));}
+function appendResultNotes(container,r){
+ if(r.error)container.append(node('p',friendlyError(r.error),'footnote'));
+ if(r.status==='PARTIAL')container.append(node('p','Kết quả chưa đầy đủ. Giới hạn: 100 tài nguyên mỗi loại, 50 cảnh báo mỗi region; một phần quyền đọc hoặc metrics cũng có thể thiếu.','footnote'));
+ for(const e of r.errors||[])container.append(node('p',e.type+': '+e.code,'footnote'));
+ const notices={
+  FAILED:'Kết quả đã lưu nhưng gửi email thất bại. Liên hệ quản trị viên; cảnh báo vẫn xem được tại đây.',
+  UNKNOWN:'Kết quả đã lưu nhưng chưa xác định được SES đã nhận email hay chưa. Kiểm tra trạng thái thông báo trước khi gửi lại để tránh email trùng.',
+  STATE_FAILED:'Kết quả đã lưu nhưng không lưu hoặc đọc được trạng thái thông báo; chưa gửi yêu cầu SES. Liên hệ quản trị viên.',
+  SENT_UNRECORDED:'SES đã nhận yêu cầu email nhưng chưa lưu được trạng thái gửi. Liên hệ quản trị viên trước khi gửi lại để tránh email trùng.'
+ };
+ if(notices[r.notification])container.append(node('p',notices[r.notification],'footnote'));
+}
 function renderPrincipals(){
  $('principals').replaceChildren();for(const [name,value] of [['ApiPrincipal',profile.api_principal],['ScanPrincipal',profile.scan_principal],['ExternalId',profile.external_id]]){
  const row=node('div',undefined,'parameter-row'),label=node('label',name),input=node('textarea'),button=node('button','Sao chép '+name,'button secondary');
