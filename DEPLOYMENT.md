@@ -1,5 +1,11 @@
 # Cloud Resource Guardian — triển khai AWS
 
+## Task 8 — chuẩn bị nghiệm thu, 26/10/2026
+
+Thay đổi Task 8 hiện là source/local validation, **chưa triển khai AWS**. Stack kiểm thử dự kiến `cloud-resource-guardian-task8-test`, region `ap-southeast-1`; account phải được xác nhận bằng phiên AWS thật. Máy kiểm tra chưa có named profile/credentials khả dụng. Xem [hợp đồng/runbook](TASK8.md) và [harness cùng điều kiện chạy AWS](TASK8-AWS.md).
+
+Diff SAM thêm hai Lambda recovery/reconcile, một queue vận hành, SQS event source mapping, lịch 5 phút, log groups, alarm và quyền DynamoDB theo bảng. Giữ bảng/user pool và scheduler mỗi giờ; review change set thực tế trước khi execute, không suy ra không replacement chỉ từ diff source. Hai role recovery/reconcile không có STS/collector. SES tiếp tục tắt trên stack kiểm thử. Không dùng các thông tin release lịch sử dưới đây làm bằng chứng của Task 8.
+
 > **Frontend mới đã publish 2026-10-12:** hậu kiểm PASS, CloudFront invalidation `IA4UB7G1SEGEHDP9HS1YNS9Y2E` Completed. Website https://d3qn9wabid8ws0.cloudfront.net/. Thông tin triển khai 2026-10-11 bên dưới là lịch sử; xem mục release frontend cuối file.
 
 Ngày: 2026-10-11. Account `376129867108`, region `ap-southeast-1`.

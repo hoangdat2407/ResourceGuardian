@@ -36,6 +36,18 @@ STATIC_ROUTES = {
 }
 BODY_LIMIT = 10240
 FINDING_ID_RE = re.compile(r"[0-9a-f]{64}")
+FINDING_LIMIT = 50
+CANDIDATE_LIMIT = 100
+RESULT_BYTE_LIMIT = 300 * 1024
+ACTIVE_STATES = ("QUEUED", "RUNNING")
+TERMINAL_STATES = ("SUCCEEDED", "PARTIAL", "FAILED", "TIMED_OUT")
+JOB_SECONDS = 900
+RUN_SECONDS = 330
+RETENTION_SECONDS = 30 * 86400
+
+
+class ScanCooldown(Exception):
+    pass
 
 
 def tenant_key(event):
@@ -130,33 +142,174 @@ def all_items(pk, prefix):
         if not page.get("LastEvaluatedKey"): break
         args["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
-def enqueue(profile, now):
-    pk = profile["pk"]
-    # One lease per tenant prevents concurrent manual/scheduled jobs.
+def conditional_failure(error):
+    """Never mistake transaction conflicts, throttling or unknown cancellation for ownership loss."""
+    code = error.response["Error"]["Code"]
+    if code == "ConditionalCheckFailedException":
+        return True
+    reasons = error.response.get("CancellationReasons", [])
+    codes = [reason.get("Code", "None") for reason in reasons]
+    return (code == "TransactionCanceledException" and "ConditionalCheckFailed" in codes
+            and all(code in ("None", "ConditionalCheckFailed") for code in codes))
+
+
+def transaction(actions):
+    # The DynamoDB resource client serializes native Python values for transactions.
+    actions = json.loads(json.dumps(actions), parse_float=Decimal)
+    return table.meta.client.transact_write_items(TransactItems=actions)
+
+
+def deadline(marker):
+    return marker.get("deadline_at", marker.get("created_at", marker.get("started_at", 0)) + JOB_SECONDS)
+
+
+def history_key(marker):
+    return "HISTORY#{}#{}#{}".format(
+        int(marker.get("created_at", marker.get("started_at", 0))), marker["region"], marker["scan_id"])
+
+
+def scan_log(message, marker, error_code=None):
+    # Deliberately exclude tenant identity, role, ExternalId and provider error text.
+    log.info(json.dumps({"event": message, "scan_id": marker.get("scan_id"),
+                         "region": marker.get("region"), "trigger": marker.get("trigger", "manual"),
+                         "attempt_count": marker.get("attempt_count", 0), "error_code": error_code}))
+
+
+def release_tenant(pk, scan_id, version):
+    lock = get(pk, "LOCK")
+    if lock.get("scan_id") != scan_id or lock.get("connection_version") != version:
+        return
+    actions = []
+    for region in lock["regions"]:
+        actions.append({"ConditionCheck": {
+            "TableName": table.name, "Key": {"pk": pk, "sk": "RESULT#" + region},
+            "ConditionExpression": "scan_id = :id AND connection_version = :v AND #s IN (:s, :p, :f, :t)",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": {":id": scan_id, ":v": version, ":s": "SUCCEEDED", ":p": "PARTIAL", ":f": "FAILED", ":t": "TIMED_OUT"},
+        }})
+    actions.append({"Delete": {
+        "TableName": table.name, "Key": {"pk": pk, "sk": "LOCK"},
+        "ConditionExpression": "scan_id = :id AND connection_version = :v",
+        "ExpressionAttributeValues": {":id": scan_id, ":v": version},
+    }})
     try:
-        table.update_item(Key={"pk": pk, "sk": "LOCK"},
-            UpdateExpression="SET lease_until = :until",
-            ConditionExpression="attribute_not_exists(lease_until) OR lease_until < :now",
-            ExpressionAttributeValues={":until": now + 600, ":now": now})
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException": return None
-        raise
+        transaction(actions)
+    except ClientError as error:
+        if not conditional_failure(error):
+            raise
+
+
+def finish_scan(marker, status, *, result=None, run_token=None, error_code=None,
+                error_message=None, require_current=True, attempts=None):
+    """Commit the terminal RESULT and immutable HISTORY together under ownership checks."""
+    now = int(time.time())
+    row = {key: marker[key] for key in (
+        "pk", "sk", "region", "scan_id", "connection_version", "created_at", "started_at", "trigger",
+    ) if key in marker}
+    row.update(status=status, started_at=marker.get("started_at", marker.get("created_at", now)),
+               completed_at=now, deadline_at=deadline(marker),
+               attempt_count=max(marker.get("attempt_count", 0), attempts or 0),
+               expires=now + RETENTION_SECONDS, findings=[], counts={}, errors=[])
+    if result:
+        row.update(result)
+    if error_code:
+        row.update(error_code=error_code, error=error_message)
+    values = {":id": marker["scan_id"], ":v": marker["connection_version"], ":q": "QUEUED", ":r": "RUNNING"}
+    condition = "scan_id = :id AND connection_version = :v AND #s IN (:q, :r)"
+    if run_token:
+        condition += " AND run_token = :token"
+        values[":token"] = run_token
+    else:
+        condition += " AND (attribute_not_exists(run_until) OR run_until <= :now)"
+        values[":now"] = now
+    actions = [
+        {"Put": {"TableName": table.name, "Item": row, "ConditionExpression": condition,
+                 "ExpressionAttributeNames": {"#s": "status"}, "ExpressionAttributeValues": values}},
+        {"Put": {"TableName": table.name, "Item": {**visible_result(row), "sk": history_key(marker)},
+                 "ConditionExpression": "attribute_not_exists(pk)"}},
+    ]
+    if require_current:
+        actions.append({"ConditionCheck": {
+            "TableName": table.name, "Key": {"pk": marker["pk"], "sk": "PROFILE"},
+            "ConditionExpression": "connection_version = :v", "ExpressionAttributeValues": {":v": marker["connection_version"]},
+        }})
+    try:
+        transaction(actions)
+    except ClientError as error:
+        if not conditional_failure(error):
+            raise
+        return None
+    scan_log("scan_finished", row, error_code)
+    release_tenant(row["pk"], row["scan_id"], row["connection_version"])
+    return row
+
+
+def enqueue(profile, now, trigger="manual"):
+    profile = normalize_profile(profile)
+    pk, version = profile["pk"], profile["connection_version"]
+    current = get(pk, "PROFILE")
+    if (current.get("connection_version") != version
+            or normalize_profile(current)["settings"] != profile["settings"]):
+        return None
+    regions = profile.get("regions")
+    if (not profile.get("role_arn") or not version or not isinstance(regions, list)
+            or not 1 <= len(regions) <= 3 or any(r not in REGIONS for r in regions) or len(set(regions)) != len(regions)):
+        raise ValueError("Invalid connected profile")
+    # Recover expired markers before a new scan can replace them, including removed regions.
+    for old in all_items(pk, "RESULT#"):
+        if old.get("status") in ACTIVE_STATES:
+            if deadline(old) > now or old.get("run_until", 0) > now:
+                return None
+            if not finish_scan(old, "TIMED_OUT", error_code="JOB_DEADLINE", error_message="Scan exceeded its 15 minute deadline", require_current=False):
+                return None
     scan_id = str(uuid.uuid4())
-    # Invoke only after all result markers exist. Lambda retries errors and sends
-    # exhausted events to the failure queue configured in template.yaml.
-    for region in profile["regions"]:
-        put({"pk": pk, "sk": "RESULT#" + region, "scan_id": scan_id, "status": "QUEUED", "started_at": now, "region": region, "connection_version": profile["connection_version"]})
-    for region in profile["regions"]:
-        job = {"pk": pk, "region": region, "scan_id": scan_id, "connection_version": profile["connection_version"]}
+    markers = [{"pk": pk, "sk": "RESULT#" + region, "scan_id": scan_id, "status": "QUEUED",
+                "created_at": now, "started_at": now, "deadline_at": now + JOB_SECONDS,
+                "region": region, "connection_version": version, "trigger": trigger, "attempt_count": 0}
+               for region in regions]
+    due_seconds = profile["settings"]["interval_hours"] * 3600 if trigger == "scheduled" else JOB_SECONDS
+    settings_condition = "settings = :settings" if "settings" in current else "attribute_not_exists(settings)"
+    profile_values = {":now": now, ":v": version, ":due": now - due_seconds}
+    if "settings" in current:
+        profile_values[":settings"] = current["settings"]
+    actions = [
+        {"Put": {"TableName": table.name,
+                 "Item": {"pk": pk, "sk": "LOCK", "scan_id": scan_id, "connection_version": version,
+                          "regions": regions, "lease_until": now + JOB_SECONDS + 30, "expires": now + JOB_SECONDS + 30},
+                 "ConditionExpression": "attribute_not_exists(lease_until) OR lease_until <= :now",
+                 "ExpressionAttributeValues": {":now": now}}},
+        {"Update": {"TableName": table.name, "Key": {"pk": pk, "sk": "PROFILE"},
+                    "UpdateExpression": "SET last_queued = :now",
+                    "ConditionExpression": "connection_version = :v AND " + settings_condition + " AND (attribute_not_exists(last_queued) OR last_queued <= :due)",
+                    "ExpressionAttributeValues": profile_values}},
+    ]
+    for marker in markers:
+        actions.append({"Put": {"TableName": table.name, "Item": marker,
+                               "ConditionExpression": "attribute_not_exists(pk) OR #s IN (:s, :p, :f, :t)",
+                               "ExpressionAttributeNames": {"#s": "status"},
+                               "ExpressionAttributeValues": {":s": "SUCCEEDED", ":p": "PARTIAL", ":f": "FAILED", ":t": "TIMED_OUT"}}})
+    try:
+        transaction(actions)
+    except ClientError as error:
+        if not conditional_failure(error):
+            raise
+        current = get(pk, "PROFILE")
+        if trigger == "manual" and now - current.get("last_queued", 0) < JOB_SECONDS:
+            # Active scan takes precedence over cooldown in the API contract.
+            lock = get(pk, "LOCK")
+            if lock.get("lease_until", 0) <= now:
+                raise ScanCooldown()
+        return None
+    for marker in markers:
+        job = {key: marker[key] for key in ("pk", "region", "scan_id", "connection_version", "trigger", "deadline_at")}
         try:
             reply = invoker.invoke(FunctionName=os.environ["WORKER_FUNCTION"], InvocationType="Event", Payload=json.dumps(job).encode())
-            if reply["StatusCode"] != 202: raise RuntimeError("Worker event not accepted")
+            if reply["StatusCode"] != 202:
+                raise RuntimeError("Worker event not accepted")
+            scan_log("scan_dispatched", marker)
         except Exception:
-            log.exception("Could not dispatch region job")
-            put({"pk": pk, "sk": "RESULT#" + region, "scan_id": scan_id, "status": "FAILED", "started_at": now,
-                 "completed_at": now, "region": region, "connection_version": profile["connection_version"], "error": "Dispatch failed; try another scan later"})
-    table.update_item(Key={"pk": pk, "sk": "PROFILE"}, UpdateExpression="SET last_queued = :now",
-                      ExpressionAttributeValues={":now": now})
+            # An ambiguous invoke may have started a worker: only finalize an unclaimed marker.
+            finish_scan(marker, "FAILED", error_code="DISPATCH_FAILED", error_message="Dispatch failed; try another scan later")
     return scan_id
 
 def encode_token(key):
@@ -224,19 +377,32 @@ def feedback_records(pk, profile, region=None):
     }
 
 
-def apply_feedback(row, feedback):
-    result = dict(row)
+def feedback_findings(candidates, feedback, now):
     findings = []
-    now = time.time()
-    for finding in row.get("findings", []):
+    for finding in candidates:
         item = dict(finding)
+        item.pop("acknowledged", None)
         record = feedback.get(item.get("finding_id"))
         if record and (record.get("kept") or record.get("ignore_until", 0) > now):
             continue
         if record and record.get("acknowledged"):
             item["acknowledged"] = True
         findings.append(item)
-    result["findings"] = findings
+    return findings
+
+
+def apply_feedback(row, feedback):
+    result = dict(row)
+    findings = feedback_findings(row.get("candidates", row.get("findings", [])), feedback, time.time())
+    result["findings"] = findings[:FINDING_LIMIT]
+    result["finding_count"] = len(findings)
+    if len(findings) > FINDING_LIMIT:
+        result["status"] = "PARTIAL"
+        errors = list(row.get("errors", []))
+        limit_error = {"type": "FINDING", "code": "RESOURCE_LIMIT"}
+        if limit_error not in errors:
+            errors.append(limit_error)
+        result["errors"] = errors
     return visible_result(result)
 
 
@@ -292,7 +458,7 @@ def _upsert_feedback(pk, profile, body):
         finding.get("finding_id") == ident
         for row in all_items(pk, "RESULT#")
         if row.get("region") == region and row.get("connection_version") == profile["connection_version"]
-        for finding in row.get("findings", [])
+        for finding in row.get("candidates", row.get("findings", []))
     )
     if not displayed and not existing:
         return None
@@ -366,14 +532,29 @@ def api(event, context):
                 raise ValueError("Account mismatch")
             now = int(time.time())
             old_version = profile.get("connection_version")
+            candidate["account_id"] = actual
+            candidate["connection_version"] = str(uuid.uuid4())
+            fields = ("role_arn", "account_id", "regions", "service_groups", "connection_version")
+            values = {":v" + str(i): candidate[field] for i, field in enumerate(fields)}
+            condition = "attribute_not_exists(connection_version)"
+            if old_version:
+                condition = "connection_version = :old"
+                values[":old"] = old_version
+            try:
+                table.update_item(
+                    Key={"pk": pk, "sk": "PROFILE"},
+                    UpdateExpression="SET " + ", ".join(field + " = :v" + str(i) for i, field in enumerate(fields)),
+                    ConditionExpression=condition, ExpressionAttributeValues=values,
+                )
+            except ClientError as error:
+                if conditional_failure(error):
+                    return response(409, {"error": "Connection changed; refresh and try again"})
+                raise
             if old_version:
                 for record in all_items(pk, "FEEDBACK#" + old_version + "#"):
                     if "expires" not in record:
-                        record["expires"] = now + 30 * 86400
+                        record["expires"] = now + RETENTION_SECONDS
                         put(record)
-            candidate["account_id"] = actual
-            candidate["connection_version"] = str(uuid.uuid4())
-            put(candidate)
             return response(200, {"connected": True, "account_id": actual})
         if route == "/settings":
             if not body:
@@ -391,11 +572,18 @@ def api(event, context):
             if not profile.get("role_arn"):
                 raise ValueError("Connect AWS first")
             now = int(time.time())
+            if get(pk, "LOCK").get("lease_until", 0) > now:
+                return response(409, {"scan_id": None, "message": "Scan lease is active"})
             if now - profile.get("last_queued", 0) < 900:
                 return response(429, {"error": "Wait 15 minutes between scans"})
-            scan_id = enqueue(profile, now)
+            try:
+                scan_id = enqueue(profile, now)
+            except ScanCooldown:
+                return response(429, {"error": "Wait 15 minutes between scans"})
             return response(202 if scan_id else 409, {"scan_id": scan_id, "message": "Queued" if scan_id else "Scan lease is active"})
         if route == "/findings":
+            if not profile.get("connection_version"):
+                return response(200, {"results": []})
             regions = set(profile.get("regions", []))
             feedback = feedback_records(pk, profile)
             rows = [
@@ -407,7 +595,7 @@ def api(event, context):
         if route == "/history":
             limit, token = parse_limit(event)
             rows, next_token = page_rows(pk, "HISTORY#", profile, limit, token)
-            return response(200, {"results": rows, "next_token": next_token})
+            return response(200, {"results": [visible_result(row) for row in rows], "next_token": next_token})
         if route == "scan_status":
             scan_id = _valid_scan_id(path.rsplit("/", 1)[-1])
             rows = [
@@ -426,6 +614,8 @@ def api(event, context):
             return response(200, {"scan_id": scan_id, "results": [visible_result(row) for row in rows]})
         if route == "/feedback" and method == "GET":
             limit, token = parse_limit(event)
+            if not profile.get("connection_version"):
+                return response(200, {"results": [], "next_token": None})
             rows, next_token = page_rows(pk, feedback_prefix(profile), profile, limit, token)
             return response(200, {"results": rows, "next_token": next_token})
         if route == "/feedback":
@@ -473,13 +663,14 @@ def api(event, context):
         raise RuntimeError("Unreachable route")
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeEncodeError) as error:
         return response(400, {"error": str(error)})
-    except ClientError:
-        log.exception("AWS request failed")
+    except ClientError as error:
+        log.error("API AWS request failed code=%s", error.response["Error"]["Code"])
         return response(502, {"error": "AWS request failed; check role permissions and CloudWatch logs"})
 
 
 def visible_result(row):
-    if row.get("status") in ("QUEUED", "RUNNING") and time.time() - row.get("started_at", time.time()) > 900:
+    row = {key: value for key, value in row.items() if key != "candidates"}
+    if row.get("status") in ACTIVE_STATES and time.time() >= deadline(row):
         return {**row, "status": "TIMED_OUT", "error": "Scan did not complete within 15 minutes. Check Lambda failure queue and retry."}
     return row
 
@@ -488,78 +679,145 @@ def history(pk, profile):
     return page_rows(pk, "HISTORY#", profile, 20)[0]
 
 def scheduler(event, context):
-    args = {}
-    count = 0
+    args = {"ConsistentRead": True}
+    count, failed = 0, False
+    log.info("Scheduler tick id=%s source=%s time=%s", event.get("id"), event.get("source"), event.get("time"))
     while True:
         page = table.scan(**args)
         for p in normalized(page.get("Items", [])):
             if p.get("sk") != "PROFILE" or not p.get("role_arn"): continue
-            p = normalize_profile(p)
-            now = int(time.time())
-            if now - p.get("last_queued", 0) >= p["settings"]["interval_hours"] * 3600:
-                if enqueue(p, now): count += 1
+            try:
+                p = normalize_profile(p)
+                now = int(time.time())
+                if now - p.get("last_queued", 0) >= p["settings"]["interval_hours"] * 3600:
+                    if enqueue(p, now, trigger="scheduled"):
+                        count += 1
+            except (ValueError, TypeError, KeyError):
+                log.warning("Scheduler skipped invalid profile")
+            except Exception as error:
+                failed = True
+                log.error("Scheduler tenant failed error_type=%s", type(error).__name__)
         if not page.get("LastEvaluatedKey"): break
         args["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    if failed:
+        raise RuntimeError("Scheduler infrastructure failure; independent tenants processed")
     return {"queued_tenants": count}
 
 def scan(job, context):
     pk, region = job["pk"], job["region"]
     marker = get(pk, "RESULT#" + region)
-    if marker.get("scan_id") != job["scan_id"] or marker.get("status") in ("SUCCEEDED", "PARTIAL", "FAILED"):
+    if (marker.get("scan_id") != job["scan_id"]
+            or marker.get("connection_version") != job.get("connection_version")):
+        return
+    if marker.get("status") in TERMINAL_STATES:
+        release_tenant(pk, job["scan_id"], job["connection_version"])
         return
     profile = normalize_profile(get(pk, "PROFILE"))
     if region not in profile.get("regions", []) or job.get("connection_version") != profile.get("connection_version"):
         return
     now = int(time.time())
+    if now >= deadline(marker):
+        finish_scan(marker, "TIMED_OUT", error_code="JOB_DEADLINE", error_message="Scan exceeded its 15 minute deadline")
+        return
     run_token = str(uuid.uuid4())
     try:
-        table.update_item(
-            Key={"pk": pk, "sk": "RESULT#" + region},
-            UpdateExpression="SET #state = :running, run_until = :until, run_token = :token",
-            ConditionExpression="scan_id = :id AND (attribute_not_exists(run_until) OR run_until < :now)",
-            ExpressionAttributeNames={"#state": "status"},
-            ExpressionAttributeValues={":running": "RUNNING", ":until": now + 330, ":token": run_token, ":id": job["scan_id"], ":now": now},
-        )
+        transaction([
+            {"Update": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": "RESULT#" + region},
+                "UpdateExpression": "SET #state = :running, run_until = :until, run_token = :token ADD attempt_count :one",
+                "ConditionExpression": "scan_id = :id AND connection_version = :v AND #state IN (:queued, :running) AND (attribute_not_exists(run_until) OR run_until <= :now)",
+                "ExpressionAttributeNames": {"#state": "status"},
+                "ExpressionAttributeValues": {":queued": "QUEUED", ":running": "RUNNING", ":until": min(now + RUN_SECONDS, deadline(marker)),
+                                            ":token": run_token, ":id": job["scan_id"], ":v": job["connection_version"], ":now": now, ":one": 1},
+            }},
+            {"ConditionCheck": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": "PROFILE"},
+                "ConditionExpression": "connection_version = :v AND contains(regions, :region)",
+                "ExpressionAttributeValues": {":v": job["connection_version"], ":region": region},
+            }},
+        ])
     except ClientError as error:
-        if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
+        if not conditional_failure(error):
             raise
         latest = get(pk, "RESULT#" + region)
-        if latest.get("scan_id") != job["scan_id"] or latest.get("status") in ("SUCCEEDED", "PARTIAL", "FAILED"):
+        current = get(pk, "PROFILE")
+        if (latest.get("scan_id") != job["scan_id"] or latest.get("status") in TERMINAL_STATES
+                or latest.get("connection_version") != job.get("connection_version")
+                or current.get("connection_version") != job.get("connection_version")
+                or region not in current.get("regions", [])):
             return
         raise RuntimeError("Duplicate event while worker lease is active; retry later") from error
     job["_run_token"] = run_token
-    sess = session(profile)
+    marker = get(pk, "RESULT#" + region)
+    if marker.get("run_token") != run_token:
+        return
+    scan_log("scan_started", marker)
+    if context.get_remaining_time_in_millis() < 60000 or time.time() >= deadline(marker) - 60:
+        finish_scan(marker, "TIMED_OUT", run_token=run_token, error_code="TIME_BUDGET",
+                    error_message="Insufficient time remaining to start AWS collection safely")
+        return
+    try:
+        sess = session(profile)
+    except ClientError as error:
+        if error.response["Error"]["Code"] not in ("AccessDenied", "AccessDeniedException", "InvalidClientTokenId", "ExpiredToken"):
+            raise
+        finish_scan(marker, "FAILED", run_token=run_token, error_code="ASSUME_ROLE_DENIED",
+                    error_message="Cannot access AWS; reconnect and check role permissions")
+        return {"failed": True}
 
     def observed(kind, ident, bad):
-        sk = "OBS#" + profile["connection_version"] + "#" + region + "#" + ident
+        prefix = "OBS#" + profile["connection_version"] + "#" + region + "#"
+        sk = prefix + kind + "#" + ident
         old = get(pk, sk)
+        # Old observations lacked the resource type. Only native AWS prefixes
+        # identify their owner safely during this one-way migration.
+        legacy_sk = prefix + ident
+        legacy_prefix = {"EBS": "vol-", "EIP": "eipalloc-"}.get(kind)
+        legacy = get(pk, legacy_sk) if legacy_prefix and ident.startswith(legacy_prefix) else {}
+        if not old:
+            old = legacy
         if not bad:
             if old:
                 table.delete_item(Key={"pk": pk, "sk": sk})
+            if legacy:
+                table.delete_item(Key={"pk": pk, "sk": legacy_sk})
             return 0
-        first = old.get("first", now) if now - old.get("last", now) <= 48 * 3600 else now
+        recent = old.get("expires", now + 1) > now and 0 <= now - old.get("last", now) <= 48 * 3600
+        first = old.get("first", now) if recent and old.get("first", now) <= now else now
         put({"pk": pk, "sk": sk, "first": first, "last": now, "expires": now + 7 * 86400})
+        if legacy:
+            table.delete_item(Key={"pk": pk, "sk": legacy_sk})
         return (now - first) / 3600
 
     def time_check():
-        if context.get_remaining_time_in_millis() < 30000:
+        if context.get_remaining_time_in_millis() < 60000 or time.time() >= deadline(marker) - 60:
             raise TimeoutError("Scan stopped before Lambda timeout")
 
     collected = collect_region(
         sess, region, profile.get("account_id", ""), profile["settings"],
-        profile["service_groups"], datetime.now(timezone.utc), time_check, observed,
+        profile["service_groups"], datetime.fromtimestamp(now, timezone.utc), time_check, observed,
     )
     skip = {r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "IGNORE#" + profile["connection_version"] + "#" + region + "#") if r.get("expires", 0) > now}
     skip.update(r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "KEEP#" + profile["connection_version"] + "#" + region + "#") if r.get("enabled") is True)
     feedback = feedback_records(pk, profile, region)
-    actionable = [
+    candidates = [
         finding for finding in collected["findings"]
         if finding.get("resource_id") not in skip
-        and not feedback.get(finding["finding_id"], {}).get("kept")
-        and feedback.get(finding["finding_id"], {}).get("ignore_until", 0) <= now
     ]
+    actionable = feedback_findings(candidates, feedback, now)
+    # Retain feedback-hidden candidates so clearing feedback can restore them
+    # immediately. Keep currently displayed findings first when storage is full.
+    retained, seen = [], set()
+    displayed_ids = {finding["finding_id"] for finding in actionable[:FINDING_LIMIT]}
+    preferred = [finding for finding in candidates if finding["finding_id"] in displayed_ids]
+    for finding in preferred + candidates:
+        if finding["finding_id"] not in seen:
+            seen.add(finding["finding_id"])
+            retained.append(finding)
+    truncated_candidates = len(retained) > CANDIDATE_LIMIT
+    retained = retained[:CANDIDATE_LIMIT]
     errors = list(collected["errors"])
-    too_many_findings = len(actionable) > 50
+    too_many_findings = len(actionable) > FINDING_LIMIT
     if too_many_findings:
         errors.append({"type": "FINDING", "code": "RESOURCE_LIMIT"})
     current_profile = get(pk, "PROFILE")
@@ -570,22 +828,40 @@ def scan(job, context):
         "status": "PARTIAL" if collected["partial"] or too_many_findings else "SUCCEEDED",
         "started_at": marker.get("started_at", now), "completed_at": int(time.time()),
         "connection_version": profile["connection_version"], "counts": collected["counts"],
-        "findings": actionable[:50], "finding_count": len(actionable), "errors": errors,
+        "findings": actionable[:FINDING_LIMIT], "finding_count": len(actionable), "errors": errors,
+        "candidates": retained, "total_candidate_count": len(candidates),
         "note": "Limit 100 resources/type and 50 displayed findings/region. Only selected regions scanned.",
         "expires": now + 30 * 86400,
     }
-    table.put_item(
-        Item=json.loads(json.dumps(result), parse_float=Decimal),
-        ConditionExpression="scan_id = :id AND run_token = :token",
-        ExpressionAttributeValues={":id": job["scan_id"], ":token": run_token},
-    )
-    result["notification"] = notify(profile, result)
-    table.update_item(
-        Key={"pk": pk, "sk": "RESULT#" + region}, UpdateExpression="SET notification = :n",
-        ConditionExpression="scan_id = :id",
-        ExpressionAttributeValues={":n": result["notification"], ":id": job["scan_id"]},
-    )
-    put({**result, "sk": "HISTORY#" + str(now) + "#" + region + "#" + job["scan_id"]})
+    # DynamoDB allows 400 KiB per item. Leave room for its attribute encoding
+    # and notification metadata, and report every retention limit as partial.
+    while True:
+        retained_findings = feedback_findings(retained, feedback, now)
+        result["findings"] = retained_findings[:FINDING_LIMIT]
+        result["finding_count"] = len(retained_findings)
+        if truncated_candidates:
+            result["status"] = "PARTIAL"
+            limit_error = {"type": "FINDING", "code": "CANDIDATE_LIMIT"}
+            if limit_error not in errors:
+                errors.append(limit_error)
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= RESULT_BYTE_LIMIT or not retained:
+            break
+        retained.pop()
+        truncated_candidates = True
+    result["notification"] = "PENDING" if profile.get("notifications", {}).get("enabled") and os.environ.get("SES_SENDER") else "DISABLED"
+    saved = finish_scan(marker, result["status"], result=result, run_token=run_token)
+    if saved:
+        # Email is best effort after the durable scan commit; it cannot trigger another inventory pass.
+        try:
+            notification = notify(profile, saved)
+            actions = []
+            for sk in (saved["sk"], history_key(marker)):
+                actions.append({"Update": {"TableName": table.name, "Key": {"pk": pk, "sk": sk},
+                    "UpdateExpression": "SET notification = :n", "ConditionExpression": "scan_id = :id AND connection_version = :v",
+                    "ExpressionAttributeValues": {":n": notification, ":id": job["scan_id"], ":v": profile["connection_version"]}}})
+            transaction(actions)
+        except Exception as error:
+            scan_log("notification_failed", saved, type(error).__name__)
 
 def notify(profile, result):
     settings = profile.get("notifications", {})
@@ -718,28 +994,103 @@ def notify(profile, result):
     return status
 
 def worker(job, context):
+    job = dict(job)
+    job.pop("_run_token", None)
     try:
-        scan(job, context)
-        return {"scan_id": job["scan_id"], "processed": True}
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if code == "ConditionalCheckFailedException": return {"skipped": True}
-        if code in ("AccessDenied", "AccessDeniedException", "InvalidClientTokenId", "ExpiredToken"):
-            try:
-                item = {"pk": job["pk"], "sk": "RESULT#" + job["region"], "region": job["region"], "scan_id": job["scan_id"],
-                        "connection_version": job.get("connection_version"), "status": "FAILED",
-                        "error": "Cannot access AWS; reconnect and check role permissions", "completed_at": int(time.time())}
-                table.put_item(Item=item, ConditionExpression="scan_id = :id", ExpressionAttributeValues={":id": job["scan_id"]})
-            except ClientError: log.exception("Could not persist failure status")
-            return {"failed": True}
-        log.exception("Scan failed; async invocation will retry")
+        outcome = scan(job, context)
+        return outcome or {"scan_id": job["scan_id"], "processed": True}
+    except Exception as error:
+        scan_log("scan_retry", job, type(error).__name__)
         raise
     finally:
         if job.get("_run_token"):
             try:
-                table.update_item(Key={"pk": job["pk"], "sk": "RESULT#" + job["region"]},
+                table.update_item(
+                    Key={"pk": job["pk"], "sk": "RESULT#" + job["region"]},
                     UpdateExpression="SET run_until = :zero",
-                    ConditionExpression="scan_id = :id AND run_token = :token",
-                    ExpressionAttributeValues={":zero": 0, ":id": job["scan_id"], ":token": job["_run_token"]})
-            except ClientError as e:
-                if e.response["Error"]["Code"] != "ConditionalCheckFailedException": log.exception("Could not release worker lease")
+                    ConditionExpression="scan_id = :id AND connection_version = :v AND run_token = :token",
+                    ExpressionAttributeValues={":zero": 0, ":id": job["scan_id"], ":v": job["connection_version"], ":token": job["_run_token"]},
+                )
+            except ClientError as error:
+                if not conditional_failure(error):
+                    # The lease will expire even if its best-effort early release fails.
+                    scan_log("lease_release_failed", job, error.response["Error"]["Code"])
+
+
+def failure_record(envelope):
+    if not isinstance(envelope, dict):
+        raise ValueError("Invalid failure envelope")
+    job, request = envelope.get("requestPayload"), envelope.get("requestContext")
+    if not isinstance(job, dict) or not isinstance(request, dict):
+        raise ValueError("Invalid failure envelope")
+    if (not isinstance(job.get("pk"), str) or not job["pk"].startswith("TENANT#")
+            or job.get("region") not in REGIONS or not isinstance(job.get("connection_version"), str)
+            or not job["connection_version"]):
+        raise ValueError("Invalid failed job")
+    _valid_scan_id(job.get("scan_id"))
+    condition = request.get("condition")
+    attempts = request.get("approximateInvokeCount", 0)
+    if condition not in ("RetriesExhausted", "EventAgeExceeded") or type(attempts) is not int or attempts < 0:
+        raise ValueError("Invalid failure context")
+    marker = get(job["pk"], "RESULT#" + job["region"])
+    if (marker.get("scan_id") != job["scan_id"]
+            or marker.get("connection_version") != job["connection_version"]):
+        return
+    if marker.get("status") in TERMINAL_STATES:
+        release_tenant(marker["pk"], marker["scan_id"], marker["connection_version"])
+        return
+    profile = get(job["pk"], "PROFILE")
+    if profile.get("connection_version") != job["connection_version"]:
+        return
+    if marker.get("run_until", 0) > time.time():
+        raise RuntimeError("Worker still holds its lease")
+    expired = condition == "EventAgeExceeded" or time.time() >= deadline(marker)
+    saved = finish_scan(marker, "TIMED_OUT" if expired else "FAILED", attempts=attempts,
+                        error_code="EVENT_AGE_EXCEEDED" if expired else "RETRIES_EXHAUSTED",
+                        error_message="Scan event expired" if expired else "Worker failed after bounded retries; inspect scan logs")
+    if not saved:
+        # A worker can claim the marker between our read and conditional transaction.
+        latest = get(job["pk"], "RESULT#" + job["region"])
+        if (latest.get("scan_id") == job["scan_id"] and latest.get("status") in ACTIVE_STATES
+                and latest.get("connection_version") == job["connection_version"]):
+            raise RuntimeError("Scan finalization raced with a worker; retry recovery")
+
+
+def recovery(event, context):
+    failures = []
+    for record in event.get("Records", []):
+        try:
+            failure_record(json.loads(record["body"]))
+        except Exception as error:
+            # Never log the body, invocation payload or response stack from the destination envelope.
+            log.warning("Recovery record failed error_type=%s", type(error).__name__)
+            failures.append({"itemIdentifier": record["messageId"]})
+    return {"batchItemFailures": failures}
+
+
+def reconcile(event, context):
+    args = {"ConsistentRead": True, "FilterExpression": "begins_with(sk, :prefix) AND #s IN (:q, :r)",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": {":prefix": "RESULT#", ":q": "QUEUED", ":r": "RUNNING"}}
+    completed, failed = 0, False
+    while True:
+        page = table.scan(**args)
+        for marker in normalized(page.get("Items", [])):
+            try:
+                if marker.get("status") not in ACTIVE_STATES or not marker.get("sk", "").startswith("RESULT#"):
+                    continue
+                if time.time() >= deadline(marker) and marker.get("run_until", 0) <= time.time():
+                    if finish_scan(marker, "TIMED_OUT", error_code="JOB_DEADLINE",
+                                   error_message="Scan exceeded its 15 minute deadline", require_current=False):
+                        completed += 1
+            except (ValueError, TypeError, KeyError):
+                log.warning("Reconciler skipped invalid marker")
+            except Exception as error:
+                failed = True
+                scan_log("reconcile_failed", marker, type(error).__name__)
+        if not page.get("LastEvaluatedKey"):
+            break
+        args["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    if failed:
+        raise RuntimeError("Reconciliation infrastructure failure; independent scans processed")
+    return {"timed_out_regions": completed}

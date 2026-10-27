@@ -16,6 +16,10 @@ from rules import (
     evaluate_ebs,
     evaluate_ec2,
     evaluate_eip,
+    evaluate_load_balancer,
+    evaluate_nat_gateway,
+    evaluate_rds,
+    evaluate_s3_multipart,
     evaluate_snapshot,
     finding_id,
     idle,
@@ -107,6 +111,8 @@ class RulesTest(unittest.TestCase):
         level, evidence = idle([0]*24, [1e308]*24, [0]*24, 24, self.cfg)
         self.assertEqual(level, 'INSUFFICIENT_DATA')
         self.assertNotIn('network_mib_hour', evidence)
+        self.assertEqual(evidence['calculation_errors'], ['AGGREGATE_OVERFLOW'])
+        self.assertTrue({'netin'} <= set(evidence['invalid_metrics']))
         json.dumps(evidence, allow_nan=False)
 
     def test_spike_not_idle(self):
@@ -284,6 +290,16 @@ class RulesTest(unittest.TestCase):
         self.assertNotIn('instance_age_hours', finding['evidence'])
         json.dumps(finding, allow_nan=False)
 
+    def test_ec2_missing_or_invalid_launch_time_is_explained(self):
+        for launch in (None, '2026-10-01', dt(2026, 10, 1)):
+            with self.subTest(launch=launch):
+                instance = {**self.instance, 'LaunchTime': launch}
+                finding = evaluate_ec2(instance, [[0] * 24 for _ in range(3)], self.cfg, self.start)
+                self.assertEqual(finding['level'], 'INSUFFICIENT_DATA')
+                self.assertIn('MISSING_CREATION_TIME', finding['evidence']['data_issues'])
+                self.assertEqual(finding['evidence'].get('launch_time'), None)
+                json.dumps(finding, allow_nan=False)
+
     def test_ec2_missing_metric_reason_and_no_ok_finding(self):
         finding = evaluate_ec2(self.instance, [[], [], []], self.cfg, self.start)
         self.assertEqual(finding['level'], 'INSUFFICIENT_DATA')
@@ -357,6 +373,335 @@ class RulesTest(unittest.TestCase):
         finding = evaluate_snapshot(self.snapshot, set(), True, self.cfg, self.now)
         json.dumps(finding, allow_nan=False)
         self.assertEqual(resources, before)
+
+
+class MetricRuleValidationTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config({})
+        self.rules = (
+            ('RDS', rds_idle, ('cpu', 'connections'), ('cpu_p95', 'connections_p95')),
+            ('NAT', nat_idle, ('source', 'destination'), ('nat_mib_hour',)),
+            ('ALB', alb_idle, ('requests',), ('requests_hour',)),
+            ('NLB', nlb_idle, ('flows',), ('new_flows_hour',)),
+        )
+
+    def assert_diagnostics(self, evidence, metrics, hours=24, counts=None):
+        self.assertEqual(evidence['window_hours'], hours)
+        self.assertEqual(evidence['sample_counts'], counts or dict.fromkeys(metrics, hours))
+        self.assertEqual(evidence['required_samples'], 20 if hours == 24 else 135)
+        units = {'cpu': 'Percent', 'connections': 'Count', 'source': 'Bytes',
+                 'destination': 'Bytes', 'requests': 'Count', 'flows': 'Count'}
+        self.assertEqual(evidence['metric_units'], {metric: units[metric] for metric in metrics})
+        self.assertIsInstance(evidence['thresholds'], dict)
+        self.assertTrue(evidence['thresholds'])
+        self.assertIsInstance(evidence['missing_metrics'], list)
+        self.assertIsInstance(evidence['invalid_metrics'], list)
+        self.assertIsInstance(evidence['calculation_errors'], list)
+        json.dumps(evidence, allow_nan=False)
+
+    def test_zero_samples_preserve_results_and_add_diagnostic_evidence(self):
+        for name, evaluator, metrics, evidence_keys in self.rules:
+            with self.subTest(rule=name):
+                series = [[0] * 24 for _ in metrics]
+                level, evidence = evaluator(*series, 24, self.cfg)
+                self.assertEqual(level, 'REVIEW')
+                for key in evidence_keys:
+                    self.assertEqual(evidence[key], 0)
+                self.assertEqual(evidence['coverage'], 1)
+                self.assertEqual(evidence['missing_metrics'], [])
+                self.assertEqual(evidence['invalid_metrics'], [])
+                self.assertEqual(evidence['calculation_errors'], [])
+                self.assert_diagnostics(evidence, metrics)
+
+    def test_each_metric_requires_ceil_eighty_percent_coverage(self):
+        for name, evaluator, metrics, _ in self.rules:
+            for hours, required in ((24, 20), (168, 135)):
+                cfg = config({'window_hours': hours})
+                with self.subTest(rule=name, hours=hours, count=required):
+                    series = [[0] * required for _ in metrics]
+                    level, evidence = evaluator(*series, hours, cfg)
+                    self.assertEqual(level, 'REVIEW')
+                    self.assertEqual(evidence['coverage'], round(required / hours, 3))
+                for index, metric in enumerate(metrics):
+                    with self.subTest(rule=name, hours=hours, metric=metric, count=required - 1):
+                        series = [[0] * hours for _ in metrics]
+                        series[index] = [0] * (required - 1)
+                        level, evidence = evaluator(*series, hours, cfg)
+                        self.assertEqual(level, 'INSUFFICIENT_DATA')
+                        counts = dict.fromkeys(metrics, hours)
+                        counts[metric] = required - 1
+                        self.assert_diagnostics(evidence, metrics, hours, counts)
+                        self.assertEqual(evidence['missing_metrics'], [metric])
+                        self.assertEqual(evidence['invalid_metrics'], [])
+                        self.assertEqual(evidence['coverage'], round((required - 1) / hours, 3))
+
+    def test_missing_metric_is_not_replaced_with_zero(self):
+        for name, evaluator, metrics, _ in self.rules:
+            for index, metric in enumerate(metrics):
+                with self.subTest(rule=name, metric=metric):
+                    series = [[0] * 24 for _ in metrics]
+                    series[index] = []
+                    level, evidence = evaluator(*series, 24, self.cfg)
+                    self.assertEqual(level, 'INSUFFICIENT_DATA')
+                    counts = dict.fromkeys(metrics, 24)
+                    counts[metric] = 0
+                    self.assert_diagnostics(evidence, metrics, counts=counts)
+                    self.assertEqual(evidence['missing_metrics'], [metric])
+                    self.assertEqual(evidence['invalid_metrics'], [])
+                    self.assertEqual(evidence['coverage'], 0)
+
+    def test_any_invalid_sample_fails_closed_even_after_enough_valid_samples(self):
+        invalid_samples = (
+            -1, True, False, None, '0', {}, float('nan'), float('inf'), float('-inf'), 10**400,
+        )
+        for name, evaluator, metrics, evidence_keys in self.rules:
+            for index, metric in enumerate(metrics):
+                for invalid in invalid_samples:
+                    with self.subTest(rule=name, metric=metric, invalid=repr(invalid)):
+                        series = [[0] * 24 for _ in metrics]
+                        series[index].append(invalid)
+                        level, evidence = evaluator(*series, 24, self.cfg)
+                        self.assertEqual(level, 'INSUFFICIENT_DATA')
+                        self.assert_diagnostics(evidence, metrics)
+                        self.assertEqual(evidence['missing_metrics'], [])
+                        self.assertEqual(evidence['invalid_metrics'], [metric])
+                        self.assertEqual(evidence['calculation_errors'], [])
+                        for key in evidence_keys:
+                            self.assertNotIn(key, evidence)
+
+    def test_rds_thresholds_are_strict_for_both_metrics(self):
+        cfg = config({'rds_cpu_percent': 7, 'rds_connections': 3})
+        for index, (metric, threshold, evidence_key) in enumerate((
+            ('cpu', 7, 'cpu_p95'), ('connections', 3, 'connections_p95'),
+        )):
+            for value, expected in ((threshold - 1, 'REVIEW'), (threshold, 'OK'), (threshold + 1, 'OK')):
+                with self.subTest(metric=metric, value=value):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [value] * 24
+                    level, evidence = rds_idle(*series, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], value)
+
+    def test_invalid_samples_do_not_supply_required_coverage(self):
+        for name, evaluator, metrics, _ in self.rules:
+            for index, metric in enumerate(metrics):
+                with self.subTest(rule=name, metric=metric):
+                    series = [[0] * 24 for _ in metrics]
+                    series[index] = [0] * 19 + [-1]
+                    level, evidence = evaluator(*series, 24, self.cfg)
+                    self.assertEqual(level, 'INSUFFICIENT_DATA')
+                    self.assertEqual(evidence['sample_counts'][metric], 19)
+                    self.assertEqual(evidence['missing_metrics'], [metric])
+                    self.assertEqual(evidence['invalid_metrics'], [metric])
+                    self.assertEqual(evidence['coverage'], round(19 / 24, 3))
+                    json.dumps(evidence, allow_nan=False)
+
+    def test_rds_preserves_nearest_rank_p95_for_both_metrics(self):
+        for index, (metric, threshold, evidence_key) in enumerate((
+            ('cpu', self.cfg['rds_cpu_percent'], 'cpu_p95'),
+            ('connections', self.cfg['rds_connections'], 'connections_p95'),
+        )):
+            for spikes, expected_value, expected in ((1, 0, 'REVIEW'), (2, threshold, 'OK')):
+                with self.subTest(metric=metric, spikes=spikes):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [0] * (24 - spikes) + [threshold] * spikes
+                    level, evidence = rds_idle(*series, 24, self.cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], expected_value)
+
+    def test_alb_and_nlb_thresholds_are_strict(self):
+        cfg = config({'alb_requests_hour': 20, 'nlb_new_flows_hour': 30})
+        for name, evaluator, threshold, evidence_key in (
+            ('ALB', alb_idle, 20, 'requests_hour'), ('NLB', nlb_idle, 30, 'new_flows_hour'),
+        ):
+            for value, expected in ((threshold - 1, 'REVIEW'), (threshold, 'OK'), (threshold + 1, 'OK')):
+                with self.subTest(rule=name, value=value):
+                    level, evidence = evaluator([value] * 24, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], value)
+
+    def test_alb_and_nlb_preserve_arithmetic_hourly_mean(self):
+        for name, evaluator, evidence_key in (
+            ('ALB', alb_idle, 'requests_hour'), ('NLB', nlb_idle, 'new_flows_hour'),
+        ):
+            for spike, expected_value, expected in ((12, 0.5, 'REVIEW'), (24, 1, 'OK')):
+                with self.subTest(rule=name, spike=spike):
+                    level, evidence = evaluator([0] * 23 + [spike], 24, self.cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence[evidence_key], expected_value)
+
+    def test_nat_threshold_is_strict_for_either_direction(self):
+        cfg = config({'nat_mib_hour': 2})
+        for index, direction in enumerate(('source_bytes', 'destination_bytes')):
+            for rate, expected in ((1.5, 'REVIEW'), (2, 'OK'), (2.5, 'OK')):
+                with self.subTest(direction=direction, rate=rate):
+                    series = [[0] * 24, [0] * 24]
+                    series[index] = [rate * 1048576] * 24
+                    level, evidence = nat_idle(*series, 24, cfg)
+                    self.assertEqual(level, expected)
+                    self.assertEqual(evidence['nat_mib_hour'], rate)
+
+    def test_nat_partial_coverage_preserves_each_direction_measured_rate(self):
+        for hours, required in ((24, 20), (168, 135)):
+            cfg = config({'window_hours': hours})
+            for index, direction in enumerate(('source_bytes', 'destination_bytes')):
+                for rate, expected in ((0.5, 'REVIEW'), (1, 'OK'), (1.5, 'OK')):
+                    with self.subTest(hours=hours, direction=direction, rate=rate):
+                        series = [[0] * required, [0] * required]
+                        series[index] = [rate * 1048576] * required
+                        level, evidence = nat_idle(*series, hours, cfg)
+                        self.assertEqual(level, expected)
+                        self.assertEqual(evidence['nat_mib_hour'], rate)
+                        self.assertEqual(evidence['coverage'], round(required / hours, 3))
+
+    def test_nat_unequal_coverage_uses_each_direction_observed_hours(self):
+        for hours, required in ((24, 20), (168, 135)):
+            cfg = config({'window_hours': hours})
+            for source_count, destination_count in ((required, hours), (hours, required)):
+                for source_rate, destination_rate, expected_rate, expected in (
+                    (0.6, 0.3, 0.9, 'REVIEW'), (0.6, 0.4, 1, 'OK'), (0.6, 0.5, 1.1, 'OK'),
+                ):
+                    with self.subTest(hours=hours, source_count=source_count,
+                                      destination_count=destination_count, rate=expected_rate):
+                        source = [source_rate * 1048576] * source_count
+                        destination = [destination_rate * 1048576] * destination_count
+                        level, evidence = nat_idle(source, destination, hours, cfg)
+                        self.assertEqual(level, expected)
+                        self.assertAlmostEqual(evidence['nat_mib_hour'], expected_rate)
+                        self.assertEqual(evidence['coverage'], round(required / hours, 3))
+                        reverse_level, reverse = nat_idle(destination, source, hours, cfg)
+                        self.assertEqual(reverse_level, level)
+                        self.assertEqual(reverse['nat_mib_hour'], evidence['nat_mib_hour'])
+                        self.assertEqual(reverse['sample_counts'], {'source': destination_count, 'destination': source_count})
+
+    def test_extreme_finite_samples_never_produce_nonfinite_evidence(self):
+        for name, evaluator, metrics, evidence_keys in self.rules:
+            for index, metric in enumerate(metrics):
+                for value in (1e308, 10**308):
+                    with self.subTest(rule=name, metric=metric, value_type=type(value).__name__):
+                        series = [[0] * 24 for _ in metrics]
+                        series[index] = [value] * 24
+                        level, evidence = evaluator(*series, 24, self.cfg)
+                        self.assertIn(level, ('OK', 'INSUFFICIENT_DATA'))
+                        if level == 'INSUFFICIENT_DATA':
+                            self.assert_diagnostics(evidence, metrics)
+                            self.assertEqual(evidence['calculation_errors'], ['AGGREGATE_OVERFLOW'])
+                            self.assertIn(metric, evidence['invalid_metrics'])
+                            for key in evidence_keys:
+                                self.assertNotIn(key, evidence)
+                        else:
+                            self.assertTrue(set(evidence_keys) <= set(evidence))
+                            self.assert_diagnostics(evidence, metrics)
+
+    def test_nat_combined_direction_overflow_fails_closed(self):
+        level, evidence = nat_idle([9e307] * 24, [9e307] * 24, 24, self.cfg)
+        self.assertIn(level, ('OK', 'INSUFFICIENT_DATA'))
+        if level == 'INSUFFICIENT_DATA':
+            self.assert_diagnostics(evidence, ('source', 'destination'))
+            self.assertEqual(evidence['calculation_errors'], ['AGGREGATE_OVERFLOW'])
+            self.assertEqual(set(evidence['invalid_metrics']), {'source', 'destination'})
+        else:
+            json.dumps(evidence, allow_nan=False)
+
+
+class ServiceEvaluatorTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = config({})
+        self.now = dt(2026, 10, 26, 9, 17, tzinfo=timezone.utc)
+        self.start = self.now.replace(minute=0) - timedelta(hours=24)
+        old = self.start - timedelta(days=1)
+        self.resources = (
+            ('RDS', evaluate_rds, {'DBInstanceIdentifier': 'db-demo', 'DBInstanceArn': 'arn:db',
+                                'DBInstanceStatus': 'available', 'InstanceCreateTime': old,
+                                'DBInstanceClass': 'db.t4g.micro', 'Engine': 'postgres'},
+             'InstanceCreateTime', 2),
+            ('NAT_GATEWAY', evaluate_nat_gateway, {'NatGatewayId': 'nat-demo', 'State': 'available',
+                                                 'CreateTime': old, 'VpcId': 'vpc-demo', 'SubnetId': 'subnet-demo'},
+             'CreateTime', 2),
+            ('ALB', evaluate_load_balancer, {'Type': 'application', 'State': {'Code': 'active'},
+                                           'LoadBalancerName': 'alb-demo', 'LoadBalancerArn': 'arn:loadbalancer/app/demo/id',
+                                           'CreatedTime': old, 'Scheme': 'internet-facing'}, 'CreatedTime', 1),
+            ('NLB', evaluate_load_balancer, {'Type': 'network', 'State': {'Code': 'active'},
+                                           'LoadBalancerName': 'nlb-demo', 'LoadBalancerArn': 'arn:loadbalancer/net/demo/id',
+                                           'CreatedTime': old, 'Scheme': 'internal'}, 'CreatedTime', 1),
+        )
+
+    def test_all_metric_service_wrappers_return_explainable_findings(self):
+        for kind, evaluator, resource, created_key, metric_count in self.resources:
+            with self.subTest(kind=kind):
+                metrics = tuple([0] * 24 for _ in range(metric_count))
+                before = copy.deepcopy((resource, metrics, self.cfg))
+                finding = evaluator(resource, metrics, self.cfg, self.start)
+                self.assertEqual(finding['type'], kind)
+                self.assertEqual(finding['level'], 'REVIEW')
+                self.assertTrue(finding['resource_id'])
+                self.assertTrue(finding['rule_id'])
+                self.assertTrue(finding['reason'])
+                self.assertTrue(finding['recommendation'])
+                self.assertEqual(finding['evidence']['created_at'], resource[created_key].isoformat())
+                self.assertEqual(finding['evidence']['coverage'], 1)
+                self.assertEqual((resource, metrics, self.cfg), before)
+                json.dumps(finding, allow_nan=False)
+
+    def test_creation_boundary_young_and_missing_are_distinct(self):
+        for kind, evaluator, resource, created_key, metric_count in self.resources:
+            for created, issue in ((self.start, None),
+                                   (self.start + timedelta(microseconds=1), 'RESOURCE_TOO_YOUNG'),
+                                   (None, 'MISSING_CREATION_TIME')):
+                with self.subTest(kind=kind, created=created):
+                    item = dict(resource)
+                    if created is None:
+                        item.pop(created_key)
+                    else:
+                        item[created_key] = created
+                    finding = evaluator(item, tuple([0] * 24 for _ in range(metric_count)), self.cfg, self.start)
+                    self.assertEqual(finding['level'], 'INSUFFICIENT_DATA' if issue else 'REVIEW')
+                    if issue:
+                        self.assertIn(issue, finding['evidence']['data_issues'])
+                    self.assertEqual(finding['evidence'].get('created_at'), created.isoformat() if created else None)
+                    json.dumps(finding, allow_nan=False)
+
+    def test_nonactive_metric_resources_and_keep_tags_are_excluded(self):
+        for kind, evaluator, resource, _, metric_count in self.resources:
+            with self.subTest(kind=kind):
+                inactive = copy.deepcopy(resource)
+                if kind == 'RDS':
+                    inactive['DBInstanceStatus'] = 'stopped'
+                    tag_key = 'TagList'
+                elif kind == 'NAT_GATEWAY':
+                    inactive['State'] = 'deleted'
+                    tag_key = 'Tags'
+                else:
+                    inactive['State'] = {'Code': 'provisioning'}
+                    tag_key = 'Tags'
+                values = tuple([0] * 24 for _ in range(metric_count))
+                self.assertIsNone(evaluator(inactive, values, self.cfg, self.start))
+                tagged = {**resource, tag_key: [{'Key': 'guardian:keep', 'Value': 'TRUE'}]}
+                self.assertIsNone(evaluator(tagged, values, self.cfg, self.start))
+
+    def test_s3_upload_strict_seven_day_boundary_and_missing_time(self):
+        for age, expected in ((timedelta(days=7, microseconds=-1), None),
+                              (timedelta(days=7), None),
+                              (timedelta(days=7, microseconds=1), 'REVIEW')):
+            with self.subTest(age=age):
+                upload = {'Key': 'nested/object', 'UploadId': 'upload-id', 'Initiated': self.now - age}
+                before = copy.deepcopy(upload)
+                finding = evaluate_s3_multipart('demo', upload, self.now)
+                self.assertEqual(upload, before)
+                if expected is None:
+                    self.assertIsNone(finding)
+                else:
+                    self.assertEqual(finding['type'], 'S3_MULTIPART')
+                    self.assertEqual(finding['resource_id'], 's3://demo/nested/object')
+                    self.assertEqual(finding['level'], expected)
+                    self.assertTrue(finding['rule_id'])
+                    self.assertTrue(finding['recommendation'])
+                    self.assertEqual(finding['evidence']['upload_id'], 'upload-id')
+                    json.dumps(finding, allow_nan=False)
+        missing = evaluate_s3_multipart('demo', {'Key': 'object', 'UploadId': 'missing-time'}, self.now)
+        self.assertEqual(missing['level'], 'INSUFFICIENT_DATA')
+        self.assertIn('INVALID_INITIATION_TIME', missing['evidence']['data_issues'])
+        json.dumps(missing, allow_nan=False)
 
 
 if __name__ == '__main__':

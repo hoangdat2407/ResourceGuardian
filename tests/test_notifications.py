@@ -74,6 +74,7 @@ class Notifications(unittest.TestCase):
         app.put({
             "pk": profile["pk"], "sk": "RESULT#" + self.result["region"],
             "scan_id": "scan-email", "status": "QUEUED", "started_at": self.now,
+            "region": self.result["region"], "connection_version": "v1",
         })
         findings = [
             {**finding, "finding_id": str(index) * 64}

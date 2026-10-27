@@ -50,7 +50,30 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 180
       SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OperationsDeadLetters.Arn
+        maxReceiveCount: 5
+  OperationsDeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  OperationsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref OperationsDeadLetters]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: events.amazonaws.com}
+            Action: sqs:SendMessage
+            Resource: !GetAtt OperationsDeadLetters.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: [!GetAtt ScheduleFunctionTick.Arn, !GetAtt ReconcileFunctionTick.Arn]
   ApiRole:
     Type: AWS::IAM::Role
     Properties:
@@ -67,7 +90,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:ConditionCheckItem]
                 Resource: !GetAtt Data.Arn
               - Effect: Allow
                 Action: lambda:InvokeFunction
@@ -91,7 +114,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem]
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem, dynamodb:ConditionCheckItem]
                 Resource: !GetAtt Data.Arn
               - Effect: Allow
                 Action: sqs:SendMessage
@@ -121,11 +144,56 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:Scan, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+                Action: [dynamodb:Scan, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:ConditionCheckItem]
                 Resource: !GetAtt Data.Arn
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !GetAtt WorkerFunction.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt OperationsDeadLetters.Arn
+  RecoveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: guardian-recovery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:ConditionCheckItem]
+                Resource: !GetAtt Data.Arn
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt DeadLetters.Arn
+  ReconcileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: guardian-reconcile
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Scan, dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:ConditionCheckItem]
+                Resource: !GetAtt Data.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt OperationsDeadLetters.Arn
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -213,8 +281,55 @@ Resources:
       Handler: app.scheduler
       Timeout: 60
       Role: !GetAtt ScheduleRole.Arn
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 600
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt OperationsDeadLetters.Arn
       Events:
-        Tick: {Type: Schedule, Properties: {Schedule: 'rate(1 hour)', Enabled: true}}
+        Tick:
+          Type: Schedule
+          Properties:
+            Schedule: 'rate(1 hour)'
+            Enabled: true
+            RetryPolicy: {MaximumEventAgeInSeconds: 600, MaximumRetryAttempts: 2}
+            DeadLetterConfig: {Arn: !GetAtt OperationsDeadLetters.Arn}
+  RecoveryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.recovery
+      Timeout: 30
+      Role: !GetAtt RecoveryRole.Arn
+      Events:
+        FailedScans:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DeadLetters.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+  ReconcileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.reconcile
+      Timeout: 30
+      Role: !GetAtt ReconcileRole.Arn
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 300
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt OperationsDeadLetters.Arn
+      Events:
+        Tick:
+          Type: Schedule
+          Properties:
+            Schedule: 'rate(5 minutes)'
+            Enabled: true
+            RetryPolicy: {MaximumEventAgeInSeconds: 300, MaximumRetryAttempts: 2}
+            DeadLetterConfig: {Arn: !GetAtt OperationsDeadLetters.Arn}
   ApiLogs:
     Type: AWS::Logs::LogGroup
     Properties: {LogGroupName: !Sub '/aws/lambda/${ApiFunction}', RetentionInDays: 7}
@@ -224,6 +339,96 @@ Resources:
   ScheduleLogs:
     Type: AWS::Logs::LogGroup
     Properties: {LogGroupName: !Sub '/aws/lambda/${ScheduleFunction}', RetentionInDays: 7}
+  RecoveryLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: !Sub '/aws/lambda/${RecoveryFunction}', RetentionInDays: 7}
+  ReconcileLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: !Sub '/aws/lambda/${ReconcileFunction}', RetentionInDays: 7}
+  DestinationDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda could not deliver an asynchronous failure; inspect function IAM and destination queues.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: failures
+          Expression: SUM(METRICS())
+          Label: Failure destination delivery errors
+          ReturnData: true
+        - Id: worker
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: DestinationDeliveryFailures
+              Dimensions: [{Name: FunctionName, Value: !Ref WorkerFunction}]
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: schedule
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: DestinationDeliveryFailures
+              Dimensions: [{Name: FunctionName, Value: !Ref ScheduleFunction}]
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: reconcile
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: DestinationDeliveryFailures
+              Dimensions: [{Name: FunctionName, Value: !Ref ReconcileFunction}]
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+  EventDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: EventBridge could not send an undelivered schedule event to the operations queue.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: failures
+          Expression: SUM(METRICS())
+          Label: EventBridge DLQ delivery errors
+          ReturnData: true
+        - Id: schedule
+          MetricStat:
+            Metric:
+              Namespace: AWS/Events
+              MetricName: InvocationsFailedToBeSentToDlq
+              Dimensions: [{Name: RuleName, Value: !Ref ScheduleFunctionTick}]
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: reconcile
+          MetricStat:
+            Metric:
+              Namespace: AWS/Events
+              MetricName: InvocationsFailedToBeSentToDlq
+              Dimensions: [{Name: RuleName, Value: !Ref ReconcileFunctionTick}]
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+  OperationsBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Operations DLQ has unhandled messages; correlate scan history and sanitized logs before starting a new scan.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{Name: QueueName, Value: !GetAtt OperationsDeadLetters.QueueName}]
+      Statistic: Maximum
+      Period: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
   ApiErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -444,3 +649,10 @@ Outputs:
   ScanPrincipal: {Value: !GetAtt ScanRole.Arn}
   TableName: {Value: !Ref Data}
   DeadLetterQueueUrl: {Value: !Ref DeadLetters}
+  OperationsDeadLetterQueueUrl: {Value: !Ref OperationsDeadLetters}
+  WorkerFunctionName: {Value: !Ref WorkerFunction}
+  ScheduleFunctionName: {Value: !Ref ScheduleFunction}
+  RecoveryFunctionName: {Value: !Ref RecoveryFunction}
+  ReconcileFunctionName: {Value: !Ref ReconcileFunction}
+  ScheduleRuleName: {Value: !Ref ScheduleFunctionTick}
+  ReconcileRuleName: {Value: !Ref ReconcileFunctionTick}
