@@ -44,6 +44,9 @@ TERMINAL_STATES = ("SUCCEEDED", "PARTIAL", "FAILED", "TIMED_OUT")
 JOB_SECONDS = 900
 RUN_SECONDS = 330
 RETENTION_SECONDS = 30 * 86400
+OBSERVATION_READ_LIMIT = 100
+OBSERVATION_WRITE_LIMIT = 98
+OBSERVATION_READ_ATTEMPTS = 3
 
 
 class ScanCooldown(Exception):
@@ -161,6 +164,152 @@ def transaction(actions):
 
 def deadline(marker):
     return marker.get("deadline_at", marker.get("created_at", marker.get("started_at", 0)) + JOB_SECONDS)
+
+
+def record_finding_observations(marker, findings, time_check):
+    """Persist collected finding times; return None on ownership loss, epochs otherwise.
+
+    The worker integration is separate from this persistence operation. Completed
+    batches describe real observations even if a later batch or scan commit fails.
+    Infrastructure errors and registry snapshot conflicts propagate for scan retry.
+    """
+    pk, region, version = (marker.get(key) for key in ("pk", "region", "connection_version"))
+    if (not isinstance(pk, str) or not pk.startswith("TENANT#") or len(pk) <= 7
+            or not isinstance(region, str) or region not in REGIONS
+            or not isinstance(version, str) or not version
+            or marker.get("sk") != "RESULT#" + region
+            or not isinstance(marker.get("scan_id"), str) or not marker["scan_id"]
+            or not isinstance(marker.get("run_token"), str) or not marker["run_token"]
+            or not isinstance(findings, (list, tuple))):
+        raise ValueError("Invalid finding observation context")
+
+    observations = {}
+    for finding in findings:
+        if (not isinstance(finding, dict) or not isinstance(finding.get("finding_id"), str)
+                or not FINDING_ID_RE.fullmatch(finding["finding_id"])
+                or finding.get("region") != region or not isinstance(finding.get("evaluated_at"), str)):
+            raise ValueError("Invalid finding observation")
+        try:
+            observed = datetime.fromisoformat(finding["evaluated_at"])
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                raise ValueError("Observation timestamp must include a timezone")
+            stamp = observed.timestamp()
+            if stamp < 0:
+                raise ValueError("Observation timestamp must be nonnegative")
+            stamp = int(stamp)
+        except (ValueError, OverflowError, OSError) as error:
+            raise ValueError("Invalid finding observation timestamp") from error
+        ident = finding["finding_id"]
+        observations[ident] = max(observations.get(ident, stamp), stamp)
+    if not observations:
+        return {}
+    if (marker.get("status") != "RUNNING" or marker.get("run_until", 0) <= time.time()
+            or deadline(marker) <= time.time()):
+        return None
+
+    keys = [{"pk": pk, "sk": "OBSF#" + version + "#" + region + "#" + ident} for ident in observations]
+    previous = {}
+    for start in range(0, len(keys), OBSERVATION_READ_LIMIT):
+        pending = keys[start:start + OBSERVATION_READ_LIMIT]
+        for attempt in range(OBSERVATION_READ_ATTEMPTS):
+            time_check()
+            if attempt:
+                time.sleep(0.1 * 2 ** (attempt - 1))
+                time_check()
+            reply = table.meta.client.batch_get_item(
+                RequestItems={table.name: {"Keys": pending, "ConsistentRead": True}},
+            )
+            requested = {(key["pk"], key["sk"]) for key in pending}
+            responses = reply.get("Responses")
+            unprocessed = reply.get("UnprocessedKeys", {})
+            if (not isinstance(responses, dict) or set(responses) - {table.name}
+                    or not isinstance(responses.get(table.name, []), list)
+                    or not isinstance(unprocessed, dict) or set(unprocessed) - {table.name}):
+                raise ValueError("Invalid finding observation batch response")
+            remaining = unprocessed.get(table.name, {})
+            if not isinstance(remaining, dict):
+                raise ValueError("Invalid unprocessed finding observation request")
+            retry = remaining.get("Keys", [])
+            if (not isinstance(retry, list) or any(not isinstance(key, dict)
+                    or set(key) != {"pk", "sk"} or not isinstance(key["pk"], str)
+                    or not isinstance(key["sk"], str) or (key["pk"], key["sk"]) not in requested for key in retry)):
+                raise ValueError("Invalid unprocessed finding observation keys")
+            retry_keys = {(key["pk"], key["sk"]) for key in retry}
+            if len(retry_keys) != len(retry):
+                raise ValueError("Duplicate unprocessed finding observation keys")
+            for item in responses.get(table.name, []):
+                if (not isinstance(item, dict) or (item.get("pk"), item.get("sk")) not in requested
+                        or item["sk"] in previous or (item["pk"], item["sk"]) in retry_keys):
+                    raise ValueError("Invalid finding observation item")
+                stamps = [item.get(key) for key in ("first_seen_at", "last_seen_at", "expires")]
+                for value in stamps:
+                    if (isinstance(value, bool) or not isinstance(value, (int, Decimal))
+                            or (isinstance(value, Decimal) and not value.is_finite())):
+                        raise ValueError("Invalid stored finding observation timestamps")
+                first, last, expires = (int(value) for value in stamps)
+                if (any(value != integer for value, integer in zip(stamps, (first, last, expires)))
+                        or not 0 <= first <= last or expires != last + RETENTION_SECONDS):
+                    raise ValueError("Invalid stored finding observation retention")
+                previous[item["sk"]] = {"first_seen_at": first, "last_seen_at": last, "expires": expires}
+            pending = retry
+            if not pending:
+                break
+        if pending:
+            raise ClientError({"Error": {"Code": "ProvisionedThroughputExceededException",
+                              "Message": "Finding observations could not be read within the retry limit"}}, "BatchGetItem")
+
+    updates, result = [], {}
+    for ident, observed_at in observations.items():
+        sk = "OBSF#" + version + "#" + region + "#" + ident
+        old = previous.get(sk)
+        active = old is not None and old["expires"] > observed_at
+        first = old["first_seen_at"] if active else observed_at
+        last = max(old["last_seen_at"], observed_at) if active else observed_at
+        item = {"pk": pk, "sk": sk, "first_seen_at": first, "last_seen_at": last,
+                "expires": last + RETENTION_SECONDS}
+        update = {"TableName": table.name, "Item": item, "ConditionExpression": "attribute_not_exists(pk)"}
+        if old is not None:
+            update.update(
+                ConditionExpression="first_seen_at = :first AND last_seen_at = :last AND expires = :expires",
+                ExpressionAttributeValues={":first": old["first_seen_at"], ":last": old["last_seen_at"], ":expires": old["expires"]},
+            )
+        updates.append({"Put": update})
+        result[ident] = {"first_seen_at": first, "last_seen_at": last}
+
+    for start in range(0, len(updates), OBSERVATION_WRITE_LIMIT):
+        time_check()
+        now = time.time()
+        if marker.get("run_until", 0) <= now or deadline(marker) <= now:
+            return None
+        checks = [
+            {"ConditionCheck": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": marker["sk"]},
+                "ConditionExpression": "#state = :running AND scan_id = :id AND connection_version = :v AND run_token = :token AND run_until > :now AND deadline_at > :now",
+                "ExpressionAttributeNames": {"#state": "status"},
+                "ExpressionAttributeValues": {":running": "RUNNING", ":id": marker["scan_id"], ":v": version,
+                                              ":token": marker["run_token"], ":now": now},
+            }},
+            {"ConditionCheck": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": "PROFILE"},
+                "ConditionExpression": "connection_version = :v AND contains(regions, :region)",
+                "ExpressionAttributeValues": {":v": version, ":region": region},
+            }},
+        ]
+        try:
+            transaction(updates[start:start + OBSERVATION_WRITE_LIMIT] + checks)
+        except ClientError as error:
+            if not conditional_failure(error):
+                raise
+            latest, profile = get(pk, marker["sk"]), get(pk, "PROFILE")
+            now = time.time()
+            if (latest.get("status") != "RUNNING" or latest.get("scan_id") != marker["scan_id"]
+                    or latest.get("connection_version") != version or latest.get("run_token") != marker["run_token"]
+                    or latest.get("run_until", 0) <= now or deadline(latest) <= now
+                    or profile.get("connection_version") != version or region not in profile.get("regions", [])):
+                return None
+            # A changed/TTL-deleted observation is a snapshot race, not lost ownership.
+            raise
+    return result
 
 
 def history_key(marker):
@@ -724,11 +873,12 @@ def scan(job, context):
         transaction([
             {"Update": {
                 "TableName": table.name, "Key": {"pk": pk, "sk": "RESULT#" + region},
-                "UpdateExpression": "SET #state = :running, run_until = :until, run_token = :token ADD attempt_count :one",
+                "UpdateExpression": "SET #state = :running, run_until = :until, run_token = :token, deadline_at = if_not_exists(deadline_at, :deadline) ADD attempt_count :one",
                 "ConditionExpression": "scan_id = :id AND connection_version = :v AND #state IN (:queued, :running) AND (attribute_not_exists(run_until) OR run_until <= :now)",
                 "ExpressionAttributeNames": {"#state": "status"},
                 "ExpressionAttributeValues": {":queued": "QUEUED", ":running": "RUNNING", ":until": min(now + RUN_SECONDS, deadline(marker)),
-                                            ":token": run_token, ":id": job["scan_id"], ":v": job["connection_version"], ":now": now, ":one": 1},
+                                            ":token": run_token, ":id": job["scan_id"], ":v": job["connection_version"], ":now": now, ":one": 1,
+                                            ":deadline": deadline(marker)},
             }},
             {"ConditionCheck": {
                 "TableName": table.name, "Key": {"pk": pk, "sk": "PROFILE"},
@@ -797,11 +947,32 @@ def scan(job, context):
         sess, region, profile.get("account_id", ""), profile["settings"],
         profile["service_groups"], datetime.fromtimestamp(now, timezone.utc), time_check, observed,
     )
+
+    def observation_time_check():
+        # Collection reserves 60 seconds for persistence; leave 10 for finalization.
+        if (context.get_remaining_time_in_millis() < 10000
+                or time.time() >= min(deadline(marker), marker["run_until"]) - 10):
+            raise TimeoutError("Insufficient time to persist finding observations")
+
+    try:
+        observation_time_check()
+        observations = record_finding_observations(marker, collected["findings"], observation_time_check)
+    except TimeoutError:
+        finish_scan(marker, "TIMED_OUT", run_token=run_token, error_code="TIME_BUDGET",
+                    error_message="Insufficient time remaining to persist finding observations safely")
+        return {"timed_out": True}
+    if observations is None:
+        return
+    collected_findings = [
+        {**finding, **{key: datetime.fromtimestamp(value, timezone.utc).isoformat()
+                      for key, value in observations[finding["finding_id"]].items()}}
+        for finding in collected["findings"]
+    ]
     skip = {r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "IGNORE#" + profile["connection_version"] + "#" + region + "#") if r.get("expires", 0) > now}
     skip.update(r["sk"].rsplit("#", 1)[1] for r in all_items(pk, "KEEP#" + profile["connection_version"] + "#" + region + "#") if r.get("enabled") is True)
     feedback = feedback_records(pk, profile, region)
     candidates = [
-        finding for finding in collected["findings"]
+        finding for finding in collected_findings
         if finding.get("resource_id") not in skip
     ]
     actionable = feedback_findings(candidates, feedback, now)

@@ -114,7 +114,7 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem, dynamodb:ConditionCheckItem]
+                Action: [dynamodb:GetItem, dynamodb:BatchGetItem, dynamodb:PutItem, dynamodb:Query, dynamodb:DeleteItem, dynamodb:UpdateItem, dynamodb:ConditionCheckItem]
                 Resource: !GetAtt Data.Arn
               - Effect: Allow
                 Action: sqs:SendMessage

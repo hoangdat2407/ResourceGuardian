@@ -199,6 +199,8 @@ class Workflows(unittest.TestCase):
                                    'evaluated_at': self.now.isoformat()}.items():
                     self.assertEqual(finding[key], value)
                     self.assertEqual(evidence[key], value)
+                for key in ('first_seen_at', 'last_seen_at'):
+                    self.assertEqual(datetime.fromisoformat(finding[key]), self.now)
                 if kind in statistics:
                     end = self.now.replace(minute=0)
                     self.assertEqual(evidence['observation_start'], (end - timedelta(hours=24)).isoformat())
@@ -217,6 +219,10 @@ class Workflows(unittest.TestCase):
                 stored = next(row for row in rows if row['scan_id'] == result['scan_id'])
                 self.assertNotIn('candidates', stored)
                 self.assertEqual(stored['findings'], result['findings'])
+                self.assertEqual({item['type'] for item in stored['findings']}, set(findings))
+                for finding in stored['findings']:
+                    for key in ('first_seen_at', 'last_seen_at'):
+                        self.assertEqual(datetime.fromisoformat(finding[key]), self.now)
                 json.dumps(stored, allow_nan=False)
 
     def test_young_or_missing_creation_metric_resources_do_not_query_cloudwatch(self):
@@ -506,11 +512,14 @@ class Workflows(unittest.TestCase):
         self.assertIn({"type": "EBS", "code": "RESOURCE_LIMIT"}, result["errors"])
 
     def test_candidate_byte_budget_reports_partial_and_keeps_history_readable(self):
+        metadata = {'account_id': self.profile['account_id'], 'region': 'ap-southeast-1',
+                    'evaluated_at': self.now.isoformat()}
         findings = [
-            {'type': 'EBS', 'resource_id': 'vol-' + str(index), 'region': 'ap-southeast-1',
+            {'type': 'EBS', 'resource_id': 'vol-' + str(index), **metadata,
              'finding_id': collectors.finding_id('EBS', 'ap-southeast-1', 'vol-' + str(index)),
              'level': 'REVIEW', 'rule_id': 'EBS_UNATTACHED', 'reason': 'Unattached volume',
-             'recommendation': 'Confirm retention with owner', 'evidence': {'details': 'x' * (40 * 1024)}}
+             'recommendation': 'Confirm retention with owner',
+             'evidence': {**metadata, 'details': 'x' * (40 * 1024)}}
             for index in range(5)
         ]
         with patch.object(app, 'collect_region', return_value={'counts': {'EBS': 5}, 'findings': findings,
@@ -524,6 +533,22 @@ class Workflows(unittest.TestCase):
         self.assertEqual(result['status'], 'PARTIAL')
         self.assertIn({'type': 'FINDING', 'code': 'CANDIDATE_LIMIT'}, result['errors'])
         self.assertLessEqual(len(json.dumps(result, ensure_ascii=False).encode('utf-8')), app.RESULT_BYTE_LIMIT)
+        without_timestamps = copy.deepcopy(result)
+        for group in ('findings', 'candidates'):
+            for finding in without_timestamps[group]:
+                for key in ('first_seen_at', 'last_seen_at'):
+                    self.assertEqual(datetime.fromisoformat(finding.pop(key)), self.now)
+        timestamp_free_budget = len(json.dumps(without_timestamps, ensure_ascii=False).encode('utf-8'))
+        self.assertLess(timestamp_free_budget, len(json.dumps(result, ensure_ascii=False).encode('utf-8')))
+        # The same candidates fit without timestamp bytes. With timestamps, the
+        # real worker must retain fewer candidates to satisfy that exact budget.
+        with patch.object(app, 'RESULT_BYTE_LIMIT', timestamp_free_budget), patch.object(
+            app, 'collect_region', return_value={'counts': {'EBS': 5}, 'findings': findings,
+                                                 'errors': [], 'partial': False}
+        ):
+            smaller = self.scan()
+        self.assertLess(len(smaller['candidates']), retained)
+        self.assertLessEqual(len(json.dumps(smaller, ensure_ascii=False).encode('utf-8')), timestamp_free_budget)
         detail = json.loads(app.api(event('GET', '/scans/' + result['scan_id']), None)['body'])['results'][0]
         self.assertEqual(detail['findings'], result['findings'])
         self.assertNotIn('candidates', detail)
