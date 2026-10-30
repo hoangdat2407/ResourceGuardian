@@ -143,6 +143,8 @@ def main():
                 result = state['profile']
             elif path == '/findings':
                 result = {'results': state['rows']}
+            elif path == '/feedback' and request.method == 'GET':
+                result = {'results': [], 'next_token': None}
             elif path == '/history':
                 result = {'results': state['history'], 'next_token': None}
             elif path == '/connection' and request.method == 'PUT':

@@ -54,13 +54,15 @@ try:
         state = dict(profile=copy.deepcopy(PROFILE), rows=[], history=[], requests=[], connection_error=False,
                      findings_error=False, history_error=False, scan_error=False)
         def route_api(route):
-            path = route.request.url.split('/api')[-1]
+            path = route.request.url.split('/api')[-1].split('?')[0]
             state['requests'].append((route.request.method, path, route.request.post_data))
             status, data = 200, {}
             if path == '/me':
                 data = state['profile']
             elif path == '/findings':
                 status, data = (503, {'error': 'Service unavailable'}) if state['findings_error'] else (200, {'results': state['rows']})
+            elif path == '/feedback' and route.request.method == 'GET':
+                data = {'results': [], 'next_token': None}
             elif path == '/history':
                 status, data = (503, {'error': 'Service unavailable'}) if state['history_error'] else (200, {'results': state['history']})
             elif path == '/connection':

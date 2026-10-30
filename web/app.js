@@ -3,12 +3,14 @@ const $=id=>document.getElementById(id);
 let cfg,profile,results=[],historyRows=[],token=sessionStorage.getItem('crg-token'),pollTimer,pollCount=0,loadingResults=true,resultsError=false,scanPending=false,scopeGeneration=0,detailFocus=null;
 let findingsRevision=0;
 const feedbackState=new Map(),feedbackDays=new Map();
+let feedbackRows=[],feedbackCursor=null,feedbackLoaded=false,feedbackLoading=false,feedbackError='',feedbackRequest=0,feedbackRevision=0;
+const managedDays=new Map();
 const pages={overview:['Tổng quan tài nguyên','Tập trung vào tài nguyên cần bạn kiểm tra.'],findings:['Tài nguyên cần kiểm tra','Mỗi cảnh báo đi kèm lý do và bằng chứng.'],history:['Lịch sử quét','Theo dõi kết quả theo thời gian trong từng region.'],connection:['Kết nối tài khoản AWS','Cấp quyền đọc bằng IAM Role và ExternalId riêng.'],settings:['Cấu hình & cảnh báo','Điều chỉnh ngưỡng phát hiện và lịch quét.']};
 const regions=['ap-southeast-1','ap-southeast-2','ap-northeast-1','us-east-1','us-west-2','eu-west-1'];
 const serviceGroups={compute:{label:'Tính toán',types:['EC2']},storage:{label:'Lưu trữ và sao lưu',types:['EBS','SNAPSHOT','S3_MULTIPART']},database:{label:'Cơ sở dữ liệu',types:['RDS']},network:{label:'Mạng',types:['EIP','NAT_GATEWAY','ALB','NLB']}};
 const resourceGroups=Object.fromEntries(Object.entries(serviceGroups).flatMap(([group,value])=>value.types.map(type=>[type,group])));
 const fields={cpu_percent:['Ngưỡng CPU EC2 (%)',1,50,'any'],network_mib_hour:['Ngưỡng network EC2 (MiB/giờ)',.1,100,'any'],window_hours:['Cửa sổ metrics (giờ)',24,168,1],orphan_hours:['Theo dõi EBS / EIP (giờ)',1,168,1],snapshot_days:['Tuổi snapshot (ngày)',7,365,1],interval_hours:['Khoảng quét (giờ)',1,24,1],rds_cpu_percent:['Ngưỡng CPU RDS (%)',1,50,'any'],rds_connections:['Ngưỡng kết nối RDS',1,1000,1],nat_mib_hour:['Ngưỡng NAT (MiB/giờ)',.1,10000,'any'],alb_requests_hour:['Ngưỡng ALB (request/giờ)',1,1000000,1],nlb_new_flows_hour:['Ngưỡng NLB (flow mới/giờ)',1,1000000,1]};
-const stateLabels={REVIEW:'Cần kiểm tra',OBSERVING:'Đang quan sát',INSUFFICIENT_DATA:'Thiếu dữ liệu',QUEUED:'Đang chờ',RUNNING:'Đang quét',SUCCEEDED:'Hoàn tất',PARTIAL:'Chưa đầy đủ',FAILED:'Lỗi',TIMED_OUT:'Quá hạn'};
+const stateLabels={KEPT:'Đang giữ',REVIEW:'Cần kiểm tra',OBSERVING:'Đang quan sát',INSUFFICIENT_DATA:'Thiếu dữ liệu',QUEUED:'Đang chờ',RUNNING:'Đang quét',SUCCEEDED:'Hoàn tất',PARTIAL:'Chưa đầy đủ',FAILED:'Lỗi',TIMED_OUT:'Quá hạn'};
 const reasons={'Low CPU and network; confirm intended workload':'CPU và network thấp; kiểm tra mục đích sử dụng.','Missing CloudWatch metrics; not classified as idle':'Thiếu metrics CloudWatch; chưa thể kết luận ít hoạt động.','Instance younger than observation window':'Instance mới hơn cửa sổ quan sát.','Unattached volume; validate data retention':'Volume chưa gắn vào instance; kiểm tra nhu cầu giữ dữ liệu.','Unassociated public IPv4; may be intentionally reserved':'Elastic IP chưa liên kết; có thể đang được giữ có chủ đích.','Old snapshot not referenced by listed AMIs; backup purpose requires review':'Snapshot cũ, không được các AMI đã đọc tham chiếu; kiểm tra mục đích sao lưu.'};
 const evidenceFields={
  EC2:[['cpu_p95','CPU p95','%'],['network_mib_hour','Network trung bình','MiB/giờ'],['launch_time','Thời điểm khởi chạy','time']],
@@ -33,7 +35,7 @@ async function login(){if(!cfg)return;if(cfg.demo){token='demo-local-only';sessi
 function logout(){closeFindingDetail();clearTimeout(pollTimer);sessionStorage.removeItem('crg-token');token=null;if(cfg.demo){location.reload();return;}location.assign(cfg.auth+'/logout?'+new URLSearchParams({client_id:cfg.clientId,logout_uri:cfg.redirect}));}
 async function api(path,method='GET',data){const r=await fetch(cfg.api+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(data!==undefined?{body:JSON.stringify(data)}:{})});let v;try{v=await r.json();}catch{throw Error('Máy chủ trả phản hồi không hợp lệ.');}if(r.status===401){closeFindingDetail();clearTimeout(pollTimer);token=null;sessionStorage.removeItem('crg-token');$('app').hidden=true;$('welcome').hidden=false;$('login').textContent='Đăng nhập';$('login').onclick=login;}if(!r.ok)throw Error(friendlyError(v.error||v.message||'HTTP '+r.status));return v;}
 async function run(fn,button){if(button)button.disabled=true;try{await fn();}catch(e){status(friendlyError(e.message),true);}finally{if(button){const feedback=$(button.id+'-feedback');if(feedback){feedback.hidden=$('status').hidden;feedback.textContent=$('status').textContent;feedback.className='inline-feedback '+$('status').className;}}if(button)button.disabled=button.dataset.saved==='true';if(button===$('scan')&&profile)render();}}
-function showPage(page){if(!profile)return;closeFindingDetail();if(!pages[page])page='overview';for(const key of Object.keys(pages))$('page-'+key).hidden=key!==page;document.querySelectorAll('nav button').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});$('page-title').textContent=pages[page][0];$('page-subtitle').textContent=pages[page][1];$('breadcrumb').textContent=document.querySelector('[data-page="'+page+'"]').textContent.replace(/[\d—]+$/,'').trim();document.title=pages[page][0]+' | Cloud Guardian';if(page==='history')run(loadHistory);}
+function showPage(page){if(!profile)return;closeFindingDetail();if(!pages[page])page='overview';for(const key of Object.keys(pages))$('page-'+key).hidden=key!==page;document.querySelectorAll('nav button').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});$('page-title').textContent=pages[page][0];$('page-subtitle').textContent=pages[page][1];$('breadcrumb').textContent=document.querySelector('[data-page="'+page+'"]').textContent.replace(/[\d—]+$/,'').trim();document.title=pages[page][0]+' | Cloud Guardian';if(page==='history')run(loadHistory);if(page==='findings'&&!feedbackLoaded&&!feedbackLoading)loadFeedback();}
 function detailValue(value,unit){
  if(value===undefined||value===null||value==='')return 'Chưa có dữ liệu';
  if(unit==='time'){
@@ -90,34 +92,94 @@ function feedbackKey(f){return JSON.stringify([f.region,f.finding_id]);}
 function feedbackFocus(container){
  const active=document.activeElement,group=active.closest('.finding-feedback');
  if(!group||!container.contains(active))return null;
- return {key:group.dataset.feedbackKey,selector:['feedback-ack','feedback-keep','feedback-ignore','feedback-days','feedback-status'].find(name=>active.classList.contains(name))||'feedback-status'};
+ return {key:group.dataset.feedbackKey,selector:['feedback-ack','feedback-keep','feedback-ignore','feedback-days','feedback-unkeep','feedback-unignore','feedback-manage-days','feedback-extend','feedback-status'].find(name=>active.classList.contains(name))||'feedback-status'};
 }
 function restoreFeedbackFocus(container,previous){
  if(!previous||$('app').hidden)return;
  const group=[...container.querySelectorAll('.finding-feedback')].find(item=>item.dataset.feedbackKey===previous.key),control=group?.querySelector('.'+previous.selector),target=control&&!control.disabled?control:group?.querySelector('.feedback-status');
- (target||(container.id==='findings-list'?$('search'):$('refresh')))?.focus();
+ (target||(container.id==='feedback-list'?$('refresh-feedback'):container.id==='findings-list'?$('search'):$('refresh')))?.focus();
 }
-async function saveFindingFeedback(f,patch,generation){
+function feedbackHidden(record){return record.expires<=Date.now()/1000?false:!!record.kept||record.ignore_until>Date.now()/1000;}
+function feedbackSaveMessage(record,patch,confirmed=false){
+ if('acknowledged' in patch)return record.acknowledged?'Đã đánh dấu đã xem.':'Đã bỏ trạng thái đã xem.';
+ if(patch.kept===true)return 'Đã giữ lại. Cảnh báo đã được ẩn.';
+ if(patch.ignoreUntil)return 'Đã bỏ qua '+Math.round((Date.parse(patch.ignoreUntil)-Date.now())/86400000)+' ngày. Cảnh báo đã được ẩn.';
+ const cleared=patch.kept===false?'Đã bỏ giữ. ':'Đã hủy bỏ qua. ';
+ if(record.kept)return cleared+'Finding vẫn đang được giữ lại.';
+ if(record.ignore_until>Date.now()/1000)return cleared+'Finding vẫn đang được bỏ qua đến '+date(record.ignore_until)+'.';
+ if(!confirmed)return cleared+'Đang tải lại kết quả để kiểm tra.';
+ return cleared+(findings().some(item=>feedbackKey(item)===feedbackKey(record))?'Finding đã hiện lại trong kết quả hiện tại.':'Finding chưa hiện trong kết quả hiện tại; cần quét mới để kiểm tra lại. Candidate có thể không còn lưu hoặc vượt giới hạn hiển thị.');
+}
+async function saveFindingFeedback(f,patch,generation,managed=false){
  const key=feedbackKey(f);if(generation!==scopeGeneration||feedbackState.get(key)?.pending)return;
  const operation={pending:true,message:'Đang lưu…',error:false};feedbackState.set(key,operation);render();
  let saved=false;
  try{
   const record=await api('/feedback','PUT',{region:f.region,finding_id:f.finding_id,...patch});
   if(generation!==scopeGeneration||!token)return;
-  saved=true;findingsRevision++;
+  saved=true;findingsRevision++;feedbackRevision++;feedbackRequest++;feedbackLoading=false;feedbackError='';
+  const index=feedbackRows.findIndex(item=>feedbackKey(item)===key);if(index<0)feedbackRows.unshift(record);else feedbackRows[index]=record;
   results=results.map(row=>{
    if(row.region!==f.region)return row;
    const items=(row.findings||[]).flatMap(item=>item.finding_id!==f.finding_id?[item]:record.kept||record.ignore_until>Date.now()/1000?[]:[{...item,acknowledged:record.acknowledged===true}]);
    return {...row,findings:items};
   });
-  operation.pending=false;operation.message='acknowledged' in patch?(record.acknowledged?'Đã đánh dấu đã xem.':'Đã bỏ trạng thái đã xem.'):'kept' in patch?'Đã giữ lại. Cảnh báo đã được ẩn.':'Đã bỏ qua '+feedbackDays.get(key)+' ngày. Cảnh báo đã được ẩn.';
+  operation.pending=false;operation.message=feedbackSaveMessage(record,patch);
   render();status(operation.message);
-  await refresh();
+  const confirmed=await refresh();
+  if(generation!==scopeGeneration||!token||feedbackState.get(key)!==operation)return;
+  operation.message=feedbackSaveMessage(record,patch,confirmed===true&&!resultsError);renderFeedback();status(operation.message);
+  if(!feedbackLoaded&&!$('page-findings').hidden)loadFeedback();
  }catch(error){
   if(generation!==scopeGeneration||!token||feedbackState.get(key)!==operation)return;
   operation.pending=false;operation.error=true;operation.message=saved?'Phản hồi đã lưu, nhưng chưa tải được kết quả mới. Chọn Tải lại kết quả.':'Chưa lưu được phản hồi. '+friendlyError(error.message)+' Chọn thao tác để thử lại.';
   render();status(operation.message,true);
  }
+}
+async function loadFeedback(more=false){
+ if(more&&(feedbackLoading||!feedbackCursor))return;
+ const generation=scopeGeneration,revision=feedbackRevision,request=++feedbackRequest,cursor=more?feedbackCursor:null;
+ if(!more){feedbackCursor=null;feedbackLoaded=false;}
+ feedbackLoading=true;feedbackError='';renderFeedback();
+ try{
+  const query=new URLSearchParams({limit:'20'});if(cursor)query.set('next_token',cursor);
+  const reply=await api('/feedback?'+query);
+  if(generation!==scopeGeneration||revision!==feedbackRevision||request!==feedbackRequest||!token)return;
+  if(!Array.isArray(reply.results)||(reply.next_token!=null&&typeof reply.next_token!=='string'))throw Error('Phản hồi danh sách phản hồi không hợp lệ.');
+  const rows=reply.results.filter(item=>typeof item.finding_id==='string'&&(profile.regions||[]).includes(item.region));
+  feedbackRows=[...new Map([...(more?feedbackRows:[]),...rows].map(item=>[feedbackKey(item),item])).values()];
+  feedbackCursor=reply.next_token||null;feedbackLoaded=true;
+ }catch(error){
+  if(generation!==scopeGeneration||revision!==feedbackRevision||request!==feedbackRequest||!token)return;
+  feedbackError='Không tải được phản hồi. '+friendlyError(error.message)+' Dữ liệu đã tải vẫn được giữ; chọn '+(more?'Tải thêm':'Tải lại')+' để thử lại.';
+ }finally{
+  if(generation===scopeGeneration&&request===feedbackRequest){feedbackLoading=false;renderFeedback();}
+ }
+}
+function renderFeedback(){
+ const list=$('feedback-list'),previous=feedbackFocus(list),pageControl=document.activeElement,active=feedbackRows.filter(feedbackHidden);list.replaceChildren();
+ $('feedback-summary').textContent=feedbackError||(feedbackLoading?'Đang tải phản hồi…':active.length+' finding đang giữ hoặc bỏ qua trong '+feedbackRows.length+' phản hồi đã tải.'+(feedbackCursor?' Còn phản hồi ở trang sau.':''));
+ $('feedback-summary').className=feedbackError?'error':'muted';$('refresh-feedback').disabled=feedbackLoading;
+ $('feedback-load-more').hidden=!feedbackCursor;$('feedback-load-more').disabled=feedbackLoading;$('feedback-load-more').textContent=feedbackLoading?'Đang tải…':'Tải thêm';
+ if([$('refresh-feedback'),$('feedback-load-more')].includes(pageControl)&&(pageControl.disabled||pageControl.hidden))$('feedback-summary').focus();
+ if(!active.length)emptyState(list,feedbackLoading?'Đang tải danh sách':feedbackCursor?'Chưa có finding đang ẩn trong phần đã tải':feedbackLoaded?'Không có finding đang giữ hoặc bỏ qua trong danh sách đã tải':'Chưa tải phản hồi',feedbackCursor?'Chọn Tải thêm để kiểm tra trang tiếp theo.':'Chọn Tải lại để cập nhật phản hồi của kết nối hiện tại.');
+ for(const record of active){
+  const key=feedbackKey(record),generation=scopeGeneration,state=feedbackState.get(key),article=node('article',undefined,'feedback-record'),info=node('div'),actions=node('div',undefined,'finding-feedback feedback-manager-actions');article.dataset.feedbackKey=key;actions.dataset.feedbackKey=key;
+  info.append(node('h3',record.type||'Finding cũ'),node('code',record.resource_id||record.finding_id),node('p','Region: '+record.region,'muted'));
+  if(record.resource_id)info.append(node('small','Finding ID: '+record.finding_id,'muted'));else info.append(node('p','Feedback cũ thiếu metadata; quản lý bằng Finding ID và region.','footnote'));
+  info.append(node('p','Account: '+(record.account_id||'Chưa có dữ liệu')+' · Rule: '+(record.rule_id||'Chưa có dữ liệu'),'muted'));
+  if(record.kept)info.append(badge('KEPT'));
+  if(record.ignore_until>Date.now()/1000)info.append(node('p','Bỏ qua đến: '+date(record.ignore_until),'muted'));
+  if(record.acknowledged)info.append(node('p','Đã xem','acknowledged-state'));
+  const unkeep=node('button','Bỏ giữ','button secondary feedback-unkeep'),unignore=node('button','Hủy bỏ qua','button secondary feedback-unignore'),label=node('label','Hạn bỏ qua mới'),days=node('select',undefined,'feedback-manage-days'),extend=node('button','Đổi hạn bỏ qua','button secondary feedback-extend');
+  if(!managedDays.has(key))managedDays.set(key,7);for(let day=1;day<=30;day++)days.append(new Option(day+' ngày',day));days.value=managedDays.get(key);days.setAttribute('aria-label','Hạn bỏ qua mới cho '+(record.resource_id||record.finding_id));label.append(days);days.onchange=()=>managedDays.set(key,Number(days.value));
+  unkeep.disabled=!record.kept||!!state?.pending;unignore.disabled=!(record.ignore_until>Date.now()/1000)||!!state?.pending;days.disabled=extend.disabled=!!state?.pending;
+  unkeep.onclick=()=>saveFindingFeedback(record,{kept:false},generation,true);unignore.onclick=()=>saveFindingFeedback(record,{ignoreUntil:null},generation,true);extend.onclick=()=>{const count=Number(days.value);if(Number.isInteger(count)&&count>=1&&count<=30)saveFindingFeedback(record,{ignoreUntil:new Date(Date.now()+count*86400000).toISOString()},generation,true);};
+  for(const button of [unkeep,unignore,extend])button.type='button';
+  const note=node('p',state?.message||'','feedback-status'+(state?.error?' error':''));note.setAttribute('role','status');note.tabIndex=-1;
+  actions.append(unkeep,unignore,label,extend,note);article.append(info,actions);list.append(article);
+ }
+ restoreFeedbackFocus(list,previous);
 }
 function findingFeedback(f){
  const key=feedbackKey(f),generation=scopeGeneration,state=feedbackState.get(key),group=node('div',undefined,'finding-feedback');group.dataset.feedbackKey=key;
@@ -126,7 +188,7 @@ function findingFeedback(f){
  if(!feedbackDays.has(key))feedbackDays.set(key,7);
  for(let day=1;day<=30;day++)days.append(new Option(day+' ngày',day));days.value=feedbackDays.get(key);days.setAttribute('aria-label','Thời hạn bỏ qua cho '+f.resource_id);label.append(days);
  ignore.textContent='Bỏ qua '+days.value+' ngày';
- days.onchange=()=>{feedbackDays.set(key,Number(days.value));for(const other of document.querySelectorAll('.finding-feedback'))if(other.dataset.feedbackKey===key){other.querySelector('.feedback-days').value=days.value;other.querySelector('.feedback-ignore').textContent='Bỏ qua '+days.value+' ngày';}};
+ days.onchange=()=>{feedbackDays.set(key,Number(days.value));for(const other of document.querySelectorAll('.finding-feedback:not(.feedback-manager-actions)'))if(other.dataset.feedbackKey===key){other.querySelector('.feedback-days').value=days.value;other.querySelector('.feedback-ignore').textContent='Bỏ qua '+days.value+' ngày';}};
  ack.onclick=()=>saveFindingFeedback(f,{acknowledged:!f.acknowledged},generation);keep.onclick=()=>saveFindingFeedback(f,{kept:true},generation);
  ignore.onclick=()=>{const count=Number(days.value);if(!Number.isInteger(count)||count<1||count>30)return;saveFindingFeedback(f,{ignoreUntil:new Date(Date.now()+count*86400000).toISOString()},generation);};
  for(const button of [ack,keep,ignore])button.type='button';
@@ -177,14 +239,14 @@ function render(){
  $('scan-summary').replaceChildren();if(!results.length)$('scan-summary').append(node('p',resultMessage(),'muted'));
  for(const r of results){const div=node('div',undefined,'scan-row');div.append(node('span',r.region),badge(r.status));$('scan-summary').append(div,node('small',date(r.completed_at||r.started_at),'muted'));appendResultNotes($('scan-summary'),r);}
  renderTable($('priority-list'),fs.filter(f=>f.level==='REVIEW').slice(0,5));
- if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Chưa có ứng viên cần kiểm tra',resultMessage());renderFindings();
+ if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Chưa có ứng viên cần kiểm tra',resultMessage());renderFindings();renderFeedback();
 }
 
 async function refresh(){
  const generation=scopeGeneration,revision=findingsRevision;
- try{const reply=await api('/findings');if(generation!==scopeGeneration||revision!==findingsRevision)return;results=reply.results;resultsError=false;loadingResults=false;render();
- if(results.some(r=>['QUEUED','RUNNING'].includes(r.status))&&pollCount<185){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{pollCount++;run(refresh);},5000);}else clearTimeout(pollTimer);
- }catch(e){if(generation!==scopeGeneration||revision!==findingsRevision)return;loadingResults=false;resultsError=true;clearTimeout(pollTimer);render();throw e;}
+ try{const reply=await api('/findings');if(generation!==scopeGeneration||revision!==findingsRevision)return false;results=reply.results;resultsError=false;loadingResults=false;render();
+ if(results.some(r=>['QUEUED','RUNNING'].includes(r.status))&&pollCount<185){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{pollCount++;run(refresh);},5000);}else clearTimeout(pollTimer);return true;
+ }catch(e){if(generation!==scopeGeneration||revision!==findingsRevision)return false;loadingResults=false;resultsError=true;clearTimeout(pollTimer);render();throw e;}
 }
 
 async function loadHistory(){
@@ -202,7 +264,7 @@ async function loadHistory(){
 }
 
 async function init(){
- closeFindingDetail();const generation=++scopeGeneration;feedbackState.clear();feedbackDays.clear();findingsRevision=0;clearTimeout(pollTimer);const nextProfile=await api('/me');if(generation!==scopeGeneration)return;profile=nextProfile;historyRows=[];$('history-list').replaceChildren();$('history-detail').replaceChildren();$('app').hidden=false;$('welcome').hidden=true;$('login').textContent='Đăng xuất';$('login').onclick=logout;renderPrincipals();$('role').value=profile.role_arn||'';
+ closeFindingDetail();const generation=++scopeGeneration;feedbackState.clear();feedbackDays.clear();managedDays.clear();feedbackRows=[];feedbackCursor=null;feedbackLoaded=false;feedbackLoading=false;feedbackError='';feedbackRequest++;feedbackRevision=0;findingsRevision=0;clearTimeout(pollTimer);const nextProfile=await api('/me');if(generation!==scopeGeneration)return;profile=nextProfile;historyRows=[];$('history-list').replaceChildren();$('history-detail').replaceChildren();$('app').hidden=false;$('welcome').hidden=true;$('login').textContent='Đăng xuất';$('login').onclick=logout;renderPrincipals();$('role').value=profile.role_arn||'';
  $('region-options').replaceChildren();for(const r of regions){const l=node('label'),i=node('input');i.type='checkbox';i.value=r;i.checked=(profile.regions||['ap-southeast-1']).includes(r);const text=node('span',regionNames[r]);text.append(node('small',r));l.append(i,text);$('region-options').append(l);}
  $('service-group-options').replaceChildren();for(const [group,value] of Object.entries(serviceGroups)){const l=node('label'),i=node('input');i.type='checkbox';i.value=group;i.checked=(profile.service_groups||Object.keys(serviceGroups)).includes(group);const text=node('span',value.label);text.append(node('small',value.types.join(' / ')));l.append(i,text);$('service-group-options').append(l);}
  $('filter-type').replaceChildren(new Option('Tất cả',''),...Object.keys(resourceGroups).map(type=>new Option(type,type)));
@@ -229,6 +291,7 @@ $('save-email').onclick=()=>run(async()=>{profile.notifications=await api('/noti
 $('scan').onclick=()=>run(async()=>{scanPending=true;render();try{const r=await api('/scans','POST');sessionStorage.setItem('crg-last-scan',r.scan_id);pollCount=0;status('Đã nhận yêu cầu quét. Dashboard tự cập nhật mỗi 5 giây.');await refresh();}finally{scanPending=false;render();}},$('scan'));
 $('first-scan').onclick=()=>{navigate('overview');$('scan').click();};
 $('refresh').onclick=()=>run(async()=>{pollCount=0;await refresh();status('Đã tải lại kết quả.');},$('refresh'));$('refresh-history').onclick=()=>run(loadHistory,$('refresh-history'));
+$('refresh-feedback').onclick=()=>loadFeedback();$('feedback-load-more').onclick=()=>loadFeedback(true);
 $('start').onclick=()=>run(login,$('start'));
 $('close-finding-detail').onclick=()=>$('finding-dialog').close();
 $('finding-dialog').onclose=restoreFindingFocus;

@@ -85,6 +85,8 @@ def main():
                 result = state['profile']
             elif path == '/findings':
                 status, result = (503, {'error': 'Service unavailable'}) if state['findings_error'] else (200, {'results': state['rows']})
+            elif path == '/feedback' and request.method == 'GET':
+                result = {'results': [], 'next_token': None}
             elif path == '/history':
                 result = {'results': state['rows']}
             elif path == '/connection' and request.method == 'PUT':

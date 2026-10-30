@@ -135,6 +135,8 @@ def main():
                     return
                 status, result = ((503, {'error': 'Service unavailable'}) if state['findings_error']
                                   else (200, {'results': visible_rows()}))
+            elif path == '/feedback' and request.method == 'GET':
+                result = {'results': list(state['records'].values()), 'next_token': None}
             elif path == '/history':
                 result = {'results': state['history'], 'next_token': None}
             elif path == '/feedback' and request.method == 'PUT':
