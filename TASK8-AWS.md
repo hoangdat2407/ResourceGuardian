@@ -4,7 +4,7 @@ Harness [tests/task8_aws_harness.py](tests/task8_aws_harness.py) đã được c
 
 Phạm vi ở đây là điều phối, lưu trạng thái/history và đường phục hồi Task 8. Inventory rỗng vẫn có thể chứng minh luồng điều phối; nghiệm thu các rule trên tài nguyên thật thực hiện riêng theo [VALIDATION.md](VALIDATION.md). SES luôn tắt trên stack thử.
 
-**Các điểm chặn và điều kiện gỡ được ghi riêng trong mục Task 8 của [VALIDATION.md](VALIDATION.md):** B1 phiên AWS/account lab; B2 stack và fixture chưa xác minh; B3 luồng AWS/artifact cuối chưa có evidence; B4 coverage cloud chưa tự động hóa đầy đủ; D1 phụ thuộc PR Task 7 trước khi tích hợp `main`. Những mục này không được suy ra là PASS từ các test local bên dưới.
+**Các điểm chặn và điều kiện gỡ được ghi trong [VALIDATION.md](VALIDATION.md):** B1 phiên AWS/account lab; B2 stack và fixture chưa xác minh; B3 luồng AWS/artifact cuối chưa có evidence; B4 coverage cloud chưa tự động hóa đầy đủ. **D1 đã gỡ về tích hợp:** lịch sử checkout main ngày 29/10/2026 có PR #4 tại f1e6cd1 và PR #3 tại a2201f5. Merge không chứng minh deploy hoặc AWS acceptance; xem [baseline Task 7–9](DUC-TASKS.md). Thông tin credentials ngày 26/10 ở trên là snapshot, chưa được kiểm tra live lại trong Plan 01. B1–B4 không được suy ra là PASS từ test local.
 
 ## Điều kiện trước khi chạy
 

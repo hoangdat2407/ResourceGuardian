@@ -1,6 +1,6 @@
 # Task 8 — lịch quét và phục hồi lỗi
 
-Nguồn yêu cầu: báo cáo Nhóm 9, trang 17, Task 8 của Phạm Sỹ Đức và kế hoạch triển khai người dùng đã chốt ngày 26/10/2026. Task này điều phối chín loại tài nguyên hiện có; không mở rộng collector/rule hoặc dashboard. **Implementation và kiểm thử local được bàn giao ở đây; nghiệm thu AWS còn thiếu phiên AWS, stack kiểm thử và hai user thật. Chưa kết luận Task 8 hoàn tất trên AWS.**
+Nguồn yêu cầu ban đầu: Report 1 trang 17 và kế hoạch người dùng chốt ngày 26/10/2026; Report 2 trang 20 tiếp tục giao Task 8 cho Phạm Sỹ Đức, ghi rõ Lambda Invoke async và SQS failure destination. Task này điều phối chín loại tài nguyên hiện có; không mở rộng collector/rule hoặc dashboard. **Implementation đã tích hợp vào main tại a2201f5; nghiệm thu AWS của revision hiện tại chưa được xác minh. Phiên AWS, stack kiểm thử và hai user/read role cần xác nhận live trước khi chạy.** Xem [baseline và checklist Task 7–9 ngày 29/10/2026](DUC-TASKS.md).
 
 ## Luồng và hợp đồng
 
@@ -32,11 +32,14 @@ SQS là failure destination của Lambda async. Retry và sự kiện giao trùn
 | Khóa tenant | `LOCK` chứa scan ID, connection version, danh sách region và hạn deadline + 30 giây; chỉ xóa sớm khi mọi region của đúng lượt đó đã kết thúc |
 | Trạng thái | `QUEUED`, `RUNNING`, `SUCCEEDED`, `PARTIAL`, `FAILED`, `TIMED_OUT` |
 | Time budget | Kiểm tra trước STS và trước từng request/trang collector; còn dưới 60 giây thì không bắt đầu đọc AWS tiếp |
+| Persistence finding | Plan 03 dùng phần dự trữ sau collector để lưu registry/timestamps; kiểm tra trước batch, chừa 10 giây theo context/lease/deadline cho finalization. Không đủ thì lưu TIMED_OUT/TIME_BUDGET; lỗi hạ tầng/CAS vẫn retry |
 | SDK collector/STS | Standard, tổng tối đa 3 attempts/request; connect 3 giây, read 10 giây |
 | Lưu trữ | RESULT cuối và HISTORY có TTL 30 ngày; hai queue giữ 14 ngày; DynamoDB TTL xóa bất đồng bộ |
 | Tương thích | Giữ route và `results`; thêm `trigger`, `created_at`, `deadline_at`, `attempt_count`, `error_code` khi có |
 
 `started_at` tiếp tục giữ thời điểm marker được tạo để tương thích dữ liệu cũ. `attempt_count` tăng khi nhận lease thành công; failure envelope có thể bổ sung số lần Lambda đã invoke, kể cả lỗi runtime trước khi vào worker. Hai con số không phải số request SDK.
+
+Plan 03 bổ sung deadline_at cho marker legacy còn thiếu tại lúc claim bằng if_not_exists, lấy từ created_at/started_at + 900 giây của marker gốc, không lấy giờ retry + 900. Registry được ghi trước RESULT + HISTORY; observation đã commit có thể còn khi terminal commit lỗi, còn terminal snapshot vẫn nguyên tử. Xem [hợp đồng timestamps](RULES.md) và [checklist Task 7–9](DUC-TASKS.md). Ngưỡng budget trước request không thay thế timeout/recovery nền tảng khi request AWS bị chậm.
 
 ## Giao dịch và chống ghi đè
 

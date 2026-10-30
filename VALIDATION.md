@@ -1,14 +1,176 @@
 # Validation matrix
 
+## Mốc commit Plan 01–05, 30/10/2026
+
+Theo yêu cầu mới của người dùng, các phần quan trọng đã hoàn tất được commit local theo phạm vi trên nhánh `codex/task-7-finding-observations`:
+
+| Commit code | Nội dung |
+|---|---|
+| `8e140bb4df9e15c6c2720d8e9042ceec0f83f607` | Plan 02–03: registry DynamoDB, worker/API first/last, IAM và regression; 8 file |
+| `d9313dda7af311ebe31eb2242eba185aa7454e04` | Plan 04–05: service groups/filters/settings, demo scope và shared finding details, browser fixture; 9 file |
+
+Checklist/bằng chứng và hướng dẫn Plan 01–05 được gom trong commit tài liệu của cùng đợt bàn giao (7 file). Các dòng “chưa commit” trong snapshot từng plan bên dưới mô tả trạng thái lúc chạy/bàn giao plan đó, được thay thế bởi mốc commit này về trạng thái Git hiện tại. Không sửa code hoặc chạy lại suite trong lượt commit; đã đối chiếu file live với hash evidence mới nhất và staged blob với source sau chuẩn hóa CRLF/LF. Full backend và bốn bộ browser vẫn là kết quả thật của các lượt Plan 03–05 được ghi bên dưới.
+
+Review độc lập xác nhận đủ 24 file theo ba nhóm, không có marker private key/AWS access key trong phạm vi; AGENTS.md cục bộ và thư mục evidence/skill/config không được đưa vào commit. Link tài liệu và git diff --cached --check được kiểm tra trước commit. Chưa push, mở PR hoặc thay đổi AWS. Từ mốc này, commit phần quan trọng sau kiểm thử trước khi bàn giao, vẫn dừng sau mỗi plan chờ yêu cầu tiếp theo.
+
+## Plan 05 — chi tiết finding và evidence, 30/10/2026
+
+**Đạt phạm vi UI/code và kiểm thử local Plan 05. Chưa triển khai AWS; chưa thực hiện Plan 06.** Nhánh `codex/task-7-finding-observations`, HEAD nền `a2201f5d8261d453d0de3e9873b9072773545848`; thay đổi chưa stage/commit/push. Giữ thay đổi Plan 01–04 và AGENTS.md cục bộ. Task 13 tiếp tục hoãn.
+
+Thêm native dialog dùng chung cho finding từ tổng quan, danh sách hiện tại và history. Detail hiển thị account/region/resource/finding ID/rule/level/reason/recommendation, evaluated_at và first/last UTC; evidence theo đủ chín loại. Năm loại metric có window/start/end/period/statistics/units, ngưỡng, coverage và sample diagnostics. Rule phi metric có thời gian/quan hệ riêng, không giả lập độ phủ CloudWatch. Ngưỡng và context lấy từ snapshot finding/evidence, không từ profile/settings hiện tại; không backfill history hoặc suy timestamps.
+
+Giữ số 0, boolean false và diagnostics rỗng; dữ liệu thiếu/null/thời gian sai hoặc thiếu timezone ghi Chưa có dữ liệu. Text được tạo bằng textContent. Bảng tóm tắt giới hạn ba dòng và tỷ lệ cột để ID dài vẫn dùng được, dialog hiển thị đầy đủ và wrap. Review tái hiện lỗi mất focus khi polling thay opener: đã sửa close handler tìm nút finding mới đúng identity/region trong danh sách gốc, hoặc control còn hiển thị nếu finding mất; navigation/init/reconnect/logout/401 đóng tự động không kéo focus về trang cũ.
+
+| Kiểm tra Plan 05 trên bản UI cuối | Kết quả / giới hạn |
+|---|---|
+| Fixture chi tiết mới | **PASS**, 10 nhóm kiểm tra, 25 request, 0 page error, 0 fixture error. Chín schema tạo bằng evaluator thật rồi thêm context collector và timestamps fixture; không gọi AWS |
+| Schema, giá trị và history | Đủ common field/evidence/threshold/units; zero và false; current/history cùng renderer và history giữ nguyên account/window/threshold/first-last sau current mới; legacy/null/invalid date/legacy threshold, không fallback profile |
+| An toàn text và keyboard | ID/key/upload ID 1.000–1.200 ký tự, chuỗi HTML/XSS chỉ là text; native modal không focus vào page nền, Escape trả focus; poll thay opener rồi Escape/nút đóng và finding biến mất đều có regression |
+| Vòng đời và responsive | Priority/history/current cùng detail; navigation/init/reconnect/401 đóng detail cũ. **320/390/768/1440px**, không tràn ngang; 12 ảnh: tám ảnh current/history ID dài và bốn ảnh EC2/metrics ở desktop/mobile |
+| Ba bộ UI hiện có | **PASS**: tests/ui_smoke.py, tests/ui_redesign.py, tests/ui_scope_filters.py; chạy lại sau sửa JS/CSS cuối. Fixture trạng thái 6 nhóm/0 page error; fixture scope 6 nhóm/45 request/0 page hoặc fixture error |
+| Review độc lập | Đối chiếu schema chín loại, zero/missing/history/text; lỗi focus đã đóng với **6/6 Chrome probe** (current refresh còn/mất candidate, Escape/nút đóng, history reload, navigation); không xác định blocker local còn lại |
+| Visual QA | Đã xem ec2-current-1440.png, ec2-metrics-390.png, current-1440.png, history-320.png; modal wrap/cuộn đúng, metrics/UTC/zero rõ, bảng ID dài không bó nút thao tác thành từng ký tự |
+| Static và tài liệu | node --check web/app.js; AST hai Python test mới/thay đổi; link Markdown mặc định và explicit bốn tài liệu; git diff --check/whitespace file test mới. Kết quả pin trong manifest local |
+| Backend, SAM/IAM | **Không thay đổi trong Plan 05**, không chạy lại full backend hoặc lint/build SAM. Đối chiếu hash app/rules/collectors/demo/template với baseline Plan 05 và manifest backend Plan 04; kết quả 263 test ở Plan 04 là bằng chứng lượt trước, không tính là lượt test mới |
+| AWS, artifact/deploy, CI | **CHƯA CHẠY trong Plan 05**; không thêm dependency. Demo vẫn bốn loại mẫu và thiếu metadata như trước, dùng để kiểm legacy. B1–B4 AWS chưa đóng |
+
+Lệnh UI dùng Python venv 3.12, Chrome local qua CHROMIUM_EXECUTABLE; mỗi script có UI_QA_DIR riêng:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_finding_details.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_smoke.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_redesign.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_scope_filters.py
+```
+
+Evidence Git ignore tại `.preflight/duc-plan-05/`: baseline.json; validation.json pin hash asset/test và kết quả static; ui-details/acceptance-results.json và 12 ảnh; ui-fixture/acceptance-results.json; ui-scope-filters/acceptance-results.json; ui-smoke/desktop.png và mobile.png. Log ba bộ hiện có là ui-smoke.txt, ui-fixture.txt và ui-scope-filters.txt. Kết quả chi tiết mới được lưu bởi fixture; hash fixture được pin trong manifest.
+
+File Plan 05: [web/app.js](web/app.js), [web/index.html](web/index.html), [web/styles.css](web/styles.css), [tests/ui_finding_details.py](tests/ui_finding_details.py), [tests/ui_smoke.py](tests/ui_smoke.py), [README.md](README.md), [FRONTEND-DESIGN.md](FRONTEND-DESIGN.md), [DUC-TASKS.md](DUC-TASKS.md) và tài liệu này. **Dừng sau Plan 05, chờ người dùng yêu cầu Plan 06.** Các phần bên dưới là snapshot bằng chứng các lượt trước.
+
+## Plan 04 — phạm vi, cấu hình và bộ lọc, 30/10/2026
+
+**Đạt phạm vi code và kiểm thử local Plan 04. Chưa triển khai AWS; chưa thực hiện Plan 05.** Nhánh `codex/task-7-finding-observations`, HEAD nền `a2201f5d8261d453d0de3e9873b9072773545848`; thay đổi còn trong working tree, chưa stage/commit/push. Giữ các thay đổi Plan 01–03 và AGENTS.md cục bộ. Task 13 tiếp tục hoãn; tài liệu này chỉ ghi bằng chứng kỹ thuật cho Task 7–9.
+
+Form kết nối lưu một đến bốn nhóm compute/storage/database/network qua trường service_groups có sẵn của backend. Dashboard có catalog chín loại và sáu control lọc kết hợp AND: tìm kiếm, nhóm, loại, region, level, đã xem/chưa xem. Form cấu hình có đủ 11 setting theo bounds/type backend, decimal step=any và integer step=1. PARTIAL/lỗi/chưa quét vẫn có cảnh báo khi bộ lọc không trả hàng, không diễn giải dữ liệu thiếu thành zero.
+
+Demo đồng bộ validation, scope/counts, 11 cấu hình và reset connection version/pending/history/feedback khi kết nối mới. Dữ liệu mẫu vẫn chỉ EC2/EBS/EIP/snapshot; chín loại được kiểm tra bằng API fixture riêng, chưa phải demo đầy đủ của Plan 09. Review phát hiện và tái hiện response findings/history cũ có thể ghi đè scope mới; generation guard bỏ success/error cũ, hủy poll và reset history/filter khi init. Regression giữ rồi nhả response sau reconnect kiểm tra đủ bốn trường hợp findings/history thành công/lỗi.
+
+| Kiểm tra Plan 04 | Kết quả / giới hạn |
+|---|---|
+| Full backend, Python 3.12.14 | **263 test: 262 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 54.844 giây. Chạy 29/10/2026, 15:39:25–15:40:20 UTC; CRG_AWS_E2E=0, EC2 metadata disabled; local unit/mock/Moto |
+| Demo scope mới | **8/8 PASS** trong full suite: save/reload groups/settings, invalid payload không mutate, legacy/missing/null groups, pending/reset và phạm vi counts/findings |
+| UI scope/filter mới | **PASS**, sáu nhóm kiểm tra, 45 request, 0 page/fixture error: chín loại, bốn nhóm, ba region, sáu bộ lọc AND, PARTIAL/unknown, scope save/reload/reset, 11 setting/biên/số nguyên/decimal và bốn ca stale response |
+| Demo UI smoke hiện có | **PASS** trên bản JS cuối: dashboard/filter, feedback hiện có, settings validation, region validation, scan/poll/history, mobile và hết phiên |
+| UI fixture trạng thái hiện có | **PASS**, sáu nhóm kiểm tra, 0 page error: onboarding, role download/copy, connection payload, lỗi và scan lifecycle/PARTIAL/zero, SES tắt, keyboard và responsive |
+| Responsive và ảnh | Scope fixture chụp findings/connection/settings ở **320/390/768/1440px**, 12 ảnh, không tràn ngang; xem ảnh findings desktop/mobile, connection mobile/desktop và settings mobile/desktop. Smoke/fixture hiện có cũng đạt; ảnh là dữ liệu local |
+| Review độc lập | Lỗi response cũ đã đóng bằng generation guard và regression trình duyệt; không còn blocker correctness được xác định trong scope/filter/settings local |
+| Cú pháp, tài liệu, whitespace | node --check web/app.js; AST Python demo/test thay đổi; checker Markdown mặc định và explicit bốn tài liệu; git diff --check và whitespace file mới. Kết quả cuối ghi cùng manifest local bên dưới |
+| AWS, build/artifact/deploy, CI | **CHƯA CHẠY trong Plan 04**. Không đổi src/app.py/rules/collectors/template/IAM ở lượt này; không thêm dependency. B1–B4 vẫn chưa đóng; ảnh/test local không chứng minh AWS acceptance |
+
+Evidence Git ignore:
+
+- `.preflight/duc-plan-04/backend.txt` và `backend.json`: kết quả runner, thời gian UTC, base SHA/branch, module counts, skip reason, SHA-256 Python/template đã kiểm thử.
+- `.preflight/plan04/ui-scope-filters/acceptance-results.json` và 12 ảnh findings/connection/settings; các ca kiểm tra ở [tests/ui_scope_filters.py](tests/ui_scope_filters.py).
+- `.preflight/duc-plan-04/ui-fixture/acceptance-results.json`, ảnh fixture; `.preflight/duc-plan-04/ui-smoke/desktop.png`, `mobile.png`.
+- `.preflight/duc-plan-04/ui-validation.json`: pin hash asset/demo/test cuối, đường dẫn các kết quả UI và static verification. Hash backend được đối chiếu khớp backend.json sau cập nhật tài liệu; không thay code sau các lượt UI cuối.
+
+Nguồn thay đổi: [web/app.js](web/app.js), [web/index.html](web/index.html), [web/styles.css](web/styles.css), [demo.py](demo.py), [test demo scope](tests/test_demo_scope.py), [UI scope fixture](tests/ui_scope_filters.py), [UI trạng thái](tests/ui_redesign.py); hướng dẫn ở [README.md](README.md), [FRONTEND-DESIGN.md](FRONTEND-DESIGN.md), [DUC-TASKS.md](DUC-TASKS.md). **Dừng sau Plan 04, chờ yêu cầu trực tiếp cho Plan 05.** Các mục cũ bên dưới là snapshot lúc bàn giao từng lượt.
+
+## Plan 03 — tích hợp timestamps vào worker/API, 29/10/2026
+
+**Đạt phạm vi code và kiểm thử local Plan 03. Chưa triển khai AWS; chưa thực hiện Plan 04.** Nhánh chung Plan 02–03 `codex/task-7-finding-observations`, HEAD nền `a2201f5d8261d453d0de3e9873b9072773545848`; code/test/tài liệu còn trong working tree. Giữ các thay đổi Plan 01–02 và AGENTS.md cục bộ; không commit/push hoặc thay đổi cloud. Theo yêu cầu người dùng, hoàn tất plan thì báo cáo tóm tắt và dừng, chỉ thực hiện plan tiếp khi có yêu cầu mới.
+
+Worker gọi registry sau collector, trước legacy suppression, feedback và cap. Findings mới được sao chép và gắn first_seen_at/last_seen_at ISO UTC dạng +00:00 từ epoch đã lưu; GET /findings, /scans/{id}, /history giữ các mốc cùng snapshot. Không backfill history cũ hoặc lấy evaluated_at/tuổi tài nguyên làm first giả. Registry None dừng trước terminal write; ClientError hạ tầng/CAS tiếp tục retry.
+
+Hai điều chỉnh cần thiết cho tích hợp: persistence có budget riêng chừa 10 giây theo context/lease/deadline, để PARTIAL có finding khi collector dừng ở ngưỡng dự trữ 60 giây vẫn được lưu; thật sự thiếu budget thì finish_scan TIMED_OUT/TIME_BUDGET bằng run_token, không trả finding thiếu mốc. Marker legacy thiếu deadline_at được gắn bằng if_not_exists theo mốc created_at/started_at gốc, không theo giờ retry. RESULT + HISTORY vẫn nguyên tử; không đổi IAM thêm ở Plan 03.
+
+| Kiểm tra mới trong Plan 03 | Kết quả / giới hạn |
+|---|---|
+| Full backend, Python 3.12.14 | **255 test: 254 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 75.265 giây toàn runner, unittest báo 75.134 giây. CRG_AWS_E2E=0, EC2 metadata disabled; local unit/mock/Moto |
+| Tích hợp timestamps mới | **14/14 PASS** trong full suite; chạy targeted trước đó 14/14 trong 11.779 giây. Hai scan/chín loại/API, level change, absence/FAILED/PARTIAL/30-day expiry, feedback/legacy suppression, reconnect/tenant/region, None ownership, partial registry commit, terminal commit retry/replay, UnprocessedKeys, budget 59/9 giây, legacy deadline và old history |
+| Workflow/API/notification hiện có | **93/93 PASS** targeted trước full suite: 50 workflow, 25 API, 18 notification; mock collector bổ sung metadata đúng schema hiện có, không mock bỏ registry. Chín loại qua collector thật và ba API có timestamps nhất quán; byte-cap regression buộc prune khi tính thêm timestamp bytes |
+| Lifecycle/budget Task 8 hiện có | **37/37 PASS** targeted: 28 Task 8 + 9 collector budget, trước full suite; không đổi semantics orphan observation hoặc transaction terminal |
+| Review độc lập | Không có blocker correctness. Ba Moto probe PASS: PARTIAL + finding còn 59 giây, timeout nhất quán empty/nonempty khi chỉ còn 5 giây, và legacy deadline bám marker tạo trước 100 giây. Source finding không bị mutate |
+| AST/docs/whitespace | AST 5 Python thay đổi/mới PASS; checker explicit 6 tài liệu (có DUC-TASKS.md) 0 link hỏng; git diff --check PASS. Hash code/test cuối phải khớp manifest full suite |
+| UI/browser, build/artifact/deploy, AWS | **CHƯA CHẠY trong Plan 03**; UI/collector/rule/template không đổi ở lượt này. Bằng chứng mới chỉ local/mock/Moto, không phải CI hoặc AWS acceptance; B1–B4 chưa được đóng |
+
+Evidence Git ignore: `.preflight/duc-plan-03/backend.txt` và `backend.json`, có thời gian UTC, base SHA/branch, module counts/skip reason và SHA-256 của 8 file code/template/test. Hai hash chính:
+
+```text
+src/app.py:                                  db19ad610d9cdba9d49293e47f990bc317e805aba02ba99c30393752fc5ab235
+tests/test_finding_observation_workflow.py:  adc4772713a872e83c38e3883b359443f25dab0bd324c2f0712d50244f9c7259
+```
+
+Test/schema chi tiết ở [tests/test_finding_observation_workflow.py](tests/test_finding_observation_workflow.py) và [RULES.md](RULES.md); trạng thái từng plan ở [DUC-TASKS.md](DUC-TASKS.md). Plan 02–03 đã đạt phạm vi code/local chung; phát hành/AWS vẫn cần artifact mới được pin và điều kiện nghiệm thu hiện có. **Dừng sau Plan 03, chờ yêu cầu trực tiếp cho Plan 04.** Các mục Plan 02/01 dưới đây là snapshot lúc bàn giao từng lượt, không phủ nhận trạng thái tích hợp mới ở mục này.
+
+## Plan 02 — registry mốc quan sát finding, 29/10/2026
+
+**Đạt phạm vi helper persistence + IAM + regression local. Chưa nối vào worker/API (Plan 03), chưa triển khai AWS hoặc phát hành.** Nhánh chung Plan 02–03: `codex/task-7-finding-observations`, HEAD nền `a2201f5d8261d453d0de3e9873b9072773545848`; thay đổi còn ở working tree, giữ nguyên tài liệu Plan 01 và AGENTS.md cục bộ. Các hash bên dưới pin nội dung code/test đã chạy, không phải commit mới.
+
+`record_finding_observations(marker, findings, time_check)` lưu registry OBSF theo tenant/version/region/finding, first/last epoch và TTL 30 ngày từ last. Dedup/strong BatchGet tối đa 100 key, retry UnprocessedKeys tối đa 3 request có backoff và budget; ghi tối đa 98 registry item + 2 marker/profile guards. Snapshot CAS ngăn đọc cũ ghi đè last/first mới. Mất ownership trả None; CAS còn ownership hoặc lỗi hạ tầng truyền ra để retry. Worker hiện chưa gọi helper; evaluator, collector, demo, UI và terminal RESULT + HISTORY giữ nguyên luồng. IAM chỉ thêm BatchGetItem trên Data.Arn cho ScanRole/guardian-worker.
+
+| Kiểm tra mới trong Plan 02 | Kết quả / giới hạn |
+|---|---|
+| Full backend, Python 3.12.14 | **241 test: 240 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 82.125 giây đo toàn lượt runner, unittest báo 82.019 giây. CRG_AWS_E2E=0, EC2 metadata disabled; local unit/mock/Moto |
+| Registry mới | **24/24 PASS** trong full suite: retention/gap/boundary, monotonic/replay, tenant/version/region, 205 ID/dedup, UnprocessedKeys, read lỗi/response lỗi, stale worker/lease/profile, CAS update/insert/TTL deletion, mixed cancellation, partial write + retry, time budget và input/stored-data validation |
+| IAM/template mới | **7 template invariant + 2 read-only PASS**; test mới kiểm tra cả ba template, kể cả wildcard grant, yêu cầu BatchGetItem chỉ ở ScanRole/guardian-worker/Data.Arn. Regression IAM đã FAIL trước cấp quyền và PASS sau sửa |
+| Review độc lập | Không có blocker correctness: BatchGet native SDK, 98 + 2 guard, CAS conflict khác mất ownership, TTL tính từ observation và nhiều batch. Ba Moto probe race bổ sung PASS; các ca tương ứng đã được giữ trong suite |
+| SAM/IAM lint | **PASS:** cfn-lint template.yaml target-role.yaml web/target-role.yaml; hai target-role template không đổi |
+| Docs/AST/whitespace | **PASS:** checker mặc định 12 file/0 link hỏng; explicit 6 tài liệu/0 link hỏng, gồm DUC-TASKS.md mới; AST của 3 Python thay đổi; git diff --check và kiểm tra UTF-8/whitespace/conflict marker cho cả 8 file Plan 02. Hash 4 file code/template/test không đổi từ full-suite |
+| Worker/API timestamps, UI, artifact cuối và AWS | **CHƯA CHẠY/CHƯA TÍCH HỢP** trong Plan 02; nối worker/API và kiểm tra byte cap thuộc Plan 03. B1–B4 ở dưới chưa được đóng; Task 13 tiếp tục hoãn |
+
+Kết quả thử nghiệm trung gian: bộ 20 registry test đầu có 19 PASS/1 FAIL do test chỉ đếm Update thay vì chấp nhận Put CAS; đã sửa test theo hành vi và bổ sung race cases. Full suite cuối ở trên mới là kết quả bàn giao. Không có lỗi runtime đã xác minh bị che bởi thay đổi test này.
+
+Evidence cục bộ (Git ignore): `.preflight/duc-plan-02/backend.txt` và `backend.json`, gồm thời gian UTC, Python, base SHA/branch, số test từng module, skip reason và SHA-256 working tree:
+
+```text
+src/app.py:                          01e01f83fb476ff20a65ffb2d78f554f18f58ae5cbfca0b075bc80651bd734e7
+template.yaml:                       5999408a55491ff33b37a3b213a82a1539a1de9096d6d06ea14ab3071e63b8b8
+tests/test_finding_observations.py:  20a893cccb475370a6171f4523c94582fc0cd2628aff8e8541806b5cb341e504
+tests/test_task8_template.py:        ba19e67d49ec4df3102ba7413a3395a0ed3484ab24eb153c1e596a9e3476d2b5
+```
+
+Hợp đồng và điều kiện tiếp tục Plan 03 ở [DUC-TASKS.md](DUC-TASKS.md); semantics persistence ở [RULES.md](RULES.md). Không phát hành riêng Plan 02; source/template thay đổi làm artifact Task 8 cũ không còn đại diện cho bản này, cần đóng gói và pin lại sau Plan 03 và local validation phù hợp.
+
+## Plan 01 — baseline Task 7–9 của Đức, 29/10/2026
+
+**Lượt này chỉ chốt baseline/checklist/hợp đồng kỹ thuật cho Task 7, 8, 9.** Task 13 báo cáo/slide/kịch bản demo được hoãn theo yêu cầu người dùng. Xem [checklist yêu cầu và hợp đồng backend/demo/UI](DUC-TASKS.md). Chưa triển khai registry first/last, metadata feedback hoặc UI của các plan sau; không sửa runtime source/template và không gọi AWS.
+
+Baseline code: `main` tại **a2201f5d8261d453d0de3e9873b9072773545848**; nhánh tài liệu `codex/duc-plan-01-baseline`. Đã kiểm tra `git status`, branch, SHA và lịch sử checkout; `AGENTS.md` untracked được giữ nguyên. Chưa refresh remote/GitHub hoặc kiểm tra revision deployed.
+
+| Kiểm tra mới trong Plan 01 | Kết quả / lớp bằng chứng |
+|---|---|
+| Backend baseline, Python 3.12.14 | **216 test: 215 PASS, 1 SKIPPED**, 0 failure/error, 48.359 giây; local unit/mock/Moto, CRG_AWS_E2E=0 và EC2 metadata disabled |
+| Phạm vi suite | 57 rule, 25 API, 50 workflow, 9 collector budget, 28 Task 8, 6 template, 17 harness offline, 18 notification, 3 E2E-evidence mock, 2 read-only; 1 AWS E2E bị skip |
+| Git integration | PR #4 đã trong lịch sử tại f1e6cd1; PR #3 tại a2201f5. D1 chờ tích hợp vào main đã gỡ ở lớp Git cục bộ |
+| Report 2 / contract | Đối chiếu tr. 10, 15, 18, 20–21 với source/API/demo/UI và template; các trường mới được đánh dấu CHƯA TRIỂN KHAI |
+| Tài liệu / cú pháp / template | **PASS:** checker mặc định 12 file/0 link hỏng; checker explicit đủ 6 file thay đổi (gồm DUC-TASKS.md mới)/0 link hỏng; node --check web/app.js; cfn-lint cả ba template; git diff --check và kiểm tra UTF-8/whitespace/conflict marker cho cả file mới |
+| Review tài liệu độc lập | **APPROVE:** đối chiếu contract với source/template, kiểm tra tách Git/AWS và scope Task 7–9; checker riêng file mới 1 file/0 link hỏng |
+| UI/browser, SAM build, AWS E2E/Task 8 cloud | **CHƯA CHẠY trong Plan 01**; không đổi UI/runtime/hạ tầng. Browser cũ hoặc AWS EBS OBSERVING trong Report 2 là evidence lịch sử, không phải kiểm tra mới |
+
+Transcript và summary JSON cục bộ ở `.preflight/duc-plan-01/backend.txt` và `backend.json` (Git ignore), có baseline SHA, Python, thời gian UTC, số test theo module và skip reason. Harness AWS bị skip chủ động; kết quả này không phải GitHub CI hoặc cloud acceptance. Runtime source/template giữ nguyên baseline trong lượt tài liệu này.
+
+Trạng thái đầu vào và evidence cloud của đợt Task 7–9:
+
+| ID | Trạng thái tại 29/10/2026 | Điều kiện đóng |
+|---|---|---|
+| B1 — Phiên AWS/account/executor | **CHƯA XÁC MINH LIVE**; không dùng kết quả thiếu credentials ngày 26/10 để khẳng định phiên hiện tại | Xác nhận STS identity, account/region và quyền executor trong phạm vi được duyệt |
+| B2 — Stack/fixture | **CHƯA XÁC MINH LIVE**; chưa xác nhận stack thử, hai user/read role và ZIP đang chạy | Manifest/fixture đủ, change set/IAM được review, SES tắt, hash/handler của artifact cuối khớp |
+| B3 — AWS của bản cuối | **CHƯA CHẠY** cho đợt Task 7–9 | Evidence rule/web thật Plan 11, scheduler/recovery Plan 12 và final-smoke trên artifact chuẩn |
+| B4 — Coverage manual cloud | **CHƯA CÓ EVIDENCE MỚI**; giữ các ca chưa tự động hóa trong runbook Task 8 | Ghi oracle/kết quả từng ca trong phạm vi nghiệm thu hoặc lý do chưa chạy; không đổi local mock thành PASS cloud |
+| D1 — Tích hợp Task 7/8 vào main | **ĐÃ GỠ VỀ GIT** tại baseline nêu trên | Không cần merge/retarget lại PR đã có trong lịch sử; deployment và AWS acceptance vẫn cần bằng chứng riêng |
+
+Các mục có ngày cũ bên dưới giữ bằng chứng lịch sử; mô tả branch/PR/credentials tại thời điểm đó không thay thế baseline và trạng thái hiện tại ở mục này.
+
 ## Task 8 — bàn giao local và harness, 27/10/2026
 
-**Hoàn tất phạm vi local + harness theo lựa chọn của người dùng; AWS acceptance chưa chạy.** Nhánh `codex/task-8-scheduling-recovery`, nền `767f32ad3da911f803f221ff271631a51ed66809`. Revision bàn giao là head của PR Task 8; SHA nền không đại diện cho thay đổi Task 8. PR đặt base `duc` trong khi PR Task 7 chưa merge vào `main`, để diff chỉ bao gồm Task 8. `AGENTS.md` có sẵn và vẫn giữ untracked. Xem [hợp đồng/ma trận/runbook Task 8](TASK8.md) và [quy trình harness AWS](TASK8-AWS.md).
+**Snapshot bàn giao ngày 27/10: hoàn tất phạm vi local + harness; AWS acceptance chưa chạy.** Nhánh lúc bàn giao `codex/task-8-scheduling-recovery`, nền `767f32ad3da911f803f221ff271631a51ed66809`. Revision bàn giao là head của PR Task 8; SHA nền không đại diện cho thay đổi Task 8. Khi mở, PR đặt base `duc` để diff chỉ gồm Task 8. **Kiểm tra lại ngày 29/10: PR #4 và #3 đã có trong lịch sử main; D1 đã gỡ về Git.** `AGENTS.md` có sẵn và vẫn giữ untracked. Xem [hợp đồng/ma trận/runbook Task 8](TASK8.md) và [quy trình harness AWS](TASK8-AWS.md).
 
 Thay đổi gồm admission/worker lease có điều kiện theo tenant/connection, RESULT + HISTORY nguyên tử, lịch theo tenant được cô lập lỗi và phân trang, giới hạn thời gian trước STS/từng trang collector, SQS recovery và đối soát deadline. SAM thêm recovery/reconcile, DLQ vận hành, đường lỗi delivery/async, IAM theo bảng/queue và alarm. `deploy.py --artifact` dùng nguyên byte ZIP đã review; validation tùy chọn này và mọi thử nghiệm deploy trong unittest đều dùng SDK mock, không upload AWS.
 
 ### Điểm chặn Task 8 và điều kiện gỡ
 
-**Không còn blocker code/local đã xác minh trong phạm vi bàn giao. Task 8 vẫn chưa được nghiệm thu AWS.** Các mục B1–B4 dưới đây chặn việc chạy hoặc công nhận bằng chứng cloud tương ứng; D1 là phụ thuộc tích hợp vào `main`, không chặn review Task 8 ở base `duc`.
+**Không còn blocker code/local đã xác minh trong phạm vi bàn giao Task 8 ngày 27/10. Task 8 vẫn chưa được nghiệm thu AWS.** B1–B4 dưới đây ghi bằng chứng snapshot lúc bàn giao; xem trạng thái hiện tại trong mục Plan 01. D1 đã được giải quyết về tích hợp Git, không còn là bước chờ merge.
 
 | ID / điểm chặn | Trạng thái và bằng chứng | Phần bị chặn | Điều kiện gỡ |
 |---|---|---|---|
@@ -16,9 +178,9 @@ Thay đổi gồm admission/worker lease có điều kiện theo tenant/connecti
 | B2 — Stack và fixture nghiệm thu | **CHƯA XÁC MINH.** Chưa có bằng chứng live cho stack Task 8, hai Cognito subject và hai read role riêng, IAM/SES hoặc ZIP đang triển khai. Không kết luận các tài nguyên này chưa tồn tại | Điều kiện đầu vào của AWS E2E | Xác minh stack `cloud-resource-guardian-task8-test`, hai user/role riêng và manifest; review change set/IAM theo release gate hiện có; SES tắt; cả năm Lambda dùng đúng handler và `CodeSha256` của ZIP đã pin |
 | B3 — Luồng AWS và artifact cuối | **CHƯA CHẠY.** Các kết quả PASS hiện là local/mock/Moto/browser fixture/offline, chưa có evidence AWS Task 8 | Kết luận Task 8 hoàn tất AWS và phát hành revision này | Lưu evidence đạt cho tick EventBridge thật, manual/race/duplicate/reconnect, retry transient/exhausted, hard timeout, OnFailure → SQS → recovery, consumer redrive/DLQ và orphan reconciliation; bỏ wrapper, xác minh hash/config rồi chạy `final-smoke` trên artifact cuối |
 | B4 — Coverage cloud chưa tự động hóa đầy đủ | **CHƯA CÓ EVIDENCE** cho các ca nêu trong [harness AWS](TASK8-AWS.md): STS/service denial thật, dừng tiến trình đúng điểm dispatch, DynamoDB throttling/conflict thật, reconnect chắc chắn khi worker đang đọc, và destination alarm thực sự phát sinh. Local regression không thay thế evidence này | Việc công nhận các tiêu chí cloud tương ứng đã được kiểm chứng; không tự biến tất cả thành gate bắt buộc mới | Khi nghiệm thu phần tương ứng, bổ sung kịch bản manual được review hoặc mở rộng harness; ghi kết quả/evidence hoặc lý do ngoài phạm vi rõ ràng, không đổi ca chưa chạy thành PASS |
-| D1 — Phụ thuộc PR Task 7 #3 | **PHỤ THUỘC TÍCH HỢP VÀO MAIN.** PR Task 8 #4 đang đặt base `duc`; PR #3 chứa nền Task 7 chưa merge vào `main` tại thời điểm kiểm tra | Tích hợp Task 8 vào `main` theo chuỗi PR hiện tại | Merge PR #3 trước, chuyển base PR #4 sang `main`, rồi rà lại diff, dependency và kết quả kiểm tra. Đây không phải xung đột hoặc lỗi chặn review ở `duc` |
+| D1 — Phụ thuộc PR Task 7 #3 | **ĐÃ GỠ VỀ GIT, kiểm tra 29/10.** PR #4 tại f1e6cd1 và PR #3 tại a2201f5 đã trong lịch sử main cục bộ | Không còn chặn tích hợp ở baseline này; AWS vẫn chưa nghiệm thu | Giữ bằng chứng Git và revalidate bản tích hợp; không yêu cầu retarget/merge lại PR lịch sử |
 
-**Giới hạn khác:** GitHub hiện chưa có check runs/commit statuses cho commit Task 8; không ghi là CI PASS hay CI FAIL và chưa có bằng chứng required-check gate. Alarm chưa có SNS/người nhận tự động là giới hạn thông báo vận hành đã công bố; chỉ chặn khi phạm vi nghiệm thu bao gồm gửi thông báo tự động. Không có cloud mutation trong lượt bổ sung blocker này.
+**Giới hạn khác tại thời điểm bàn giao 27/10:** chưa có check runs/commit statuses GitHub cho commit Task 8; không ghi là CI PASS hay CI FAIL. Plan 01 chưa kiểm tra GitHub lại. Alarm chưa có SNS/người nhận tự động là giới hạn thông báo vận hành đã công bố; chỉ chặn khi phạm vi nghiệm thu bao gồm gửi thông báo tự động. Không có cloud mutation trong lượt bổ sung blocker này.
 
 ### Bằng chứng local đã đạt
 
@@ -200,6 +362,8 @@ Release cannot pass without real evidence for EC2, EBS, EIP, Snapshot and stale 
 Nguồn đối chiếu: [Cloud-T9, Report 1 và Report 2 / Action Plan](https://docs.google.com/document/d/1kzggr_OWzw0jQOhjNoaFMdBOjqmL0QK12olEBmIxHiY/edit?tab=t.0), bốn sơ đồ BC1–BC4 trong `diagrams/`, source/API/IAM/tests và các nhánh remote. Report 2 chốt **9 loại tài nguyên / 4 nhóm**; AI/Analytics/Containers và thu thập chi phí target là kế hoạch mở rộng, không phải lý do thay kiến trúc hiện tại. Không sửa sơ đồ, thiết kế frontend, API công khai, target-role hay dịch vụ nền.
 
 ### Đối chiếu nhánh và plan
+
+**Bảng và các phát hiện dưới đây là snapshot audit ngày 27/10 tại debea62.** Baseline 29/10 đã có merge PR #3/#4/#5 trong lịch sử; các ghi chú PR còn mở hoặc cần tích hợp lại dưới đây không phải bước chờ hiện tại. Task 8 trên baseline mới ghi RESULT + HISTORY nguyên tử; đoạn chờ history của harness phản ánh khả năng tương thích với baseline cũ. Xem mục Plan 01 và [checklist Task 7–9](DUC-TASKS.md) cho trạng thái hiện hành.
 
 | Nhánh / hạng mục | Kết quả đối chiếu |
 |---|---|
