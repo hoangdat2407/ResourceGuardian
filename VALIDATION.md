@@ -1,5 +1,34 @@
 # Validation matrix
 
+## Plan 07 — quản lý feedback đang ẩn, 30/10/2026
+
+**Đạt code/local Plan 07, chưa nghiệm thu AWS; chưa thực hiện Plan 08 hoặc Task 13.** Baseline `6f09a8536fa64fcb466ac424f6daaa757d99c238`, nhánh `codex/task-7-finding-observations`. Commit code đã tạo sau validation:
+
+- `576b382d0d6350c45dcf32ad7c02d6d7d51bd891` — feat(feedback): paginate demo records and verify management contracts.
+- `03cd770337777ee11665ab4950094055922a649b` — feat(web): manage kept and ignored findings.
+
+Card quản lý dưới findings dùng GET /feedback limit20/next_token, dedup identity và filter active kept/ignore. API có thể trả một trang toàn ack-only, nên vẫn cho tải tiếp nếu còn cursor. Bỏ giữ/hủy bỏ qua/đổi hạn gửi một cờ; cờ khác và history giữ nguyên. Legacy thiếu metadata dùng finding ID/region. Sau clear, fresh GET /findings có finding mới đủ để báo đang hiện lại; không thấy thì hướng dẫn scan mới/giới hạn, còn cờ ẩn thì giải thích cờ còn lại.
+
+Giữ dữ liệu khi tải trang sau lỗi, reset cursor khi refresh, ignore GET/PUT cũ qua save/reconnect. Demo có cursor theo route/connection/key và validation query; không thay src/app.py/API production, collector/rule/IAM/template hoặc thêm dependency. Bốn fixture browser cũ chỉ bổ sung GET /feedback để phản ánh request mới; smoke demo hiện có không sửa.
+
+| Kiểm tra | Kết quả / giới hạn |
+|---|---|
+| Full backend Python 3.12 | **302 test: 301 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 141.032 giây toàn runner (unittest 139.473 giây). Chạy 30/10/2026 11:18:06–11:20:27 UTC, CRG_AWS_E2E=0, EC2 metadata disabled; local unit/mock/Moto |
+| Backend contract mới | **6/6 PASS** trong full suite; targeted trước đó 6/6. Trang 20 ack-only +11 kept, TTL/wrong-version skip, reconnect/history token rejection, legacy absent candidate/flags/history và expiry boundary |
+| Demo pagination mới | **9/9 PASS** trong full suite; targeted cùng feedback/scope đạt 29/29. 45 records/ba trang, query HTTP, limits, cursor sai/reconnect/xóa record trang trước, expiry/foreign rows và legacy không fake restore |
+| Browser manager mới | **PASS**, **14 nhóm/101 request/13 PUT**, 0 page/fixture error: hơn 20/dedup/opaque token, filtered-empty page, retry giữ data, clear từng cờ/candidate còn/mất, legacy, đổi 1/30 ngày, held GET/PUT và reconnect, history read-only, XSS, keyboard và 401 |
+| Năm bộ UI hiện có | **PASS** trên source cuối: ui_smoke.py, ui_finding_feedback.py, ui_finding_details.py, ui_scope_filters.py, ui_redesign.py. Cùng manager là **sáu bộ browser**; fixture GET mới không bỏ qua pending/reconnect regression cũ |
+| Review độc lập | Hai lỗi P2 tái hiện Chrome rồi đóng: current/manager trùng identity làm onchange null; load-more trang cuối làm focus BODY. Selector fix và focus summary có regression lâu dài. Focus probe độc lập **4/4 PASS**, không giành focus search hoặc idle refresh; không còn issue actionable được xác định |
+| Visual/responsive | **320/390/768/1440px**, không tràn ngang; 6 ảnh gồm bốn viewport và pending/error component. Đã xem management-1440.png, management-390.png, management-error-1440.png; metadata legacy/ID dài/control đọc được |
+| Static và Git | JS syntax; AST tám Python demo/test mới hoặc thay đổi; link checker mặc định + explicit bốn tài liệu; diff/cached whitespace, staged allowlist và source/blob normalization. Hash/result cuối pin manifest local |
+| AWS/CI/release | **CHƯA CHẠY** AWS E2E/deploy/publish/CI; không chạy lại SAM lint/build vì template/IAM không đổi. SES giữ cấu hình tắt theo scope; B1–B4 vẫn chưa đóng |
+
+Browser chạy qua venv Python và Chrome local với UI_QA_DIR riêng; runner backend lưu unittest discover verbose vào backend.txt/JSON. Test mới: [contract API](tests/test_feedback_management.py), [demo pagination](tests/test_demo_feedback_pagination.py), [browser manager](tests/ui_feedback_management.py). Các lệnh browser là tests/ui_smoke.py, tests/ui_finding_feedback.py, tests/ui_finding_details.py, tests/ui_scope_filters.py, tests/ui_redesign.py và tests/ui_feedback_management.py với python -X utf8 -B.
+
+Evidence Git ignore tại `.preflight/duc-plan-07/`: backend.txt/backend.json có counts/skip/time/hashes; ui-management/acceptance-results.json và 6 ảnh; ui-feedback/, ui-details/, ui-scope/, ui-fixture/ có JSON/ảnh; ui-smoke/ có ảnh; *.txt lưu output năm bộ hiện có. validation.json pin source/test hashes, commit và kết quả static/browser. Đây là fixture/local/Moto, không phải AWS hoặc CI.
+
+Thay đổi: demo.py, ba file web, ba test mới, bốn fixture cũ và bốn tài liệu README/FRONTEND-DESIGN/DUC-TASKS/VALIDATION. AGENTS.md cục bộ giữ riêng; commit theo tính năng, không có số Plan trong tên. **Dừng sau Plan 07, chờ người dùng yêu cầu Plan 08.**
+
 ## Plan 06 — phản hồi finding và metadata, 30/10/2026
 
 **Đạt phạm vi backend/UI/demo và kiểm thử local. Chưa triển khai AWS; chưa thực hiện Plan 07 hoặc Task 13.** Baseline `40ceeb3c8f8c06cd2d1774ac1bd4948a2290094a`, nhánh `codex/task-7-finding-observations`. Code được commit local theo phần đã kiểm thử:

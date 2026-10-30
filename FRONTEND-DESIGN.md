@@ -61,3 +61,13 @@ Trạng thái pending/message/ignore days được giữ theo finding ID + regio
 Demo dùng candidate snapshot + overlay như backend để acknowledge/keep/ignore tồn tại qua refresh/scan tiếp và không sửa history. Metadata feedback chỉ copy field hiện có từ candidate; demo bốn loại legacy không được thêm account/rule giả. Payload strict giống backend; finding ID theo region để cờ không ảnh hưởng region khác. Backend enrich metadata nhưng không đổi request schema, IAM hoặc rule.
 
 [Fixture phản hồi](tests/ui_finding_feedback.py), smoke demo và các fixture hiện có kiểm tra API thành công/lỗi/retry, held PUT/GET, reconnect/401, cờ độc lập và responsive/keyboard. Plan 07 mới thêm quản lý feedback ẩn/bỏ giữ/bỏ ignore/phân trang. Kết quả và ảnh local ở [VALIDATION.md](VALIDATION.md); không phải AWS E2E.
+
+## Plan 07 — quản lý phản hồi, 2026-10-30
+
+Giữ năm trang và navigation hiện tại; thêm card Đang giữ và bỏ qua dưới findings. GET /feedback limit20 + next_token, refresh reset cursor, load-more giữ dữ liệu cũ nếu lỗi và dedup theo region/finding ID. API trả cả acknowledged-only nên danh sách manager lọc kept hoặc ignore_until tương lai; phần đã tải chưa có record active nhưng còn cursor vẫn hiển thị Tải thêm. Không quảng bá đã tải hết trước khi cursor kết thúc.
+
+Mỗi record hiển thị type/resource/account/rule cùng region/finding ID; legacy dùng ID/region và ghi thiếu metadata. Control Bỏ giữ, Hủy bỏ qua, Hạn bỏ qua mới 1–30 ngày và Đổi hạn gửi riêng từng cờ. Pending/error dùng chung với current/priority, đồng thời giữ lựa chọn ngày riêng cho manager. Sau clear chỉ báo hiển thị lại khi fresh findings có đúng identity; còn cờ ẩn báo cờ còn lại, không thấy finding hướng dẫn scan mới/giới hạn. Không tự dựng candidate hay sửa history.
+
+Request id/revision/generation bảo vệ load-more/refresh qua mutation và reconnect; dữ liệu/current feedback được cập nhật sau PUT thành công. Manager GET cũ không ghi đè record vừa lưu. Controls theo identity giữ pending/focus khi polling render lại; pagination control bị disable/ẩn chuyển focus sang summary hiện hữu, giữ focus người dùng đã chuyển sang nơi khác. Selector đồng bộ hạn current chỉ chạm current/priority, không chạm manager khi hai snapshot tạm chứa cùng identity.
+
+Desktop record chia thông tin và control thành hai cột; dưới 760px một cột, text/ID dài wrap, control đủ target44px. [Fixture manager](tests/ui_feedback_management.py) kiểm tra 320/390/768/1440px, XSS/long ID, pending/error, pagination và keyboard. Demo chỉ đồng bộ feedback pagination, không thêm history pagination hoặc dữ liệu chín loại. Evidence/review local ở [VALIDATION.md](VALIDATION.md); dừng và chờ Plan 08.
