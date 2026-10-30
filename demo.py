@@ -1,11 +1,11 @@
 """Local UI demo only. No boto3, AWS credentials, cloud reads or cloud writes.
 Run: python demo.py, then open http://127.0.0.1:8080
 """
-import argparse, copy, json, re, sys, threading, time, uuid
+import argparse, base64, copy, json, re, sys, threading, time, uuid
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from rules import config, finding_id
 WEB = Path(__file__).parent / 'web'
@@ -50,6 +50,27 @@ def public_result(row, overlay=False):
  result.pop('candidates',None)
  return result
 
+def feedback_page(query):
+ values=query.get('limit',['20'])
+ if len(values)!=1 or not values[0].isdigit() or not 1<=int(values[0])<=100:raise ValueError('limit must be an integer from 1 to 100')
+ limit=int(values[0]);version=PROFILE['connection_version'];after=None
+ if 'next_token' in query:
+  tokens=query['next_token']
+  if len(tokens)!=1 or not tokens[0]:raise ValueError('Invalid pagination token')
+  value=tokens[0]
+  try:
+   token=json.loads(base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True))
+  except (ValueError,UnicodeDecodeError) as error:raise ValueError('Invalid pagination token') from error
+  if not isinstance(token,dict) or set(token)!={'route','connection_version','region','finding_id'} or token.get('route')!='/feedback' or token.get('connection_version')!=version or token.get('region') not in PROFILE['regions'] or not isinstance(token.get('finding_id'),str) or not re.fullmatch(r'[0-9a-f]{64}',token['finding_id']):raise ValueError('Invalid pagination token')
+  after=(token['region'],token['finding_id'])
+ rows=sorted((record for record in FEEDBACK.values() if record.get('connection_version',version)==version and record.get('region') in PROFILE['regions'] and isinstance(record.get('finding_id'),str) and record.get('expires',float('inf'))>time.time()),key=lambda record:(record['region'],record['finding_id']),reverse=True)
+ if after is not None:rows=[record for record in rows if (record['region'],record['finding_id'])<after]
+ page=rows[:limit];next_token=None
+ if len(rows)>limit:
+  last=page[-1];cursor={'route':'/feedback','connection_version':version,'region':last['region'],'finding_id':last['finding_id']}
+  next_token=base64.urlsafe_b64encode(json.dumps(cursor,separators=(',',':')).encode()).decode().rstrip('=')
+ return {'results':copy.deepcopy(page),'next_token':next_token}
+
 def complete(scan_id, started, region='ap-southeast-1'):
  groups=normalized_groups(PROFILE.get('service_groups'))
  candidates=[]
@@ -81,7 +102,7 @@ class Handler(SimpleHTTPRequestHandler):
  def do_GET(self):
   path=urlparse(self.path).path
   if path=='/config.json':return self.reply(200,{'api':'/api','demo':True})
-  if path.startswith('/api/'):return self.handle_api('GET',path[4:])
+  if path.startswith('/api/'):return self.handle_api('GET',self.path[4:])
   return super().do_GET()
  def do_POST(self):self.handle_api('POST',urlparse(self.path).path[4:])
  def do_PUT(self):self.handle_api('PUT',urlparse(self.path).path[4:])
@@ -91,6 +112,7 @@ class Handler(SimpleHTTPRequestHandler):
   with LOCK:
    tick()
    try:
+    parsed=urlparse(path);path=parsed.path;query=parse_qs(parsed.query,keep_blank_values=True)
     length=int(self.headers.get('Content-Length','0'))
     if length>10000:return self.reply(413,{'error':'Request too large'})
     body=json.loads(self.rfile.read(length) or b'{}')
@@ -147,7 +169,7 @@ class Handler(SimpleHTTPRequestHandler):
      else:record['expires']=record.get('ignore_until') if record.get('ignore_until',0)>now else now
      FEEDBACK[ident]=record
      return self.reply(200,record)
-    if path=='/feedback' and method=='GET':return self.reply(200,{'results':[copy.deepcopy(record) for record in FEEDBACK.values() if record.get('expires',float('inf'))>time.time()],'next_token':None})
+    if path=='/feedback' and method=='GET':return self.reply(200,feedback_page(query))
     return self.reply(404,{'error':'Route not found'})
    except (ValueError,KeyError,TypeError) as e:return self.reply(400,{'error':str(e)})
 if __name__=='__main__':
