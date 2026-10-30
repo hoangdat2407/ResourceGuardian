@@ -25,7 +25,7 @@ try:
   page.screenshot(path=str(out/'desktop.png'),full_page=True)
   page.locator('[data-page="findings"]').click();expect(page.locator('#findings-list tbody tr')).to_have_count(5)
   page.locator('#filter-type').select_option('EBS');expect(page.locator('#findings-list tbody tr')).to_have_count(1)
-  page.locator('#findings-list button').click();expect(page.locator('#status')).to_contain_text('Đã bỏ qua')
+  page.locator('#findings-list').get_by_role('button',name='Bỏ qua 7 ngày',exact=True).click();expect(page.locator('#status')).to_contain_text('Đã bỏ qua')
   page.locator('[data-page="settings"]').click();page.locator('#cpu_percent').fill('7')
   expect(page.locator('#window_hours')).to_have_value('24')
   expect(page.locator('#window_hours')).to_have_attribute('max','168')

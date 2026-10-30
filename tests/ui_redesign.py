@@ -20,7 +20,10 @@ PROFILE = dict(external_id='FIXTURE-ONLY-EXTERNAL-ID-123456789',
     api_principal='arn:aws:iam::123456789012:role/FixtureApiPrincipal',
     scan_principal='arn:aws:iam::123456789012:role/FixtureScanPrincipal',
     settings=dict(cpu_percent=5, network_mib_hour=1, window_hours=24,
-                  orphan_hours=24, snapshot_days=30, interval_hours=6),
+                  orphan_hours=24, snapshot_days=30, interval_hours=6,
+                  rds_cpu_percent=5, rds_connections=1, nat_mib_hour=1,
+                  alb_requests_hour=1, nlb_new_flows_hour=1),
+    service_groups=['compute', 'storage', 'database', 'network'],
     notifications={'enabled': False}, email_available=False)
 ARN = 'arn:aws:iam::123456789012:role/GuardianReadRole-fixture'
 ROW = dict(region='ap-southeast-1', status='SUCCEEDED', completed_at=1791700000,
@@ -65,7 +68,8 @@ try:
                     status, data = 502, {'error': 'AWS request failed; check role permissions and CloudWatch logs'}
                 else:
                     body = route.request.post_data_json
-                    assert set(body) == {'role_arn', 'regions'}
+                    assert set(body) == {'role_arn', 'regions', 'service_groups'}
+                    assert body['service_groups'] == ['compute', 'storage', 'database', 'network']
                     state['profile'].update(body, account_id='123456789012')
                     state['rows'] = []
                     data = {'connected': True, 'account_id': '123456789012'}

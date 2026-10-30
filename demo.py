@@ -1,7 +1,7 @@
 """Local UI demo only. No boto3, AWS credentials, cloud reads or cloud writes.
 Run: python demo.py, then open http://127.0.0.1:8080
 """
-import argparse, copy, json, sys, threading, time, uuid
+import argparse, copy, json, re, sys, threading, time, uuid
 from datetime import datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -10,6 +10,9 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from rules import config, finding_id
 WEB = Path(__file__).parent / 'web'
 LOCK = threading.RLock()
+SERVICE_GROUPS = ('compute','storage','database','network')
+REGIONS = {'ap-southeast-1','ap-southeast-2','ap-northeast-1','us-east-1','us-west-2','eu-west-1'}
+RESOURCE_GROUPS = {'EC2':'compute','EBS':'storage','EIP':'network','SNAPSHOT':'storage'}
 PROFILE = {'account_id':'123456789012','role_arn':'arn:aws:iam::123456789012:role/GuardianReadRole-demo',
            'regions':['ap-southeast-1'], 'service_groups':['compute','storage','database','network'],
            'external_id':'DEMO-ONLY-NOT-A-REAL-EXTERNAL-ID', 'connection_version':'demo-v1',
@@ -25,10 +28,17 @@ FINDINGS = [
 ]
 for finding in FINDINGS:
  finding['finding_id']=finding_id(finding['type'],'ap-southeast-1',finding['resource_id'])
+def normalized_groups(value):
+ if value is None:return list(SERVICE_GROUPS)
+ if not isinstance(value,list) or not 1<=len(value)<=4 or any(not isinstance(group,str) or group not in SERVICE_GROUPS for group in value) or len(set(value))!=len(value):
+  raise ValueError('Choose 1 to 4 unique supported service groups')
+ return list(value)
 def complete(scan_id, started):
- visible=[copy.deepcopy(f) for f in FINDINGS if FEEDBACK.get(f['finding_id'],{}).get('ignore_until',0)<=time.time() and not FEEDBACK.get(f['finding_id'],{}).get('kept')]
+ groups=normalized_groups(PROFILE.get('service_groups'))
+ visible=[copy.deepcopy(f) for f in FINDINGS if RESOURCE_GROUPS[f['type']] in groups and FEEDBACK.get(f['finding_id'],{}).get('ignore_until',0)<=time.time() and not FEEDBACK.get(f['finding_id'],{}).get('kept')]
+ counts={kind:count for kind,count in {'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8}.items() if RESOURCE_GROUPS[kind] in groups}
  return {'scan_id':scan_id,'region':'ap-southeast-1','status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
-         'counts':{'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8},'findings':visible,
+         'counts':counts,'findings':visible,
          'notification':'DEMO_ONLY','expires':int(time.time())+86400*30}
 CURRENT=[complete(str(uuid.uuid4()),int(time.time())-3600)]
 CURRENT[0]['completed_at']=int(time.time())-3500
@@ -64,7 +74,8 @@ class Handler(SimpleHTTPRequestHandler):
     length=int(self.headers.get('Content-Length','0'))
     if length>10000:return self.reply(413,{'error':'Request too large'})
     body=json.loads(self.rfile.read(length) or b'{}')
-    if path=='/me' and method=='GET':return self.reply(200,PROFILE)
+    if not isinstance(body,dict):raise ValueError('Expected a JSON object')
+    if path=='/me' and method=='GET':return self.reply(200,{**PROFILE,'service_groups':normalized_groups(PROFILE.get('service_groups'))})
     if path=='/findings':
      for row in CURRENT:row['findings']=complete(row['scan_id'],row['started_at'])['findings']
      return self.reply(200,{'results':CURRENT})
@@ -78,9 +89,13 @@ class Handler(SimpleHTTPRequestHandler):
      return self.reply(202,{'scan_id':sid,'message':'Demo queued'})
     if path=='/settings' and method=='PUT':PROFILE['settings']=config(body,PROFILE['settings']);return self.reply(200,PROFILE['settings'])
     if path=='/connection' and method=='PUT':
-     if not body.get('role_arn','').startswith('arn:aws:iam::'):raise ValueError('Nhập ARN mẫu hợp lệ cho demo.')
-     if not 1<=len(body.get('regions',[]))<=3:raise ValueError('Chọn 1–3 region.')
-     PROFILE.update(role_arn=body['role_arn'],regions=body['regions']);CURRENT=[]
+     if set(body)-{'role_arn','regions','service_groups'} or not {'role_arn','regions'}<=set(body):raise ValueError('Connection fields are invalid')
+     arn=body['role_arn'];regions=body['regions']
+     if not isinstance(arn,str) or not re.fullmatch(r'arn:aws:iam::\d{12}:role/GuardianReadRole-[A-Za-z0-9+=,.@_-]{1,40}',arn):raise ValueError('Nhập ARN mẫu hợp lệ cho demo.')
+     if not isinstance(regions,list) or not 1<=len(regions)<=3 or any(not isinstance(region,str) or region not in REGIONS for region in regions) or len(set(regions))!=len(regions):raise ValueError('Chọn 1–3 region hợp lệ, không trùng nhau.')
+     groups=normalized_groups(body.get('service_groups',PROFILE.get('service_groups')))
+     candidate={**PROFILE,'role_arn':arn,'account_id':arn.split(':')[4],'regions':list(regions),'service_groups':groups,'connection_version':str(uuid.uuid4())}
+     PROFILE.update(candidate);CURRENT=[];READY_AT=0;HISTORY.clear();FEEDBACK.clear()
      return self.reply(200,{'connected':True,'demo':True})
     if path=='/notifications' and method=='PUT':
      PROFILE['notifications']={'enabled':bool(body.get('enabled')),'email':'demo@example.com'}
