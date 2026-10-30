@@ -33,12 +33,32 @@ def normalized_groups(value):
  if not isinstance(value,list) or not 1<=len(value)<=4 or any(not isinstance(group,str) or group not in SERVICE_GROUPS for group in value) or len(set(value))!=len(value):
   raise ValueError('Choose 1 to 4 unique supported service groups')
  return list(value)
-def complete(scan_id, started):
+def feedback_findings(candidates):
+ visible=[];now=time.time()
+ for finding in candidates:
+  item=copy.deepcopy(finding);item.pop('acknowledged',None)
+  record=FEEDBACK.get(item['finding_id'],{})
+  if record.get('expires',float('inf'))<=now:record={}
+  if record.get('kept') or record.get('ignore_until',0)>now:continue
+  if record.get('acknowledged'):item['acknowledged']=True
+  visible.append(item)
+ return visible
+
+def public_result(row, overlay=False):
+ result=copy.deepcopy(row)
+ if overlay and ('candidates' in row or 'findings' in row):result['findings']=feedback_findings(row.get('candidates',row.get('findings',[])))
+ result.pop('candidates',None)
+ return result
+
+def complete(scan_id, started, region='ap-southeast-1'):
  groups=normalized_groups(PROFILE.get('service_groups'))
- visible=[copy.deepcopy(f) for f in FINDINGS if RESOURCE_GROUPS[f['type']] in groups and FEEDBACK.get(f['finding_id'],{}).get('ignore_until',0)<=time.time() and not FEEDBACK.get(f['finding_id'],{}).get('kept')]
+ candidates=[]
+ for finding in FINDINGS:
+  if RESOURCE_GROUPS[finding['type']] not in groups:continue
+  item=copy.deepcopy(finding);item['finding_id']=finding_id(item['type'],region,item['resource_id']);candidates.append(item)
  counts={kind:count for kind,count in {'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8}.items() if RESOURCE_GROUPS[kind] in groups}
- return {'scan_id':scan_id,'region':'ap-southeast-1','status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
-         'counts':counts,'findings':visible,
+ return {'scan_id':scan_id,'region':region,'connection_version':PROFILE['connection_version'],'status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
+         'counts':counts,'candidates':candidates,'findings':feedback_findings(candidates),
          'notification':'DEMO_ONLY','expires':int(time.time())+86400*30}
 CURRENT=[complete(str(uuid.uuid4()),int(time.time())-3600)]
 CURRENT[0]['completed_at']=int(time.time())-3500
@@ -48,7 +68,7 @@ READY_AT=0
 def tick():
  global CURRENT,READY_AT
  if READY_AT and time.time()>=READY_AT:
-  CURRENT=[{**complete(CURRENT[0]['scan_id'],CURRENT[0]['started_at']), 'region':r} for r in PROFILE['regions']]
+  CURRENT=[complete(CURRENT[0]['scan_id'],CURRENT[0]['started_at'],r) for r in PROFILE['regions']]
   HISTORY[:0]=copy.deepcopy(CURRENT);del HISTORY[20:];READY_AT=0
  elif READY_AT:
   for r in CURRENT:r['status']='RUNNING'
@@ -77,12 +97,11 @@ class Handler(SimpleHTTPRequestHandler):
     if not isinstance(body,dict):raise ValueError('Expected a JSON object')
     if path=='/me' and method=='GET':return self.reply(200,{**PROFILE,'service_groups':normalized_groups(PROFILE.get('service_groups'))})
     if path=='/findings':
-     for row in CURRENT:row['findings']=complete(row['scan_id'],row['started_at'])['findings']
-     return self.reply(200,{'results':CURRENT})
-    if path=='/history':return self.reply(200,{'results':HISTORY,'next_token':None})
+     return self.reply(200,{'results':[public_result(row,overlay=True) for row in CURRENT]})
+    if path=='/history':return self.reply(200,{'results':[public_result(row) for row in HISTORY],'next_token':None})
     if path.startswith('/scans/'):
      rows=[r for r in CURRENT+HISTORY if r['scan_id']==path.rsplit('/',1)[-1]]
-     return self.reply(200 if rows else 404,{'results':rows})
+     return self.reply(200 if rows else 404,{'results':[public_result(row) for row in rows]})
     if path=='/scans' and method=='POST':
      if READY_AT:return self.reply(409,{'error':'Demo đang chạy một lần quét.'})
      sid=str(uuid.uuid4());now=int(time.time());CURRENT=[{'scan_id':sid,'region':r,'status':'QUEUED','started_at':now} for r in PROFILE['regions']];READY_AT=time.time()+3
@@ -101,14 +120,34 @@ class Handler(SimpleHTTPRequestHandler):
      PROFILE['notifications']={'enabled':bool(body.get('enabled')),'email':'demo@example.com'}
      return self.reply(200,PROFILE['notifications'])
     if path=='/feedback' and method=='PUT':
-     ident=body['finding_id']
-     if ident not in {finding['finding_id'] for finding in FINDINGS} and ident not in FEEDBACK:return self.reply(404,{'error':'Finding not found'})
-     record=FEEDBACK.setdefault(ident,{'region':body['region'],'finding_id':ident,'acknowledged':False,'kept':False,'ignore_until':0})
+     if set(body)-{'region','finding_id','acknowledged','kept','ignoreUntil'} or not {'region','finding_id'}<=set(body):raise ValueError('Feedback fields are invalid')
+     if not set(body)&{'acknowledged','kept','ignoreUntil'}:raise ValueError('At least one feedback field is required')
+     ident=body['finding_id'];region=body['region']
+     if region not in PROFILE['regions'] or not isinstance(ident,str) or not re.fullmatch(r'[0-9a-f]{64}',ident):raise ValueError('Invalid region or finding ID')
+     for field in ('acknowledged','kept'):
+      if field in body and type(body[field]) is not bool:raise ValueError(field+' must be a boolean')
+     now=int(time.time());ignore_until=0
+     if 'ignoreUntil' in body and body['ignoreUntil'] is not None:
+      value=body['ignoreUntil']
+      if not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z',value):raise ValueError('ignoreUntil must be RFC3339 UTC')
+      ignore_until=int(datetime.fromisoformat(value[:-1]+'+00:00').timestamp())
+      if not now<ignore_until<=now+30*86400:raise ValueError('ignoreUntil must be in the next 30 days')
+     candidate=next((finding for row in CURRENT if row.get('region')==region and row.get('connection_version')==PROFILE['connection_version'] for finding in row.get('candidates',row.get('findings',[])) if finding.get('finding_id')==ident),None)
+     existing=FEEDBACK.get(ident,{})
+     if existing and (existing.get('region')!=region or existing.get('connection_version',PROFILE['connection_version'])!=PROFILE['connection_version']):existing={}
+     if candidate is None and not existing:return self.reply(404,{'error':'Finding not found'})
+     record={**existing,'region':region,'finding_id':ident,'connection_version':PROFILE['connection_version'],'updated_at':now}
+     if candidate is not None:
+      for field in ('type','resource_id','account_id','rule_id'):
+       if isinstance(candidate.get(field),str) and candidate[field]:record[field]=candidate[field]
      if 'acknowledged' in body:record['acknowledged']=body['acknowledged']
      if 'kept' in body:record['kept']=body['kept']
-     if 'ignoreUntil' in body:record['ignore_until']=int(datetime.fromisoformat(body['ignoreUntil'].replace('Z','+00:00')).timestamp()) if body['ignoreUntil'] else 0
+     if 'ignoreUntil' in body:record['ignore_until']=ignore_until
+     if record.get('acknowledged') or record.get('kept'):record.pop('expires',None)
+     else:record['expires']=record.get('ignore_until') if record.get('ignore_until',0)>now else now
+     FEEDBACK[ident]=record
      return self.reply(200,record)
-    if path=='/feedback' and method=='GET':return self.reply(200,{'results':list(FEEDBACK.values()),'next_token':None})
+    if path=='/feedback' and method=='GET':return self.reply(200,{'results':[copy.deepcopy(record) for record in FEEDBACK.values() if record.get('expires',float('inf'))>time.time()],'next_token':None})
     return self.reply(404,{'error':'Route not found'})
    except (ValueError,KeyError,TypeError) as e:return self.reply(400,{'error':str(e)})
 if __name__=='__main__':

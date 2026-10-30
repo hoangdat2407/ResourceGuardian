@@ -603,13 +603,14 @@ def _upsert_feedback(pk, profile, body):
             raise ValueError("ignoreUntil must be in the next 30 days")
     sk = feedback_prefix(profile, region) + ident
     existing = get(pk, sk)
-    displayed = any(
-        finding.get("finding_id") == ident
+    candidate = next((
+        finding
         for row in all_items(pk, "RESULT#")
         if row.get("region") == region and row.get("connection_version") == profile["connection_version"]
         for finding in row.get("candidates", row.get("findings", []))
-    )
-    if not displayed and not existing:
+        if finding.get("finding_id") == ident and finding.get("region", region) == region
+    ), None)
+    if candidate is None and not existing:
         return None
     record = {
         **existing,
@@ -620,6 +621,11 @@ def _upsert_feedback(pk, profile, body):
         "connection_version": profile["connection_version"],
         "updated_at": now,
     }
+    if candidate is not None:
+        for field in ("type", "resource_id", "account_id", "rule_id"):
+            value = candidate.get(field)
+            if isinstance(value, str) and value:
+                record[field] = value
     if "acknowledged" in body:
         record["acknowledged"] = body["acknowledged"]
     if "kept" in body:
