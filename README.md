@@ -2,11 +2,13 @@
 
 Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
 
-Phần việc Đức chỉ gồm Task 7–9 trong đợt hiện tại: xem [baseline, checklist nghiệm thu và hợp đồng các plan nhỏ](DUC-TASKS.md). Plan 02–03 đã nối registry first/last vào worker; finding mới trả `first_seen_at`/`last_seen_at` dạng ISO UTC qua kết quả hiện tại, scan và history. Lịch sử cũ không được backfill; các thao tác feedback đầy đủ và metadata feedback mới chưa triển khai. [VALIDATION.md](VALIDATION.md) phân biệt kết quả local với bằng chứng AWS còn thiếu. Sau mỗi plan, báo cáo tóm tắt và chờ yêu cầu mới của người dùng trước plan tiếp theo.
+Phần việc Đức chỉ gồm Task 7–9 trong đợt hiện tại: xem [baseline, checklist nghiệm thu và hợp đồng các plan nhỏ](DUC-TASKS.md). Plan 02–03 đã nối registry first/last vào worker; finding mới trả `first_seen_at`/`last_seen_at` dạng ISO UTC qua kết quả hiện tại, scan và history. Lịch sử cũ không được backfill. [VALIDATION.md](VALIDATION.md) phân biệt kết quả local với bằng chứng AWS còn thiếu. Sau mỗi plan, báo cáo tóm tắt và chờ yêu cầu mới của người dùng trước plan tiếp theo.
 
 Plan 04 đã bổ sung chọn bốn nhóm dịch vụ, bộ lọc chín loại/nhóm/region/mức cảnh báo/đã xem/tìm kiếm và đủ 11 trường cấu hình hiện có của backend. Lưu kết nối rồi tải lại giữ đúng phạm vi; response findings/history của kết nối cũ không ghi đè màn hình kết nối mới.
 
-Plan 05 thêm **Xem chi tiết** ở tổng quan, findings và history, dùng chung phần hiển thị account/region/resource/rule, lý do, khuyến nghị, hai mốc quan sát và evidence đủ chín loại. Ngưỡng/cửa sổ lấy từ snapshot finding; dữ liệu cũ thiếu trường ghi **Chưa có dữ liệu**, không lấy cấu hình hiện tại để điền. Giá trị 0 và boolean false giữ đúng nghĩa. Hộp chi tiết hỗ trợ Escape, trả focus sau polling và nội dung dài trên mobile. Fixture riêng ở [tests/ui_finding_details.py](tests/ui_finding_details.py); các thao tác feedback mới thuộc Plan 06–07.
+Plan 05 thêm **Xem chi tiết** ở tổng quan, findings và history, dùng chung phần hiển thị account/region/resource/rule, lý do, khuyến nghị, hai mốc quan sát và evidence đủ chín loại. Ngưỡng/cửa sổ lấy từ snapshot finding; dữ liệu cũ thiếu trường ghi **Chưa có dữ liệu**, không lấy cấu hình hiện tại để điền. Giá trị 0 và boolean false giữ đúng nghĩa. Hộp chi tiết hỗ trợ Escape, trả focus sau polling và nội dung dài trên mobile. Fixture riêng ở [tests/ui_finding_details.py](tests/ui_finding_details.py).
+
+Plan 06 thêm **Đánh dấu đã xem/Bỏ đã xem**, **Giữ lại**, và **Bỏ qua 1–30 ngày** (mặc định 7) ngay trên finding hiện tại. Chỉ cập nhật sau PUT thành công; có trạng thái đang lưu, lỗi để thử lại và bảo vệ response cũ khi polling/đổi kết nối. Đã xem vẫn hiện; giữ/bỏ qua ẩn ngay; history giữ snapshot. Backend lưu metadata type/resource_id/account_id/rule_id từ candidate đã xác minh, không nhận metadata từ trình duyệt. Khu vực quản lý/bỏ giữ/bỏ ignore và phân trang feedback thuộc Plan 07, chưa triển khai.
 
 Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
 
@@ -20,7 +22,7 @@ python demo.py
 
 Mở **http://127.0.0.1:8080**, chọn **Mở dashboard demo**. Dữ liệu gắn nhãn DEMO là dữ liệu mẫu; chế độ này không dùng AWS SDK, không xác thực Cognito thật, không gửi email và không phát hiện tài nguyên thật. Dữ liệu demo nằm trong RAM, khởi động lại sẽ reset.
 
-Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày, quét ngay và lịch sử. Quét demo chạy trong khoảng ba giây, dashboard cập nhật mỗi năm giây. Demo không áp dụng cooldown 15 phút của AWS thật. Dừng bằng Ctrl+C.
+Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, đã xem/bỏ đã xem, giữ lại, bỏ qua 1–30 ngày, quét ngay và lịch sử. Các cờ độc lập và giữ qua refresh/scan tiếp; history không bị sửa theo feedback mới. Quét demo chạy trong khoảng ba giây, dashboard cập nhật mỗi năm giây. Demo không áp dụng cooldown 15 phút của AWS thật. Dừng bằng Ctrl+C.
 
 Demo lưu/lọc đúng nhóm dịch vụ và 11 cấu hình; đổi kết nối bắt đầu version mới và xóa dữ liệu phiên demo trước. Bộ dữ liệu demo hiện vẫn chỉ có EC2/EBS/EIP/snapshot; chọn nhóm database không tạo RDS mẫu hoặc số đếm giả. Kiểm tra UI đủ chín loại dùng API fixture riêng ở [tests/ui_scope_filters.py](tests/ui_scope_filters.py); mở rộng dữ liệu demo đầy đủ thuộc Plan 09.
 

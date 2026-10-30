@@ -4,7 +4,7 @@
 
 Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Đây là phạm vi backend Task 7; việc hiển thị đủ evidence và thao tác trên dashboard thuộc Task 9.
 
-Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. [Checklist Task 7–9 và hợp đồng các plan tiếp theo](DUC-TASKS.md) chốt registry first/last 30 ngày: Plan 02–03 đã có persistence và tích hợp worker/API. Metadata feedback mới chưa triển khai; semantics observation EBS/EIP giữ nguyên, hai mốc mới chỉ bổ sung trên finding của kết quả quét mới.
+Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. [Checklist Task 7–9 và hợp đồng các plan tiếp theo](DUC-TASKS.md) chốt registry first/last 30 ngày: Plan 02–03 đã có persistence và tích hợp worker/API; Plan 06 bổ sung metadata feedback lấy từ candidate. Semantics observation EBS/EIP giữ nguyên, hai mốc mới chỉ bổ sung trên finding của kết quả quét mới.
 
 Báo cáo PDF định hướng sáu nhóm dịch vụ và đối chiếu dữ liệu chi phí. Chín loại trên nằm trong bốn nhóm `compute`, `storage`, `database`, `network`; chưa bao phủ mọi dịch vụ trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, hoặc dữ liệu billing/cost. Các phần này cần collector/input của Task 6 và bộ rule được chốt tiếp; không được đánh dấu hoàn tất theo toàn bộ phạm vi PDF.
 
@@ -122,6 +122,7 @@ Snapshot chỉ được kết luận không tham chiếu khi đọc đủ AMI th
 
 - `guardian:keep=true` (giá trị không phân biệt hoa thường) chặn finding ở các collector đang có dữ liệu tag: EC2, EBS, EIP, snapshot, RDS, NAT. ALB/NLB chưa gọi DescribeTags; S3 multipart chưa đọc tag bucket, nên không quảng bá tag suppression cho ba loại này. Giữ lại/bỏ qua nội bộ vẫn áp dụng cho mọi finding có ID.
 - `PUT /feedback` nhận `region`, `finding_id`, và subset `acknowledged`/`kept`/`ignoreUntil`. Cờ là boolean; ignore là RFC3339 UTC trong 30 ngày tới hoặc null để bỏ. API kiểm tra ownership của finding trong result/candidate/feedback thuộc tenant, region và connection hiện hành.
+- Metadata feedback `type`, `resource_id`, `account_id`, `rule_id` được lấy từ candidate đúng finding ID/connection/region (fallback findings của result legacy). Chỉ field string không rỗng được cập nhật; thiếu/mất candidate giữ metadata cũ, record legacy vẫn dùng được bằng finding ID/region. Không nhận metadata từ body hoặc suy từ profile/history; không sửa snapshot khi lưu feedback.
 - Đã xem vẫn hiện kèm `acknowledged`; kept/ignore còn hạn bị ẩn khỏi `/findings`. Tắt keep không tắt ignore hoặc tag; expiry xét timestamp dù TTL chưa xóa.
 - Worker giữ private candidates trước feedback để clear keep/ignore hoặc hết hạn có thể hiện lại ngay sau một lượt quét. `/findings` overlay theo trạng thái hiện hành; `/scans/{id}` và `/history` trả snapshot đã lưu, không viết lại lịch sử theo phản hồi mới. Private candidates không xuất hiện trên API/history.
 - Legacy `/keep` và `/ignore` dùng resource ID, áp dụng từ scan sau; không dùng thay `/feedback` cho ARN/S3 URI. Chúng còn trong code tương thích nội bộ, nhưng template HTTP API hiện dùng `/feedback`. Không suy ra route cloud chỉ từ handler tồn tại.

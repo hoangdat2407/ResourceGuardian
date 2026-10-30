@@ -1,5 +1,42 @@
 # Validation matrix
 
+## Plan 06 — phản hồi finding và metadata, 30/10/2026
+
+**Đạt phạm vi backend/UI/demo và kiểm thử local. Chưa triển khai AWS; chưa thực hiện Plan 07 hoặc Task 13.** Baseline `40ceeb3c8f8c06cd2d1774ac1bd4948a2290094a`, nhánh `codex/task-7-finding-observations`. Code được commit local theo phần đã kiểm thử:
+
+- `8770678572f71541b88dc7eba2dc19430e3d6a7a` — feat(feedback): enrich records and align demo state.
+- `1d3a0263ac5be42a6a2ce7eb55ebfb22af1e5319` — feat(web): add finding feedback controls.
+
+Current/priority có toggle đã xem, giữ lại và bỏ qua 1–30 ngày, mặc định 7. Mỗi PUT chỉ gửi region/finding_id và một cờ; chờ API thành công mới thay dữ liệu finding, sau đó tải lại. Trạng thái pending theo identity dùng chung giữa hai danh sách, polling không làm mất khóa hoặc hạn đã chọn. Lỗi PUT giữ trạng thái và cho thử lại; PUT thành công rồi GET lỗi báo đã lưu nhưng cần tải lại kết quả. Revision guard bỏ GET khởi đầu trước lần lưu thành công; generation guard bỏ PUT/error của scope cũ. History giữ snapshot, không thêm mutation control.
+
+Backend chọn candidate đúng finding/connection/region để lấy metadata type/resource_id/account_id/rule_id, fallback findings legacy. Field string không rỗng mới được cập nhật; candidate mất/thiếu trường giữ metadata cũ. Không nhận metadata trong payload, không suy từ profile/history. Demo cần đồng bộ tối thiểu cho thao tác mới: candidate snapshot + current overlay, strict validation, finding ID theo region và không lộ candidates. Demo vẫn chỉ bốn loại mẫu, thiếu metadata được giữ thiếu; đồng bộ toàn bộ demo chín loại/phân trang vẫn thuộc Plan 09.
+
+| Kiểm tra | Kết quả / giới hạn |
+|---|---|
+| Full backend Python 3.12 | **287 test: 286 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 130.172 giây, 30/10/2026 11:06:45–11:08:55 UTC. CRG_AWS_E2E=0, EC2 metadata disabled; local unit/mock/Moto |
+| Metadata mới | **12/12 PASS** trong full suite; trước đó metadata + API đạt 37/37. PUT/storage/GET, candidate ẩn/legacy/mất/thiếu, injection, region/connection/tenant, cờ độc lập và history bất biến |
+| Demo feedback mới | **12/12 PASS** trong full suite; targeted cùng demo_scope đạt 20/20. Ack/toggle/refresh/scan tiếp, keep/ignore/expiry, metadata, validation trước mutation, region isolation, pending scan không sinh dữ liệu giả và private candidates |
+| Browser feedback mới | **PASS**, 11 nhóm kiểm tra, 107 request/34 PUT, **0 page/fixture error**. Toggle đủ chín loại, default/biên 1/7/30 ngày, exact payload, pending/poll/duplicate khóa, PUT lỗi/retry, GET lỗi sau save, history, cờ độc lập, stale PUT success/error, stale GET ack/keep success/error, reconnect và 401 |
+| Bốn bộ UI hiện có | **PASS**: ui_smoke.py với demo thật local; ui_finding_details.py 10 nhóm; ui_scope_filters.py 6 nhóm; ui_redesign.py 6 nhóm. Kết quả sau source cuối, không thay code sau các lượt này |
+| Responsive/keyboard/ảnh | Feedback findings/priority tại **320/390/768/1440px**, 8 ảnh, không tràn ngang/clipping; tab order ack → keep → hạn → ignore. Đã xem findings-1440.png và priority-390.png; các nút xếp dọc đọc được, ID dài giữ layout |
+| Review độc lập | Không có blocker local được xác định trong pending/retry/flags/history/scope/metadata/demo. Node VM probe dùng actual saveFindingFeedback/refresh giữ GET cũ qua PUT cũng PASS, sau đó được khóa bằng browser regression lâu dài |
+| Static/tài liệu | node --check web/app.js; AST code/test Python thay đổi/mới; link Markdown mặc định và explicit năm tài liệu; git diff/cached --check, whitelist staged và source/blob chuẩn hóa CRLF/LF. Hash/evidence cuối pin tại manifest local |
+| AWS/CI/release | **CHƯA CHẠY** AWS E2E, deploy/publish hoặc CI. Không đổi collector/rule/IAM/template, không thêm dependency; không chạy lại SAM lint/build. SES giữ tắt theo phạm vi, B1–B4 AWS chưa đóng |
+
+Lệnh backend: `python -m unittest discover -s tests -v` qua unittest runner lưu log/JSON. Browser dùng venv với CHROMIUM_EXECUTABLE là Chrome local và UI_QA_DIR riêng cho từng script:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_finding_feedback.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_smoke.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_finding_details.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_scope_filters.py
+.\.venv\Scripts\python.exe -X utf8 -B tests/ui_redesign.py
+```
+
+Evidence Git ignore: `.preflight/duc-plan-06/backend.txt`, backend.json (counts/skip/time/source hashes); ui-feedback/acceptance-results.json và 8 ảnh; ui-details/, ui-scope/, ui-fixture/ có JSON/ảnh; ui-smoke/ có ảnh; log bốn bộ hiện có tương ứng *.txt. validation.json pin source/test hashes, commit code và kết quả static/browser. Artifact local không chứa credential và không phải AWS evidence.
+
+Nguồn: [src/app.py](src/app.py), [demo.py](demo.py), [web/app.js](web/app.js), [web/index.html](web/index.html), [web/styles.css](web/styles.css); regression mới [metadata](tests/test_feedback_metadata.py), [demo](tests/test_demo_feedback.py), [browser](tests/ui_finding_feedback.py). Quản lý/bỏ giữ/bỏ ignore/phân trang feedback chưa triển khai; **dừng sau Plan 06 và chờ yêu cầu Plan 07**. Tên commit mô tả tính năng, không thêm số Plan theo yêu cầu người dùng.
+
 ## Mốc commit Plan 01–05, 30/10/2026
 
 Theo yêu cầu mới của người dùng, các phần quan trọng đã hoàn tất được commit local theo phạm vi trên nhánh `codex/task-7-finding-observations`:

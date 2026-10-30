@@ -4,11 +4,11 @@
 
 Ngày đối chiếu: **29/10/2026**. Baseline mã nguồn: `main` tại `a2201f5d8261d453d0de3e9873b9072773545848`; nhánh tài liệu Plan 01: `codex/duc-plan-01-baseline`. Đây là baseline checkout cục bộ, chưa phải xác nhận revision đang chạy trên AWS hoặc trạng thái remote mới nhất.
 
-Plan 02–03 tiếp tục trên nhánh chung **codex/task-7-finding-observations**, giữ các thay đổi tài liệu Plan 01 chưa commit. Persistence helper/IAM và tích hợp worker/API đã có; kết quả local mới nhất ở VALIDATION.md, chưa triển khai AWS. Không phát hành riêng Plan 02.
+Nhánh triển khai hiện tại là **codex/task-7-finding-observations**. Plan 01–05 đã được commit; Plan 06 tiếp tục trên cùng nhánh và có các commit theo tính năng, chi tiết tại VALIDATION.md. Persistence helper/IAM và tích hợp worker/API dùng chung từ Plan 02–03; không phát hành riêng helper Plan 02. Kết quả local mới nhất không xác nhận triển khai AWS.
 
 Nguồn yêu cầu: **Nhóm 9 - Report 2.pdf**, trang 10 (phạm vi MVP), 15–16 (finding, dữ liệu và isolation), 18 (bằng chứng cloud ban đầu), 20 (phân công Task 7–9); cùng các quyết định người dùng đã chốt trong kế hoạch triển khai. Bản báo cáo là nguồn yêu cầu, không tự cấp quyền triển khai hoặc tạo fixture trả phí.
 
-Chỉ thực hiện **Task 7, 8, 9**. Task 13 báo cáo/slide/kịch bản demo được hoãn theo yêu cầu người dùng. Việc cập nhật demo local trong Plan 09 vẫn thuộc kiểm thử chức năng Task 9, không phải thực hiện Task 13.
+Chỉ thực hiện **Task 7, 8, 9**. Task 13 báo cáo/slide/kịch bản demo được hoãn theo yêu cầu người dùng. Đồng bộ demo local cho thao tác mới trong Plan 06 và QA tích hợp Plan 09 thuộc kiểm thử chức năng Task 9.
 
 | Task | Phần việc | Giờ Đức theo Report 2 | Phối hợp theo báo cáo |
 |---|---|---:|---|
@@ -60,9 +60,9 @@ Regression bắt buộc: hai scan/đổi level, finding vắng rồi trở lại
 
 ## 4. Hợp đồng feedback/evidence dùng chung backend, demo và UI
 
-### API feedback hiện có và metadata sẽ bổ sung
+### API feedback và metadata hiển thị
 
-Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Các thay đổi metadata/UI dưới đây thuộc **Plan 06–07, chưa triển khai**.
+Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Metadata backend và thao tác current finding đã triển khai trong **Plan 06**; khu vực quản lý feedback, bỏ giữ/bỏ ignore và phân trang UI còn thuộc **Plan 07, chưa triển khai**.
 
 | Thành phần | Hợp đồng |
 |---|---|
@@ -87,9 +87,11 @@ Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Các th
 
 ## 5. Thứ tự các lượt thực hiện
 
-**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 05; không tự chuyển sang Plan 06 khi Plan 05 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
+**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 06; không tự chuyển sang Plan 07 khi Plan 06 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
 
 **Quy ước commit người dùng yêu cầu ngày 30/10/2026:** sau mỗi phần quan trọng đã hoàn tất và qua kiểm tra liên quan, tạo commit theo phạm vi trước khi bàn giao; không để dồn nhiều plan chưa commit. Kiểm tra staged paths và giữ riêng thay đổi cục bộ không thuộc task. Commit là thao tác local; push/PR theo yêu cầu riêng. Các Plan 01–05 đã tích lũy được bàn giao bằng hai commit code và một commit tài liệu; xem mốc commit ở [VALIDATION.md](VALIDATION.md). Quy ước chờ yêu cầu trước plan tiếp theo giữ nguyên.
+
+Tên commit mô tả hành vi/tính năng, không thêm số Plan hoặc hậu tố tên Plan theo yêu cầu mới của người dùng. Không đổi lại commit cũ.
 
 | Plan | Đầu ra | Phụ thuộc | Trạng thái tại Plan 01 |
 |---|---|---|---|
@@ -98,7 +100,7 @@ Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Các th
 | 03 | Worker/API first_seen_at, last_seen_at; tương thích history | 02 | ĐÃ TÍCH HỢP; kết quả kiểm thử local ở VALIDATION.md, chưa deploy |
 | 04 | Phạm vi, chín loại, đủ setting và bộ lọc | 01 | ĐÃ TÍCH HỢP UI/demo scope; kiểm thử local ở VALIDATION.md, chưa deploy |
 | 05 | Chi tiết evidence dùng chung | 03–04 | ĐÃ TÍCH HỢP cho current/history; kiểm thử local ở VALIDATION.md, chưa deploy |
-| 06 | Thao tác phản hồi và metadata backend | 05 | CHƯA TRIỂN KHAI |
+| 06 | Thao tác phản hồi và metadata backend | 05 | ĐÃ TÍCH HỢP UI/backend/demo; kiểm thử local ở VALIDATION.md, chưa deploy |
 | 07 | Quản lý phản hồi ẩn, clear và phân trang | 06 | CHƯA TRIỂN KHAI |
 | 08 | History phân trang và chi tiết scan | 05 | CHƯA TRIỂN KHAI |
 | 09 | Đồng bộ demo/fixture và QA tích hợp | 03–08 | CHƯA CHẠY cho tính năng mới |
@@ -169,3 +171,11 @@ Bằng chứng mới của Plan 01 và trạng thái B1–B4/D1 nằm ở [VALID
 - Task 13 tiếp tục hoãn. **Dừng sau Plan 05, chờ yêu cầu trực tiếp cho Plan 06; chưa thực hiện các nút feedback mới.**
 
 **Plan 05 đạt phạm vi local:** fixture chi tiết PASS với 10 nhóm kiểm tra/25 request/0 page hoặc fixture error và 12 ảnh; ba bộ UI smoke/trạng thái/scope đều PASS trên bản cuối. Review độc lập đóng lỗi focus bằng 6 Chrome probe. Không chạy lại full backend vì không đổi backend/demo/template; bằng chứng và hash ở [VALIDATION.md](VALIDATION.md). Chưa commit/push/deploy hoặc nghiệm thu AWS.
+
+## 12. Bàn giao Plan 06
+
+- Finding hiện tại/priority có Đánh dấu đã xem/Bỏ đã xem, Giữ lại, Bỏ qua 1–30 ngày mặc định 7. Ack vẫn hiện; keep/ignore ẩn sau thành công. Payload chỉ identity + một cờ, không gửi metadata và không sửa history.
+- Pending/error/ngày chọn dùng chung theo finding ID/region, giữ qua polling; khóa thao tác trùng và hỗ trợ thử lại khi PUT lỗi. Save thành công nhưng tải lại lỗi được báo riêng. Loại GET cũ sau save và PUT/error cũ sau reconnect; hết phiên về login, không báo lưu thành công giả.
+- Backend enrich bốn metadata từ candidate đã xác minh, giữ metadata cũ khi thiếu/mất candidate; legacy vẫn dùng ID/region. Demo dùng candidate snapshot/overlay, validate payload, ID theo region; không thêm metadata giả hoặc mở scope chín loại mẫu.
+- Full suite **287 test: 286 PASS, 1 AWS E2E SKIPPED**; có 12 metadata + 12 demo regression mới. Browser feedback **11 nhóm PASS/107 request/34 PUT**, 0 page/fixture error; bốn bộ UI hiện có đều PASS, tám ảnh feedback tại bốn chiều rộng. Review độc lập không còn blocker local.
+- Code đã commit theo tính năng; SHA, hash và bằng chứng ở [VALIDATION.md](VALIDATION.md). Chưa push/deploy/AWS/CI, Task 13 tiếp tục hoãn. **Dừng sau Plan 06; cần yêu cầu trực tiếp để làm Plan 07.**

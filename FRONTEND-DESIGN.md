@@ -51,3 +51,13 @@ Catalog evidence đúng schema chín loại: EC2 CPU/network/launch; EBS dung l�
 Native dialog có accessible name/description, autofocus nút đóng, Escape và trả focus. Polling thay DOM opener thì handler close tìm lại nút cùng finding ID/region/resource trong đúng danh sách; finding biến mất dùng control còn hiển thị. Navigation/init/reconnect/logout/401 tự đóng và không kéo focus về trang cũ. Nội dung dùng textContent, không chèn HTML hoặc tự tạo link từ resource ID.
 
 [Fixture chi tiết](tests/ui_finding_details.py) tạo chín schema bằng evaluator thật và kiểm tra current/history snapshot, zero/missing/false, thời gian, XSS, ID dài, focus sau polling và responsive 320/390/768/1440px. Demo giữ dữ liệu mẫu bốn loại và có thể thiếu metadata; đây là ca legacy, không thêm metadata giả. Không đổi backend/API/IAM, không triển khai AWS. Evidence local cụ thể ghi ở [VALIDATION.md](VALIDATION.md); dừng sau Plan 05, chờ yêu cầu Plan 06.
+
+## Plan 06 — phản hồi finding, 2026-10-30
+
+Action cell trên current/priority có Đánh dấu đã xem/Bỏ đã xem, Giữ lại, select 1–30 ngày mặc định 7 và nút Bỏ qua theo hạn đã chọn. Đã xem vẫn hiện, có nhãn trạng thái và tham gia bộ lọc đã xem; keep/ignore ẩn sau PUT thành công. Mỗi request chỉ gửi identity + một cờ, không gửi metadata. History tiếp tục chỉ xem evidence, không thêm thao tác phản hồi vào snapshot.
+
+Trạng thái pending/message/ignore days được giữ theo finding ID + region trong scope hiện tại, dùng chung hai danh sách. Các control cùng finding bị khóa khi đang lưu, polling dựng lại bảng vẫn giữ pending và focus. Lỗi PUT không đổi dữ liệu finding và cho thử lại; PUT thành công rồi GET lỗi báo đã lưu nhưng cần tải lại kết quả. Revision guard loại findings GET khởi đầu trước lần lưu thành công; generation guard loại kết quả PUT/error của kết nối cũ. Init reset trạng thái; 401 quay về đăng nhập. Sau khi hàng bị ẩn, focus về control còn hiển thị.
+
+Demo dùng candidate snapshot + overlay như backend để acknowledge/keep/ignore tồn tại qua refresh/scan tiếp và không sửa history. Metadata feedback chỉ copy field hiện có từ candidate; demo bốn loại legacy không được thêm account/rule giả. Payload strict giống backend; finding ID theo region để cờ không ảnh hưởng region khác. Backend enrich metadata nhưng không đổi request schema, IAM hoặc rule.
+
+[Fixture phản hồi](tests/ui_finding_feedback.py), smoke demo và các fixture hiện có kiểm tra API thành công/lỗi/retry, held PUT/GET, reconnect/401, cờ độc lập và responsive/keyboard. Plan 07 mới thêm quản lý feedback ẩn/bỏ giữ/bỏ ignore/phân trang. Kết quả và ảnh local ở [VALIDATION.md](VALIDATION.md); không phải AWS E2E.
