@@ -149,6 +149,8 @@ def main():
                                  else (200, result(visible_findings())))
             elif path == '/history':
                 reply = {**result(state['history']), 'next_token': None}
+            elif path.startswith('/scans/'):
+                reply = result(state['history'])
             elif path == '/feedback' and request.method == 'GET':
                 assert query.get('limit') == ['20'], query
                 assert set(query) <= {'limit', 'next_token'}, query

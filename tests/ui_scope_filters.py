@@ -300,7 +300,7 @@ def main():
                     expect(page.locator('#history-detail table')).to_be_visible()
                 state['hold_path'] = path
                 operation = 'refresh' if path == '/findings' else 'loadHistory'
-                with page.expect_request('**/api' + path):
+                with page.expect_request('**/api' + path + ('?*' if path == '/history' else '')):
                     page.evaluate("window.__oldScopeDone=false; void " + operation +
                                   "().catch(()=>{}).finally(()=>window.__oldScopeDone=true)")
                 navigate('connection')

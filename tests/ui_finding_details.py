@@ -147,6 +147,8 @@ def main():
                 result = {'results': [], 'next_token': None}
             elif path == '/history':
                 result = {'results': state['history'], 'next_token': None}
+            elif path.startswith('/scans/'):
+                result = {'results': [row for row in state['history'] if row.get('scan_id') == path.rsplit('/', 1)[-1]]}
             elif path == '/connection' and request.method == 'PUT':
                 body = request.post_data_json
                 assert set(body) == {'role_arn', 'regions', 'service_groups'}, body

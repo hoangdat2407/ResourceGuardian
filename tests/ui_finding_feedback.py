@@ -139,6 +139,8 @@ def main():
                 result = {'results': list(state['records'].values()), 'next_token': None}
             elif path == '/history':
                 result = {'results': state['history'], 'next_token': None}
+            elif path.startswith('/scans/'):
+                result = {'results': [row for row in state['history'] if row.get('scan_id') == path.rsplit('/', 1)[-1]]}
             elif path == '/feedback' and request.method == 'PUT':
                 validate_feedback(body)
                 if state['hold_put']:
