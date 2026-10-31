@@ -81,3 +81,11 @@ Mỗi hàng hiển thị Scan ID, nguồn manual/scheduled, bắt đầu/kết t
 Request counter riêng cho history và scan detail, kết hợp scope generation, bỏ response cũ sau refresh/chọn scan khác/reconnect. Tải lại xóa selection cũ. Pending pagination chuyển focus của control bị khóa/ẩn về summary persistent; retry chi tiết chuyển focus về detail trước khi thay control. Response không tự giành focus. Bảng history cố định tỷ lệ cột trên desktop, mobile dùng layout từng hàng hiện có; ID và lỗi dài wrap.
 
 [Fixture lịch sử](tests/ui_history_management.py) kiểm tra hơn 20 hàng, ba region, lỗi/retry, immutable snapshot, chín loại evidence, dữ liệu legacy, XSS, focus và 320/390/768/1440px. Demo đồng bộ history pagination/retention 30 ngày; dữ liệu mẫu vẫn bốn loại. Kết quả local ở [VALIDATION.md](VALIDATION.md); chưa nghiệm thu AWS và chờ yêu cầu Plan 09.
+
+## Demo và QA tích hợp — Plan 09
+
+Giữ nguyên giao diện hiện tại. Demo cung cấp chín loại/10 finding với evaluator thật, metadata, metric window/threshold/unit/coverage và hai mốc quan sát trong RAM. Counts 31 là inventory mẫu, không phải số tài nguyên AWS đã xác minh. Các cờ feedback và snapshot history tiếp tục độc lập. Registry finding cập nhật trước suppression, giữ first khi đổi level hoặc tạm không có candidate, last không lùi; reconnect bắt đầu version mới. SES tắt và control email disabled để khớp phạm vi nghiệm thu.
+
+[Kiểm tra tích hợp](tests/ui_integrated_demo.py) gọi demo qua HTTP thật, kiểm tra chuỗi xem evidence → phản hồi → refresh/scan tiếp → history, thay cấu hình/phạm vi và phân trang. Dữ liệu hơn 20 record được chuẩn bị trong RAM của tiến trình test, không thêm route QA vào ứng dụng. Fault pending/503 có chủ đích chỉ phục vụ kiểm tra loading/error/retry; các fixture riêng tiếp tục kiểm tra PARTIAL/FAILED/TIMED_OUT, dữ liệu thiếu, nội dung dài, stale response và 401. Kiểm tra desktop1440/tablet768/mobile390/320, keyboard/focus và ảnh QA được pin theo source ở [VALIDATION.md](VALIDATION.md).
+
+[Checklist bàn giao Hải](QA-HANDOFF.md) phân biệt QA tự động/review subagent local với xác nhận trực tiếp của Hải. Người dùng chuyển gói QA; chưa có chữ ký hoặc kết quả của Hải thì không ghi đã đạt QA của Hải. Task 13 vẫn hoãn; Plan 10 và AWS chỉ bắt đầu sau yêu cầu tiếp theo.

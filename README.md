@@ -14,6 +14,8 @@ Plan 07 thêm khu vực **Đang giữ và bỏ qua** dưới danh sách findings
 
 Plan 08 bổ sung **Tải thêm lịch sử**, loại hàng trùng bằng Scan ID + region, reset cursor khi tải lại và giữ dữ liệu để thử lại nếu trang sau lỗi. **Xem** mở các region của cùng lượt quét, kể cả region nằm ngoài trang đã tải; hiển thị nguồn kích hoạt, thời gian, trạng thái, lỗi và evidence dùng chung. API chi tiết gộp snapshot HISTORY còn hạn với RESULT để lượt quét cũ không mất region khi một phần RESULT đã được thay thế. Feedback mới không sửa lịch sử. Demo hỗ trợ phân trang lịch sử và giữ kết quả trong 30 ngày thay vì giới hạn 20 hàng; đây vẫn là dữ liệu RAM cục bộ. Kiểm chứng local ở [VALIDATION.md](VALIDATION.md); chưa nghiệm thu AWS.
 
+Plan 09 đồng bộ demo đủ chín loại tài nguyên, metadata/evidence từ evaluator thật và mốc first/last trong RAM theo connection/region/finding. Kiểm tra tích hợp dùng demo HTTP thật cùng các fixture cho lỗi, dữ liệu cũ, phân trang, focus và responsive. [Gói bàn giao QA cho Hải](QA-HANDOFF.md) ghi cách chạy lại, checklist và phần chờ xác nhận độc lập; kết quả local không thay thế nghiệm thu AWS.
+
 Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
 
 ## 1. Thử ngay tại máy, không cần AWS
@@ -28,7 +30,9 @@ Mở **http://127.0.0.1:8080**, chọn **Mở dashboard demo**. Dữ liệu gắ
 
 Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, đã xem/bỏ đã xem, giữ lại, bỏ qua 1–30 ngày, quét ngay và lịch sử. Các cờ độc lập và giữ qua refresh/scan tiếp; history không bị sửa theo feedback mới. Quét demo chạy trong khoảng ba giây, dashboard cập nhật mỗi năm giây. Demo không áp dụng cooldown 15 phút của AWS thật. Dừng bằng Ctrl+C.
 
-Demo lưu/lọc đúng nhóm dịch vụ và 11 cấu hình; đổi kết nối bắt đầu version mới và xóa dữ liệu phiên demo trước. Bộ dữ liệu demo hiện vẫn chỉ có EC2/EBS/EIP/snapshot; chọn nhóm database không tạo RDS mẫu hoặc số đếm giả. Kiểm tra UI đủ chín loại dùng API fixture riêng ở [tests/ui_scope_filters.py](tests/ui_scope_filters.py); mở rộng dữ liệu demo đầy đủ thuộc Plan 09.
+Demo có EC2, EBS, Elastic IP, snapshot, S3 multipart, RDS, NAT Gateway, ALB và NLB thuộc bốn nhóm. Cấu hình mặc định có số đếm inventory mẫu tổng cộng 31, với 10 finding: 8 REVIEW, 1 OBSERVING và 1 INSUFFICIENT_DATA. Inventory/metrics là dữ liệu tổng hợp, được đánh giá bằng evaluator thuần hiện hành; đổi ngưỡng/cửa sổ có thể đổi finding và evidence ở scan tiếp theo. Không suy từ các số mẫu này sang tài nguyên hoặc chi phí AWS thật.
+
+Demo lưu/lọc bốn nhóm và 11 cấu hình. First/last được cập nhật trước feedback, giữ qua lượt quét tiếp và tạm biến mất, hết hạn sau 30 ngày không quan sát; đổi kết nối reset registry cùng dữ liệu phiên. Thời gian quan sát EBS/EIP trong mẫu là dữ liệu tổng hợp riêng, không phải thời gian thật đã chờ trên AWS. Snapshot history giữ giá trị lúc quét. SES và control email mặc định tắt; demo từ chối bật email. [Kiểm tra tích hợp demo](tests/ui_integrated_demo.py) và các fixture riêng kiểm tra chín loại, mốc quan sát, feedback và phân trang.
 
 ## 2. Phạm vi AWS thật
 

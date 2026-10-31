@@ -1,5 +1,27 @@
 # Validation matrix
 
+## Plan 09 — demo chín loại và QA tích hợp local, 31/10/2026
+
+**Đạt code/local Plan 09; chờ Hải xác nhận QA trực tiếp, chưa nghiệm thu AWS.** Baseline `5cbf3878495679414ff2bdeb7ec5722adc1d7e35`, nhánh `codex/task-7-finding-observations`. Code commit `1d3d7c22efb78f5de16611c9493e50da2ca70e4a` — feat(demo): align nine-resource findings and observation state. Không thực hiện Plan 10 hoặc Task 13.
+
+Demo dùng evaluator thuần thật cho chín loại trên inventory/metrics tổng hợp. Metadata account/region/rule/recommendation/evaluated_at, ngưỡng/window/unit/coverage và mốc first/last đồng bộ schema backend. Mặc định counts mẫu31/10 finding:8 REVIEW/1 OBSERVING/1 INSUFFICIENT_DATA. Registry RAM theo connection/region/finding cập nhật trước feedback; expiry last+30 ngày, first giữ qua level/absence/keep/ignore, last không lùi, reconnect reset. Các snapshot cũ không bị backfill. SES/control email tắt; PUT bật hoặc sai boolean bị từ chối. Không đổi src production, web runtime, template/IAM hoặc thêm dependency.
+
+| Kiểm tra | Kết quả / giới hạn |
+|---|---|
+| Full backend Python 3.12.14 | **336 test: 335 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 144.922 giây toàn runner. 31/10/2026 15:02:34–15:04:59 UTC, CRG_AWS_E2E=0, metadata disabled. SHA-256 source trước/sau khớp; unit/mock/Moto, không AWS |
+| Demo regression | **53/53 PASS** gồm12 mới trong full suite và lượt targeted độc lập. Chín schema, zeros/missing, settings/window, stable identity S3/ARN, timestamps qua hidden/level/absence/expiry/clockrollback/region/reconnect, legacy feedback, history và pagination. Bốn suite cũ save/restore registry mới; legacy missing-metadata vẫn kiểm tra bằng explicit fixture thiếu field |
+| Browser integration mới | **12 nhóm PASS, 57 request, 0 page error**, qua demo HTTP thật. Chỉ intercept pending/503 có chủ đích để kiểm tra lỗi/retry; hơn20 record được thêm RAM trong process test, không có route QA mới. 45 history và45 feedback/ba region, scan tiếp giữ first/tăng last, cờ độc lập, immutable history, reconnect và401 |
+| Bảy bộ browser hiện có | **7/7 PASS**: ui_smoke.py, ui_scope_filters.py, ui_finding_details.py, ui_finding_feedback.py, ui_feedback_management.py, ui_history_management.py, ui_redesign.py. Cùng integration là **8/8 bộ UI**. Smoke được cập nhật31/10/8 REVIEW và SES disabled, không bỏ kiểm tra save/reload/scan/history/expired session |
+| Independent local QA | Subagent chạy độc lập **53/53 demo test và7/7 nhóm probe PASS**, review diff cùng visual không còn issue actionable được xác định. JSON/probe pin cùng demo hash cuối; đây không đại diện Hải QA |
+| Visual/a11y | Bốn viewport **320/390/768/1440px**, năm trang/dialog, keyboard/Escape/focus và nội dung dài/HTML an toàn. Integration có12 ảnh overview/identity/evidence đã cuộn. Tác giả và reviewer đã xem overview1440 + S3 evidence scrolled390; không tràn ngang/cắt nội dung |
+| Static | JS syntax PASS; AST8 Python demo/test đổi hoặc mới; cfn-lint **exit0** trên cả3 SAM/IAM template; target-role hai bản giống byte; link Markdown và whitespace/conflict check PASS. SAM CLI không có trong môi trường nên `sam validate`/`sam build` **CHƯA CHẠY**; cfn-lint đã kiểm SAM transform cục bộ |
+| Bàn giao Hải | Người dùng chọn nhận gói để chuyển Hải. [QA-HANDOFF.md](QA-HANDOFF.md) có checklist H01–H12/lệnh chạy. **CHƯA NHẬN** kết quả hoặc chữ ký Hải; không đánh đồng với subagent review |
+| AWS/CI/release | **CHƯA CHẠY** AWS E2E, tick EventBridge/retry/recovery thật, deploy/publish/CI. SES tắt, B1–B4 còn mở; không tạo artifact deploy hoặc bật harness cloud |
+
+Artifact ignored tại `.preflight/duc-plan-09/`: `baseline.json`, `backend.txt`/`backend.json`, `static.json`, `validation.json`, tám log browser, acceptance JSON/ảnh và `independent-qa/`. `qa-handoff.zip` chứa snapshot source đã chọn, manifest SHA-256, checklist cùng evidence local để người dùng chuyển Hải; không có .env, config triển khai, Git metadata hay credentials. Gói QA này không phải ZIP Lambda được pin cho Plan 10. Source/hash và commit cuối được ghi trong manifest ZIP.
+
+Phạm vi13 file: [demo.py](demo.py); mới [test_demo_integration.py](tests/test_demo_integration.py), [ui_integrated_demo.py](tests/ui_integrated_demo.py); cập nhật [test_demo_scope.py](tests/test_demo_scope.py), [test_demo_feedback.py](tests/test_demo_feedback.py), [test_demo_feedback_pagination.py](tests/test_demo_feedback_pagination.py), [test_demo_history_pagination.py](tests/test_demo_history_pagination.py), [ui_smoke.py](tests/ui_smoke.py); tài liệu [README.md](README.md), [FRONTEND-DESIGN.md](FRONTEND-DESIGN.md), [DUC-TASKS.md](DUC-TASKS.md), [QA-HANDOFF.md](QA-HANDOFF.md) và `VALIDATION.md`. **Dừng sau Plan 09, chờ người dùng yêu cầu Plan 10.**
+
 ## Plan 08 — lịch sử phân trang và chi tiết lượt quét, 31/10/2026
 
 **Đạt code/local Plan 08, chưa nghiệm thu AWS và không thực hiện Plan 09 hoặc Task 13.** Baseline `da0922ef5c4763ce8404a881bea2c1fe7e37394c`, nhánh `codex/task-7-finding-observations`. Commit UI `4cfc103` — feat(web): paginate history and show complete scan details; commit API/demo `2b6de95` — fix(scans): retain all regions in historical scan details.

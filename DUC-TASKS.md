@@ -87,7 +87,7 @@ Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Metadat
 
 ## 5. Thứ tự các lượt thực hiện
 
-**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 08; không tự chuyển sang Plan 09 khi Plan 08 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
+**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 09; không tự chuyển sang Plan 10 khi Plan 09 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
 
 **Quy ước commit người dùng yêu cầu ngày 30/10/2026:** sau mỗi phần quan trọng đã hoàn tất và qua kiểm tra liên quan, tạo commit theo phạm vi trước khi bàn giao; không để dồn nhiều plan chưa commit. Kiểm tra staged paths và giữ riêng thay đổi cục bộ không thuộc task. Commit là thao tác local; push/PR theo yêu cầu riêng. Các Plan 01–05 đã tích lũy được bàn giao bằng hai commit code và một commit tài liệu; xem mốc commit ở [VALIDATION.md](VALIDATION.md). Quy ước chờ yêu cầu trước plan tiếp theo giữ nguyên.
 
@@ -103,7 +103,7 @@ Tên commit mô tả hành vi/tính năng, không thêm số Plan hoặc hậu t
 | 06 | Thao tác phản hồi và metadata backend | 05 | ĐÃ TÍCH HỢP UI/backend/demo; kiểm thử local ở VALIDATION.md, chưa deploy |
 | 07 | Quản lý phản hồi ẩn, clear và phân trang | 06 | ĐÃ TÍCH HỢP UI/demo; API hiện có được kiểm chứng bằng regression local, chưa deploy |
 | 08 | History phân trang và chi tiết scan | 05 | ĐÃ TÍCH HỢP UI/demo/API detail; kiểm chứng local ở VALIDATION.md, chưa deploy |
-| 09 | Đồng bộ demo/fixture và QA tích hợp | 03–08 | CHƯA CHẠY cho tính năng mới |
+| 09 | Đồng bộ demo/fixture và QA tích hợp | 03–08 | ĐẠT code/local; gói QA cho Hải bàn giao qua người dùng, chờ Hải xác nhận |
 | 10 | Artifact đã pin, manifest, review và triển khai stack thử | 09 | CHƯA XÁC MINH đầu vào AWS |
 | 11 | Rule và web thật trên hai tenant | 10 | CHƯA CHẠY AWS |
 | 12 | Scheduler/retry/timeout/recovery và final-smoke | 10 | CHƯA CHẠY AWS |
@@ -190,7 +190,7 @@ Bằng chứng mới của Plan 01 và trạng thái B1–B4/D1 nằm ở [VALID
 - Full suite **302 test: 301 PASS, 1 AWS E2E SKIPPED**; có 6 backend-contract + 9 demo-pagination regression mới. Sáu bộ browser PASS; fixture quản lý **14 nhóm/101 request/13 PUT**, 0 page/fixture error, 6 ảnh. Hai lỗi P2 từ review (selector cùng identity, focus trang cuối) đã đóng và có regression.
 - Commit feature, bằng chứng và hash tại [VALIDATION.md](VALIDATION.md). Chưa push/deploy/AWS/CI; Task 13 vẫn hoãn. **Dừng sau Plan 07, chờ yêu cầu Plan 08.**
 
-## 13. Kết quả Plan 08 — lịch sử phân trang và chi tiết lượt quét
+## 14. Kết quả Plan 08 — lịch sử phân trang và chi tiết lượt quét
 
 - GET /history limit20 + next_token opaque; tải thêm dedup bằng scan_id + region, không làm mất region của cùng scan. Refresh thay bằng trang đầu và reset cursor; lỗi trang sau giữ hàng và chi tiết đã tải để thử lại.
 - Mỗi hàng có Scan ID, trigger, thời gian bắt đầu/kết thúc, region và trạng thái. Xem gọi GET /scans/{id} để lấy các region của lượt quét ngoài trang hiện tại, hiển thị lỗi theo region và evidence chung từ Plan 05; không có nút sửa feedback trong snapshot. Legacy thiếu ID chỉ hiển thị snapshot đang có, không đoán ID hoặc thời gian.
@@ -198,3 +198,12 @@ Bằng chứng mới của Plan 01 và trạng thái B1–B4/D1 nằm ở [VALID
 - Request generation riêng cho phân trang/chi tiết chặn response success/error cũ qua selection, refresh hoặc reconnect. Focus summary khi control tải bị khóa/ẩn, detail khi retry, không kéo focus sau response nếu người dùng đã chuyển đi.
 - Demo bỏ cap 20 hàng, dùng retention 30 ngày và cursor route/connection-bound, detail dedup region, trigger manual. Dữ liệu demo vẫn bốn loại; đồng bộ chín loại và QA tích hợp toàn bộ thuộc Plan 09.
 - Bằng chứng local, ảnh và mốc commit tại [VALIDATION.md](VALIDATION.md). Chưa push/deploy/AWS/CI; Task 13 vẫn hoãn. **Dừng sau Plan 08, chờ yêu cầu Plan 09.**
+
+## 15. Bàn giao Plan 09 — demo chín loại và QA tích hợp local
+
+- Demo có đủ EC2/EBS/EIP/snapshot/S3 multipart/RDS/NAT/ALB/NLB, gọi evaluator thuần thật với inventory/metrics tổng hợp. Mặc định counts31 và 10 finding: REVIEW8/OBSERVING1/INSUFFICIENT_DATA1. Settings, ngưỡng, đơn vị, cửa sổ và metadata phản ánh schema backend; số 0 thật giữ nguyên, thiếu metrics không thành zero.
+- Registry RAM theo connection/region/finding cập nhật trước feedback, giữ first khi chuyển level/tạm biến mất/keep/ignore, last không lùi, expiry last +30 ngày; reconnect reset. Cờ độc lập, metadata legacy và snapshot history không bị viết lại. SES tắt và từ chối bật email; không thêm dependency hay sửa runtime production/IAM.
+- Full backend **336 test: 335 PASS, 1 AWS E2E SKIPPED** trên source đã pin hash. Tám bộ UI PASS, integration qua demo HTTP thật **12 nhóm/57 request/12 ảnh/0 page error**. Kiểm tra hơn20 history/feedback, ba region, loading/error/retry, keyboard/focus và bốn viewport320/390/768/1440.
+- Review subagent độc lập: 53/53 demo tests, 7/7 probe contract và visual desktop/mobile đạt, không còn issue actionable trong phạm vi đã kiểm tra. Đây không phải xác nhận của Hải hoặc nghiệm thu AWS.
+- Người dùng yêu cầu nhận gói để chuyển Hải: [QA-HANDOFF.md](QA-HANDOFF.md) có checklist H01–H12, lệnh chạy và trạng thái CHƯA NHẬN xác nhận Hải. ZIP chứa source snapshot, manifest/hash, ảnh/log/evidence local đã chọn; đường dẫn bàn giao trong [VALIDATION.md](VALIDATION.md).
+- Code commit `1d3d7c2`; chưa push/deploy/AWS/CI, Task 13 vẫn hoãn. **Dừng sau Plan 09, chờ yêu cầu trực tiếp cho Plan 10.**
