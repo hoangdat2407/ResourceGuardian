@@ -12,6 +12,8 @@ Plan 06 thêm **Đánh dấu đã xem/Bỏ đã xem**, **Giữ lại**, và **B�
 
 Plan 07 thêm khu vực **Đang giữ và bỏ qua** dưới danh sách findings, có **Tải thêm**, **Bỏ giữ**, **Hủy bỏ qua** và **Đổi hạn bỏ qua** 1–30 ngày. Cờ được cập nhật độc lập; feedback cũ thiếu nhãn vẫn quản lý bằng finding ID/region. Khi clear, chỉ báo finding đã hiện lại sau khi tải lại và thấy finding trong kết quả; nếu chưa hiện thì hướng dẫn quét mới/kiểm tra giới hạn. Trang feedback chỉ gồm đã xem vẫn giữ cursor để xem trang sau; lỗi trang sau giữ dữ liệu đã tải. Demo cũng có pagination feedback; history pagination tiếp tục thuộc Plan 08.
 
+Plan 08 bổ sung **Tải thêm lịch sử**, loại hàng trùng bằng Scan ID + region, reset cursor khi tải lại và giữ dữ liệu để thử lại nếu trang sau lỗi. **Xem** mở các region của cùng lượt quét, kể cả region nằm ngoài trang đã tải; hiển thị nguồn kích hoạt, thời gian, trạng thái, lỗi và evidence dùng chung. API chi tiết gộp snapshot HISTORY còn hạn với RESULT để lượt quét cũ không mất region khi một phần RESULT đã được thay thế. Feedback mới không sửa lịch sử. Demo hỗ trợ phân trang lịch sử và giữ kết quả trong 30 ngày thay vì giới hạn 20 hàng; đây vẫn là dữ liệu RAM cục bộ. Kiểm chứng local ở [VALIDATION.md](VALIDATION.md); chưa nghiệm thu AWS.
+
 Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
 
 ## 1. Thử ngay tại máy, không cần AWS

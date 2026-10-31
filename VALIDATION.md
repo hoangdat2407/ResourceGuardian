@@ -1,5 +1,36 @@
 # Validation matrix
 
+## Plan 08 — lịch sử phân trang và chi tiết lượt quét, 31/10/2026
+
+**Đạt code/local Plan 08, chưa nghiệm thu AWS và không thực hiện Plan 09 hoặc Task 13.** Baseline `da0922ef5c4763ce8404a881bea2c1fe7e37394c`, nhánh `codex/task-7-finding-observations`. Commit UI `4cfc103` — feat(web): paginate history and show complete scan details; commit API/demo `2b6de95` — fix(scans): retain all regions in historical scan details.
+
+Lịch sử dùng GET /history limit20 + next_token opaque, dedup scan_id + region, reset cursor khi tải lại và giữ dữ liệu/selection khi trang sau lỗi. Xem mở đủ các region của cùng scan qua GET /scans/{id}; metadata/trigger/thời gian/trạng thái/lỗi theo region và finding evidence đều từ snapshot, không lấy settings/profile hiện tại để điền trường thiếu. Dữ liệu cũ thiếu ID chỉ mở snapshot đã tải và không gọi API bằng undefined. Phản hồi finding không sửa history.
+
+Regression đã tái hiện GET /scans/{id} mất region khi RESULT ở một phần region bị scan mới thay. API nay gộp HISTORY cùng tenant/connection/scan còn hạn, ưu tiên snapshot terminal rồi bổ sung RESULT cho region khác; không ghi lại dữ liệu, không xuất candidates. Demo đồng bộ cách gộp, hỗ trợ history pagination route/connection-bound và giữ retention 30 ngày thay cap 20 hàng. Cursor history production giữ hợp đồng tenant/route-bound hiện có; UI reset cursor khi init/đổi kết nối. Không đổi schema request, IAM, collector/rule, Lambda async hoặc SQS failure destination.
+
+| Kiểm tra | Kết quả / giới hạn |
+|---|---|
+| Full backend Python 3.12 | **324 test: 323 PASS, 1 AWS E2E SKIPPED**, 0 failure/error; 137.172 giây toàn runner. Chạy 31/10/2026 14:52:24–14:54:41 UTC trên source cuối; SHA-256 trước/sau khớp. AWS E2E tắt, metadata disabled; unit/mock/Moto |
+| Backend contract mới | **10/10 PASS**; cùng API và Task 8 **63/63 PASS**. 45 history qua ba trang/nhiều region, TTL/version không cần cleanup, cursor tenant/route/xóa boundary, feedback bất biến, private candidates, RESULT bị thay từng region và HISTORY ưu tiên + RESULT RUNNING bổ sung |
+| Demo history mới | **12/12 PASS**, cùng demo feedback/scope **41/41 PASS**. 45 rows/ba trang, limit/cursor/query, reconnect/expiry, bỏ cap 20, detail dedup và snapshot terminal ưu tiên, không overlay feedback |
+| Browser history mới | **PASS 15 nhóm**, **58 request, 22 GET history, 13 GET scan**, 0 page/fixture error. Hơn 20/dedup/ba region, opaque cursor, lỗi/retry/reset, detail ngoài trang đầu, chín loại evidence/zero, legacy/XSS, snapshot bất biến, response cũ qua selection/refresh/reconnect và 401 |
+| Sáu bộ UI hiện có | **PASS**: ui_smoke.py, ui_finding_details.py, ui_finding_feedback.py, ui_feedback_management.py, ui_scope_filters.py, ui_redesign.py. Ba fixture thêm route GET scan detail; scope fixture cập nhật matcher cho query limit20, giữ nguyên kiểm tra stale success/error |
+| Review độc lập | Regression đóng lỗi region API. Chrome đóng lỗi retry detail mất focus về BODY: **4 assertion PASS**, không giành focus đã chuyển; thêm **3 ca async PASS** cho selection cũ success/error và refresh vô hiệu pending detail. Không còn issue actionable được xác định trong phạm vi đã review |
+| Visual/responsive | **320/390/768/1440px**, 5 ảnh history gồm bốn viewport và lỗi trang sau; đã xem desktop1440/mobile390. ID, lỗi dài và dữ liệu thiếu wrap, không tràn ngang; keyboard pagination/reload/retry có regression |
+| Static/Git | JS syntax, AST 10 Python demo/src/test mới hoặc đổi, Markdown links và whitespace/conflict check; stage allowlist, AGENTS.md cục bộ được giữ riêng. Mốc code và source hash trong manifest local |
+| AWS/CI/release | **CHƯA CHẠY** AWS E2E/deploy/publish/CI; không chạy lại SAM lint/build vì template/IAM không đổi. SES tắt theo scope; blocker B1–B4 vẫn mở |
+
+Lượt full suite đầu có hai lỗi fixture API cũ thiếu region; đã bổ sung region đúng schema worker, không bỏ assertion UUID/candidates. Lượt sau **323 test: 322 PASS, 1 AWS E2E SKIPPED**. Sau đó thêm regression demo ưu tiên snapshot terminal để khớp API, chạy demo 41/41 và chạy lại full suite có pin hash trên source cuối. Không dùng lượt cũ làm kết quả cho source mới.
+
+Artifact ignored tại `.preflight/duc-plan-08/`: `backend.txt`/`backend.json`, `validation.json`, log sáu suite UI hiện có; `ui-history/acceptance-results.json` và năm ảnh. Đây là evidence local, không phải GitHub CI, cloud deployment hoặc nghiệm thu AWS. Bốn tài liệu kỹ thuật được cập nhật; báo cáo Task 13 vẫn hoãn. **Dừng sau Plan 08, chờ người dùng yêu cầu Plan 09.**
+
+Phạm vi 17 file:
+
+- Runtime: [src/app.py](src/app.py), [demo.py](demo.py), [web/app.js](web/app.js), [web/index.html](web/index.html), [web/styles.css](web/styles.css).
+- Regression mới: [test_history_management.py](tests/test_history_management.py), [test_demo_history_pagination.py](tests/test_demo_history_pagination.py), [ui_history_management.py](tests/ui_history_management.py).
+- Fixture hiện có: [test_api.py](tests/test_api.py), [ui_finding_details.py](tests/ui_finding_details.py), [ui_finding_feedback.py](tests/ui_finding_feedback.py), [ui_feedback_management.py](tests/ui_feedback_management.py), [ui_scope_filters.py](tests/ui_scope_filters.py).
+- Tài liệu: [README.md](README.md), [FRONTEND-DESIGN.md](FRONTEND-DESIGN.md), [DUC-TASKS.md](DUC-TASKS.md) và `VALIDATION.md`.
+
 ## Plan 07 — quản lý feedback đang ẩn, 30/10/2026
 
 **Đạt code/local Plan 07, chưa nghiệm thu AWS; chưa thực hiện Plan 08 hoặc Task 13.** Baseline `6f09a8536fa64fcb466ac424f6daaa757d99c238`, nhánh `codex/task-7-finding-observations`. Commit code đã tạo sau validation:

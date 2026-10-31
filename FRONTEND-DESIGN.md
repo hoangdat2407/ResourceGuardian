@@ -71,3 +71,13 @@ Mỗi record hiển thị type/resource/account/rule cùng region/finding ID; le
 Request id/revision/generation bảo vệ load-more/refresh qua mutation và reconnect; dữ liệu/current feedback được cập nhật sau PUT thành công. Manager GET cũ không ghi đè record vừa lưu. Controls theo identity giữ pending/focus khi polling render lại; pagination control bị disable/ẩn chuyển focus sang summary hiện hữu, giữ focus người dùng đã chuyển sang nơi khác. Selector đồng bộ hạn current chỉ chạm current/priority, không chạm manager khi hai snapshot tạm chứa cùng identity.
 
 Desktop record chia thông tin và control thành hai cột; dưới 760px một cột, text/ID dài wrap, control đủ target44px. [Fixture manager](tests/ui_feedback_management.py) kiểm tra 320/390/768/1440px, XSS/long ID, pending/error, pagination và keyboard. Demo chỉ đồng bộ feedback pagination, không thêm history pagination hoặc dữ liệu chín loại. Evidence/review local ở [VALIDATION.md](VALIDATION.md); dừng và chờ Plan 08.
+
+## Lịch sử và chi tiết lượt quét — Plan 08
+
+Giữ trang Lịch sử quét hiện có, thêm summary live và Tải thêm. GET /history limit20, giữ next_token opaque; refresh reset cursor, load-more gộp theo Scan ID + region. Dữ liệu đã tải vẫn hiện khi trang sau lỗi và người dùng có thể thử lại đúng cursor. Summary phân biệt số hàng region đã tải với việc đã hết trang; một lượt quét nhiều region vẫn là nhiều hàng.
+
+Mỗi hàng hiển thị Scan ID, nguồn manual/scheduled, bắt đầu/kết thúc, region, trạng thái và số finding REVIEW đã lưu. Xem mở chi tiết của toàn scan bằng GET /scans/{id}, bao gồm region ngoài trang đầu; trong khi tải hoặc lỗi vẫn giữ snapshot đã có và nêu chưa tải đủ các region. Legacy thiếu Scan ID chỉ mở snapshot region, không gọi API bằng undefined. Chi tiết từng region hiển thị metadata, mã lỗi/request ID khi có, ghi chú PARTIAL/FAILED/TIMED_OUT và bảng finding read-only dùng cùng dialog evidence. Dữ liệu thiếu không được lấy từ profile/settings hiện tại.
+
+Request counter riêng cho history và scan detail, kết hợp scope generation, bỏ response cũ sau refresh/chọn scan khác/reconnect. Tải lại xóa selection cũ. Pending pagination chuyển focus của control bị khóa/ẩn về summary persistent; retry chi tiết chuyển focus về detail trước khi thay control. Response không tự giành focus. Bảng history cố định tỷ lệ cột trên desktop, mobile dùng layout từng hàng hiện có; ID và lỗi dài wrap.
+
+[Fixture lịch sử](tests/ui_history_management.py) kiểm tra hơn 20 hàng, ba region, lỗi/retry, immutable snapshot, chín loại evidence, dữ liệu legacy, XSS, focus và 320/390/768/1440px. Demo đồng bộ history pagination/retention 30 ngày; dữ liệu mẫu vẫn bốn loại. Kết quả local ở [VALIDATION.md](VALIDATION.md); chưa nghiệm thu AWS và chờ yêu cầu Plan 09.
