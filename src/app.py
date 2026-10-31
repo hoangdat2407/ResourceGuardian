@@ -757,13 +757,17 @@ def api(event, context):
                 row for row in all_items(pk, "RESULT#")
                 if row.get("scan_id") == scan_id and row.get("connection_version") == profile.get("connection_version")
             ]
-            if not rows:
-                rows = [
-                    row for row in all_items(pk, "HISTORY#")
-                    if row.get("scan_id") == scan_id
+            # A newer scan can replace RESULT in only some regions. Merge the
+            # retained terminal snapshots so the older scan stays complete.
+            by_region = {row["region"]: row for row in rows}
+            for row in all_items(pk, "HISTORY#"):
+                if (
+                    row.get("scan_id") == scan_id
                     and row.get("connection_version") == profile.get("connection_version")
                     and row.get("expires", 0) > time.time()
-                ]
+                ):
+                    by_region[row["region"]] = row
+            rows = list(by_region.values())
             if not rows:
                 return response(404, {"error": "Scan not found for this user"})
             return response(200, {"scan_id": scan_id, "results": [visible_result(row) for row in rows]})

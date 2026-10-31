@@ -193,7 +193,7 @@ class ApiTest(unittest.TestCase):
 
     def test_scan_id_requires_canonical_uuid4(self):
         valid = str(uuid.uuid4())
-        row = {"scan_id": valid, "connection_version": "v1", "expires": int(time.time()) + 10}
+        row = {"scan_id": valid, "region": "ap-southeast-1", "connection_version": "v1", "expires": int(time.time()) + 10}
         with patch.object(app, "get", return_value=self.profile), patch.object(app, "all_items", return_value=[row]):
             self.assertEqual(app.api(event("GET", "/scans/" + valid), None)["statusCode"], 200)
         for invalid in ("11111111-1111-1111-1111-111111111111", valid.upper(), "-" * 36):
@@ -298,7 +298,7 @@ class ApiTest(unittest.TestCase):
     def test_scan_status_and_history_never_expose_private_candidates(self):
         scan_id = str(uuid.uuid4())
         row = {
-            "status": "SUCCEEDED", "scan_id": scan_id, "connection_version": "v1",
+            "status": "SUCCEEDED", "scan_id": scan_id, "region": "ap-southeast-1", "connection_version": "v1",
             "findings": [], "candidates": [{"finding_id": "a" * 64}],
         }
         for path in ("/scans/" + scan_id, "/history"):

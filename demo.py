@@ -71,6 +71,35 @@ def feedback_page(query):
   next_token=base64.urlsafe_b64encode(json.dumps(cursor,separators=(',',':')).encode()).decode().rstrip('=')
  return {'results':copy.deepcopy(page),'next_token':next_token}
 
+def history_key(row):
+ return 'HISTORY#{}#{}#{}'.format(int(row.get('created_at',row.get('started_at',0))),row['region'],row['scan_id'])
+
+def history_rows():
+ return sorted((row for row in HISTORY if row.get('connection_version')==PROFILE['connection_version'] and row.get('region') in PROFILE['regions'] and row.get('expires',0)>time.time()),key=history_key,reverse=True)
+
+def history_page(query):
+ values=query.get('limit',['20'])
+ if len(values)!=1 or not values[0].isdigit() or not 1<=int(values[0])<=100:raise ValueError('limit must be an integer from 1 to 100')
+ limit=int(values[0]);version=PROFILE['connection_version'];after=None
+ if 'next_token' in query:
+  values=query['next_token']
+  if len(values)!=1 or not values[0]:raise ValueError('Invalid pagination token')
+  value=values[0]
+  try:
+   token=json.loads(base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True))
+  except (ValueError,UnicodeDecodeError) as error:raise ValueError('Invalid pagination token') from error
+  if not isinstance(token,dict) or set(token)!={'route','connection_version','key'} or token.get('route')!='/history' or token.get('connection_version')!=version or not isinstance(token.get('key'),str):raise ValueError('Invalid pagination token')
+  parts=token['key'].split('#')
+  if len(parts)!=4 or parts[0]!='HISTORY' or not parts[1].isdigit() or parts[2] not in PROFILE['regions'] or not parts[3]:raise ValueError('Invalid pagination token')
+  after=token['key']
+ rows=history_rows()
+ if after is not None:rows=[row for row in rows if history_key(row)<after]
+ page=rows[:limit];next_token=None
+ if len(rows)>limit:
+  cursor={'route':'/history','connection_version':version,'key':history_key(page[-1])}
+  next_token=base64.urlsafe_b64encode(json.dumps(cursor,separators=(',',':')).encode()).decode().rstrip('=')
+ return {'results':[public_result(row) for row in page],'next_token':next_token}
+
 def complete(scan_id, started, region='ap-southeast-1'):
  groups=normalized_groups(PROFILE.get('service_groups'))
  candidates=[]
@@ -78,7 +107,7 @@ def complete(scan_id, started, region='ap-southeast-1'):
   if RESOURCE_GROUPS[finding['type']] not in groups:continue
   item=copy.deepcopy(finding);item['finding_id']=finding_id(item['type'],region,item['resource_id']);candidates.append(item)
  counts={kind:count for kind,count in {'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8}.items() if RESOURCE_GROUPS[kind] in groups}
- return {'scan_id':scan_id,'region':region,'connection_version':PROFILE['connection_version'],'status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
+ return {'scan_id':scan_id,'region':region,'connection_version':PROFILE['connection_version'],'trigger':'manual','status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
          'counts':counts,'candidates':candidates,'findings':feedback_findings(candidates),
          'notification':'DEMO_ONLY','expires':int(time.time())+86400*30}
 CURRENT=[complete(str(uuid.uuid4()),int(time.time())-3600)]
@@ -90,7 +119,7 @@ def tick():
  global CURRENT,READY_AT
  if READY_AT and time.time()>=READY_AT:
   CURRENT=[complete(CURRENT[0]['scan_id'],CURRENT[0]['started_at'],r) for r in PROFILE['regions']]
-  HISTORY[:0]=copy.deepcopy(CURRENT);del HISTORY[20:];READY_AT=0
+  HISTORY[:0]=copy.deepcopy(CURRENT);HISTORY[:]=history_rows();READY_AT=0
  elif READY_AT:
   for r in CURRENT:r['status']='RUNNING'
 
@@ -120,13 +149,16 @@ class Handler(SimpleHTTPRequestHandler):
     if path=='/me' and method=='GET':return self.reply(200,{**PROFILE,'service_groups':normalized_groups(PROFILE.get('service_groups'))})
     if path=='/findings':
      return self.reply(200,{'results':[public_result(row,overlay=True) for row in CURRENT]})
-    if path=='/history':return self.reply(200,{'results':[public_result(row) for row in HISTORY],'next_token':None})
+    if path=='/history':return self.reply(200,history_page(query))
     if path.startswith('/scans/'):
-     rows=[r for r in CURRENT+HISTORY if r['scan_id']==path.rsplit('/',1)[-1]]
-     return self.reply(200 if rows else 404,{'results':[public_result(row) for row in rows]})
+     scan_id=path.rsplit('/',1)[-1];rows={}
+     for row in history_rows()+CURRENT:
+      if row.get('scan_id')==scan_id and row.get('connection_version')==PROFILE['connection_version'] and row.get('region') in PROFILE['regions']:
+       rows.setdefault(row['region'],public_result(row))
+     return self.reply(200 if rows else 404,{'scan_id':scan_id,'results':list(rows.values())})
     if path=='/scans' and method=='POST':
      if READY_AT:return self.reply(409,{'error':'Demo đang chạy một lần quét.'})
-     sid=str(uuid.uuid4());now=int(time.time());CURRENT=[{'scan_id':sid,'region':r,'status':'QUEUED','started_at':now} for r in PROFILE['regions']];READY_AT=time.time()+3
+     sid=str(uuid.uuid4());now=int(time.time());CURRENT=[{'scan_id':sid,'region':r,'connection_version':PROFILE['connection_version'],'trigger':'manual','status':'QUEUED','started_at':now} for r in PROFILE['regions']];READY_AT=time.time()+3
      return self.reply(202,{'scan_id':sid,'message':'Demo queued'})
     if path=='/settings' and method=='PUT':PROFILE['settings']=config(body,PROFILE['settings']);return self.reply(200,PROFILE['settings'])
     if path=='/connection' and method=='PUT':
