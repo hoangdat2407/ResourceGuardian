@@ -13,8 +13,9 @@ import demo
 
 class DemoHistoryPagination(unittest.TestCase):
     def setUp(self):
-        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT))
+        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS))
         self.addCleanup(self.restore)
+        demo.FINDING_OBSERVATIONS = {}
         self.now = 1793361600
         clock = patch.object(demo.time, "time", return_value=self.now)
         clock.start()
@@ -30,7 +31,7 @@ class DemoHistoryPagination(unittest.TestCase):
                 demo.HISTORY.append(row)
 
     def restore(self):
-        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT = self.saved
+        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS = self.saved
 
     def request(self, method="GET", path="/history", body=None, *, through_get=False):
         payload = json.dumps(body).encode() if body is not None else b""

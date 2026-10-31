@@ -11,8 +11,9 @@ import demo
 
 class DemoFeedback(unittest.TestCase):
     def setUp(self):
-        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT))
+        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS))
         self.addCleanup(self.restore)
+        demo.FINDING_OBSERVATIONS = {}
         self.now = 1793361600
         clock = patch.object(demo.time, "time", return_value=self.now)
         clock.start()
@@ -28,7 +29,7 @@ class DemoFeedback(unittest.TestCase):
         self.base = {"region": "ap-southeast-1", "finding_id": self.ident}
 
     def restore(self):
-        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT = self.saved
+        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS = self.saved
 
     def request(self, method, path, body=None):
         payload = json.dumps(body).encode() if body is not None else b""
@@ -120,6 +121,8 @@ class DemoFeedback(unittest.TestCase):
         self.assertEqual(self.request("GET", "/feedback")[1]["results"], [saved])
 
     def test_missing_metadata_is_not_invented_from_profile_or_rules(self):
+        self.finding.pop("account_id", None)
+        self.finding.pop("rule_id", None)
         code, record = self.update(acknowledged=True)
         self.assertEqual(code, 200)
         self.assertEqual(record["type"], self.finding["type"])

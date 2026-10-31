@@ -11,8 +11,9 @@ import demo
 
 class DemoScope(unittest.TestCase):
     def setUp(self):
-        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT))
+        self.saved = copy.deepcopy((demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS))
         self.addCleanup(self.restore)
+        demo.FINDING_OBSERVATIONS = {}
         demo.READY_AT = 0
         self.connection = {
             "role_arn": "arn:aws:iam::123456789012:role/GuardianReadRole-demo",
@@ -20,7 +21,7 @@ class DemoScope(unittest.TestCase):
         }
 
     def restore(self):
-        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT = self.saved
+        demo.PROFILE, demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT, demo.FINDING_OBSERVATIONS = self.saved
 
     def request(self, method, path, body=None):
         payload = json.dumps(body).encode() if body is not None else b""
@@ -43,12 +44,12 @@ class DemoScope(unittest.TestCase):
         demo.CURRENT = [result]
         code, response = self.request("GET", "/findings")
         self.assertEqual(code, 200)
-        self.assertEqual(response["results"][0]["counts"], {"EBS": 6, "SNAPSHOT": 8})
-        self.assertEqual({finding["type"] for finding in response["results"][0]["findings"]}, {"EBS", "SNAPSHOT"})
+        self.assertEqual(response["results"][0]["counts"], {"EBS": 6, "SNAPSHOT": 8, "S3_MULTIPART": 2})
+        self.assertEqual({finding["type"] for finding in response["results"][0]["findings"]}, {"EBS", "SNAPSHOT", "S3_MULTIPART"})
 
     def test_each_group_only_uses_available_demo_data(self):
-        for group, expected in (("compute", {"EC2"}), ("storage", {"EBS", "SNAPSHOT"}),
-                                ("database", set()), ("network", {"EIP"})):
+        for group, expected in (("compute", {"EC2"}), ("storage", {"EBS", "SNAPSHOT", "S3_MULTIPART"}),
+                                ("database", {"RDS"}), ("network", {"EIP", "NAT_GATEWAY", "ALB", "NLB"})):
             with self.subTest(group=group):
                 code, _ = self.request("PUT", "/connection", {**self.connection, "service_groups": [group]})
                 self.assertEqual(code, 200)
@@ -106,6 +107,7 @@ class DemoScope(unittest.TestCase):
         self.assertNotEqual(demo.PROFILE["connection_version"], old_version)
         self.assertEqual(str(uuid.UUID(demo.PROFILE["connection_version"])), demo.PROFILE["connection_version"])
         self.assertEqual((demo.CURRENT, demo.HISTORY, demo.FEEDBACK, demo.READY_AT), ([], [], {}, 0))
+        self.assertEqual(demo.FINDING_OBSERVATIONS, {})
         demo.tick()
 
     def test_all_eleven_settings_save_reload_and_invalid_update_preserves_values(self):

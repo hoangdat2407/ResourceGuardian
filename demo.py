@@ -2,32 +2,68 @@
 Run: python demo.py, then open http://127.0.0.1:8080
 """
 import argparse, base64, copy, json, re, sys, threading, time, uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
-from rules import config, finding_id
+from rules import (config, evaluate_ebs, evaluate_ec2, evaluate_eip, evaluate_load_balancer,
+                   evaluate_nat_gateway, evaluate_rds, evaluate_s3_multipart, evaluate_snapshot, finding_id)
 WEB = Path(__file__).parent / 'web'
 LOCK = threading.RLock()
 SERVICE_GROUPS = ('compute','storage','database','network')
 REGIONS = {'ap-southeast-1','ap-southeast-2','ap-northeast-1','us-east-1','us-west-2','eu-west-1'}
-RESOURCE_GROUPS = {'EC2':'compute','EBS':'storage','EIP':'network','SNAPSHOT':'storage'}
+RESOURCE_GROUPS = {'EC2':'compute','EBS':'storage','EIP':'network','SNAPSHOT':'storage',
+                   'S3_MULTIPART':'storage','RDS':'database','NAT_GATEWAY':'network','ALB':'network','NLB':'network'}
+DEMO_COUNTS = {'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8,'S3_MULTIPART':2,'RDS':3,'NAT_GATEWAY':2,'ALB':2,'NLB':2}
+RETENTION_SECONDS = 30*86400
 PROFILE = {'account_id':'123456789012','role_arn':'arn:aws:iam::123456789012:role/GuardianReadRole-demo',
            'regions':['ap-southeast-1'], 'service_groups':['compute','storage','database','network'],
            'external_id':'DEMO-ONLY-NOT-A-REAL-EXTERNAL-ID', 'connection_version':'demo-v1',
            'api_principal':'DEMO: API role ARN appears after real deployment', 'scan_principal':'DEMO: Worker role ARN appears after real deployment',
-           'settings': config({}), 'notifications': {'enabled':False}, 'email_available':True}
+           'settings': config({}), 'notifications': {'enabled':False}, 'email_available':False}
 FEEDBACK = {}
-FINDINGS = [
- {'type':'EC2','resource_id':'i-0123456789abcdef0','level':'REVIEW','reason':'Low CPU and network; confirm intended workload','evidence':{'cpu_p95':1.7,'network_mib_hour':.18,'coverage':1}},
- {'type':'EBS','resource_id':'vol-0a123456789bcdef0','level':'REVIEW','reason':'Unattached volume; validate data retention','evidence':{'size_gib':40,'observed_hours':49.5}},
- {'type':'EIP','resource_id':'eipalloc-0123456789abcdef0','level':'OBSERVING','reason':'Unassociated public IPv4; may be intentionally reserved','evidence':{'observed_hours':12}},
- {'type':'SNAPSHOT','resource_id':'snap-0123456789abcdef0','level':'REVIEW','reason':'Old snapshot not referenced by listed AMIs; backup purpose requires review','evidence':{'age_days':65,'volume_id':'vol-0b123456789bcdef0','logical_volume_gib':40}},
- {'type':'EC2','resource_id':'i-0fedcba9876543210','level':'INSUFFICIENT_DATA','reason':'Missing CloudWatch metrics; not classified as idle','evidence':{'coverage':.3}}
-]
-for finding in FINDINGS:
- finding['finding_id']=finding_id(finding['type'],'ap-southeast-1',finding['resource_id'])
+FINDING_OBSERVATIONS = {}
+
+def sample_findings(region, observed_at):
+ # Synthetic inventory/metrics only; evaluators and their evidence schema are the real pure rules.
+ now=datetime.fromtimestamp(observed_at,timezone.utc);cfg=PROFILE['settings'];hours=cfg['window_hours']
+ end=now.replace(minute=0,second=0,microsecond=0);start=end-timedelta(hours=hours);created=now-timedelta(days=60)
+ zeros=[0]*hours;network=[.09*1048576]*hours;missing=[0]*int(hours*.3)
+ account=PROFILE['account_id'];rds_arn='arn:aws:rds:'+region+':'+account+':db:database-demo'
+ alb_arn='arn:aws:elasticloadbalancing:'+region+':'+account+':loadbalancer/app/alb-demo/0000000000000001'
+ nlb_arn='arn:aws:elasticloadbalancing:'+region+':'+account+':loadbalancer/net/nlb-demo/0000000000000002'
+ samples=[
+  (evaluate_ec2({'InstanceId':'i-0123456789abcdef0','LaunchTime':created,'State':{'Name':'running'}},[[1.7]*hours,network,network],cfg,start),'i-0123456789abcdef0'),
+  (evaluate_ebs({'VolumeId':'vol-0a123456789bcdef0','Size':40,'State':'available','Attachments':[]},49.5,cfg),'vol-0a123456789bcdef0'),
+  (evaluate_eip({'AllocationId':'eipalloc-0123456789abcdef0'},12,cfg),'eipalloc-0123456789abcdef0'),
+  (evaluate_snapshot({'SnapshotId':'snap-0123456789abcdef0','StartTime':now-timedelta(days=65),'VolumeId':'vol-0b123456789bcdef0','VolumeSize':40,'State':'completed'},set(),True,cfg,now),'snap-0123456789abcdef0'),
+  (evaluate_ec2({'InstanceId':'i-0fedcba9876543210','LaunchTime':created,'State':{'Name':'running'}},[missing,missing,missing],cfg,start),'i-0fedcba9876543210'),
+  (evaluate_s3_multipart('guardian-demo',{'Key':'archive/demo.bin','UploadId':'demo-upload','Initiated':now-timedelta(days=8)},now),['guardian-demo','archive/demo.bin','demo-upload']),
+  (evaluate_rds({'DBInstanceIdentifier':'database-demo','DBInstanceArn':rds_arn,'DBInstanceStatus':'available','InstanceCreateTime':created,'Engine':'postgres','DBInstanceClass':'db.t3.micro'},[zeros,zeros],cfg,start),rds_arn),
+  (evaluate_nat_gateway({'NatGatewayId':'nat-demo','State':'available','CreateTime':created,'VpcId':'vpc-demo','SubnetId':'subnet-demo'},[zeros,zeros],cfg,start),'nat-demo'),
+  (evaluate_load_balancer({'LoadBalancerName':'alb-demo','LoadBalancerArn':alb_arn,'Type':'application','State':{'Code':'active'},'CreatedTime':created,'Scheme':'internet-facing'},[zeros],cfg,start),alb_arn),
+  (evaluate_load_balancer({'LoadBalancerName':'nlb-demo','LoadBalancerArn':nlb_arn,'Type':'network','State':{'Code':'active'},'CreatedTime':created,'Scheme':'internal'},[zeros],cfg,start),nlb_arn),
+ ]
+ statistics={'EC2':{'cpu':'Maximum','netin':'Sum','netout':'Sum'},'RDS':{'cpu':'Maximum','connections':'Maximum'},
+             'NAT_GATEWAY':{'source':'Sum','destination':'Sum'},'ALB':{'requests':'Sum'},'NLB':{'flows':'Sum'}}
+ findings=[]
+ for item,identity in samples:
+  if item is None:continue
+  context={'account_id':account,'region':region,'evaluated_at':now.isoformat()}
+  item.update(context,finding_id=finding_id(item['type'],region,identity));item['evidence'].update(context)
+  if item['type'] in statistics:
+   item['evidence'].update(observation_start=start.isoformat(),observation_end=end.isoformat(),metric_period_seconds=3600,metric_statistics=statistics[item['type']])
+  findings.append(item)
+ return findings
+
+def observe_finding(item, observed_at):
+ key=(PROFILE['connection_version'],item['region'],item['finding_id']);old=FINDING_OBSERVATIONS.get(key)
+ first=old['first'] if old is not None and old['expires']>observed_at else observed_at
+ last=max(observed_at,old['last']) if old is not None and old['expires']>observed_at else observed_at
+ FINDING_OBSERVATIONS[key]={'first':first,'last':last,'expires':last+RETENTION_SECONDS}
+ item.update(first_seen_at=datetime.fromtimestamp(first,timezone.utc).isoformat().replace('+00:00','Z'),
+             last_seen_at=datetime.fromtimestamp(last,timezone.utc).isoformat().replace('+00:00','Z'))
 def normalized_groups(value):
  if value is None:return list(SERVICE_GROUPS)
  if not isinstance(value,list) or not 1<=len(value)<=4 or any(not isinstance(group,str) or group not in SERVICE_GROUPS for group in value) or len(set(value))!=len(value):
@@ -38,7 +74,7 @@ def feedback_findings(candidates):
  for finding in candidates:
   item=copy.deepcopy(finding);item.pop('acknowledged',None)
   record=FEEDBACK.get(item['finding_id'],{})
-  if record.get('expires',float('inf'))<=now:record={}
+  if record.get('expires',float('inf'))<=now or record.get('region')!=item.get('region') or record.get('connection_version')!=PROFILE['connection_version']:record={}
   if record.get('kept') or record.get('ignore_until',0)>now:continue
   if record.get('acknowledged'):item['acknowledged']=True
   visible.append(item)
@@ -46,7 +82,8 @@ def feedback_findings(candidates):
 
 def public_result(row, overlay=False):
  result=copy.deepcopy(row)
- if overlay and ('candidates' in row or 'findings' in row):result['findings']=feedback_findings(row.get('candidates',row.get('findings',[])))
+ if overlay and ('candidates' in row or 'findings' in row):
+  result['findings']=feedback_findings(row.get('candidates',row.get('findings',[])));result['finding_count']=len(result['findings'])
  result.pop('candidates',None)
  return result
 
@@ -101,17 +138,18 @@ def history_page(query):
  return {'results':[public_result(row) for row in page],'next_token':next_token}
 
 def complete(scan_id, started, region='ap-southeast-1'):
- groups=normalized_groups(PROFILE.get('service_groups'))
+ groups=normalized_groups(PROFILE.get('service_groups'));observed_at=int(time.time())
  candidates=[]
- for finding in FINDINGS:
+ for finding in sample_findings(region,observed_at):
   if RESOURCE_GROUPS[finding['type']] not in groups:continue
-  item=copy.deepcopy(finding);item['finding_id']=finding_id(item['type'],region,item['resource_id']);candidates.append(item)
- counts={kind:count for kind,count in {'EC2':4,'EBS':6,'EIP':2,'SNAPSHOT':8}.items() if RESOURCE_GROUPS[kind] in groups}
- return {'scan_id':scan_id,'region':region,'connection_version':PROFILE['connection_version'],'trigger':'manual','status':'SUCCEEDED','started_at':started,'completed_at':int(time.time()),
-         'counts':counts,'candidates':candidates,'findings':feedback_findings(candidates),
-         'notification':'DEMO_ONLY','expires':int(time.time())+86400*30}
-CURRENT=[complete(str(uuid.uuid4()),int(time.time())-3600)]
-CURRENT[0]['completed_at']=int(time.time())-3500
+  observe_finding(finding,observed_at);candidates.append(finding)
+ counts={kind:count for kind,count in DEMO_COUNTS.items() if RESOURCE_GROUPS[kind] in groups}
+ visible=feedback_findings(candidates)
+ return {'scan_id':scan_id,'region':region,'account_id':PROFILE['account_id'],'connection_version':PROFILE['connection_version'],'trigger':'manual','status':'SUCCEEDED','started_at':started,'completed_at':observed_at,
+         'counts':counts,'candidates':candidates,'findings':visible,'finding_count':len(visible),
+         'total_candidate_count':len(candidates),'errors':[],
+         'notification':'DISABLED','expires':observed_at+RETENTION_SECONDS}
+CURRENT=[complete(str(uuid.uuid4()),int(time.time()))]
 HISTORY=copy.deepcopy(CURRENT)
 READY_AT=0
 
@@ -168,10 +206,12 @@ class Handler(SimpleHTTPRequestHandler):
      if not isinstance(regions,list) or not 1<=len(regions)<=3 or any(not isinstance(region,str) or region not in REGIONS for region in regions) or len(set(regions))!=len(regions):raise ValueError('Chọn 1–3 region hợp lệ, không trùng nhau.')
      groups=normalized_groups(body.get('service_groups',PROFILE.get('service_groups')))
      candidate={**PROFILE,'role_arn':arn,'account_id':arn.split(':')[4],'regions':list(regions),'service_groups':groups,'connection_version':str(uuid.uuid4())}
-     PROFILE.update(candidate);CURRENT=[];READY_AT=0;HISTORY.clear();FEEDBACK.clear()
+     PROFILE.update(candidate);CURRENT=[];READY_AT=0;HISTORY.clear();FEEDBACK.clear();FINDING_OBSERVATIONS.clear()
      return self.reply(200,{'connected':True,'demo':True})
     if path=='/notifications' and method=='PUT':
-     PROFILE['notifications']={'enabled':bool(body.get('enabled')),'email':'demo@example.com'}
+     if type(body.get('enabled')) is not bool:raise ValueError('enabled must be a boolean')
+     if body['enabled']:raise ValueError('Email has not been configured by platform owner')
+     PROFILE['notifications']={'enabled':False}
      return self.reply(200,PROFILE['notifications'])
     if path=='/feedback' and method=='PUT':
      if set(body)-{'region','finding_id','acknowledged','kept','ignoreUntil'} or not {'region','finding_id'}<=set(body):raise ValueError('Feedback fields are invalid')
