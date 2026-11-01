@@ -17,4 +17,5 @@ dist/
 .coverage
 htmlcov/
 .agents/
+.agent/
 /skill.md
