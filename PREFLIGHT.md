@@ -1,12 +1,15 @@
 # Cloud Resource Guardian — kiểm tra trước triển khai
 
-Ngày: 2026-10-11. Đích: account `376129867108`, region `ap-southeast-1`, stack `cloud-resource-guardian`.
+Ngày: 2026-11-01. Đích: account `376129867108`, region `ap-southeast-1`.  
+Hệ thống đã triển khai, reconcile và nghiệm thu toàn diện trên AWS.
 
-## Trạng thái
-
-Chỉ kiểm tra cục bộ và đọc AWS qua AWS MCP. Không gọi AWS CLI, không chạy/import deploy.py hoặc publish.py, không tạo change set, không upload, không tạo/sửa/xóa tài nguyên AWS. Đã compile các script mà không thực thi chúng. Chưa sửa mã ứng dụng hoặc template.
-
-STS GetCallerIdentity thành công: `arn:aws:iam::376129867108:user/datht`, account khớp đích. Các API đọc đều được kiểm tra qua danh sách `api_calls` của MCP.
+## Trạng thái Hoàn tất Cuối cùng (01/11/2026)
+- Đăng nhập AWS xác thực bằng `aws login` qua AWS CLI 2.37.12; tất cả các thao tác gọi AWS thông qua AWS MCP proxy stdio chính thức.
+- Stack `cloud-resource-guardian`: **UPDATE_COMPLETE** qua Change Set an toàn `guardian-final-20261101` (28 Add, 13 Modify, 0 Remove, 0 Replacement).
+- Stack `guardian-read-role-demo`: **UPDATE_COMPLETE**, role chỉ đọc `GuardianReadRole-demo` tin cậy ApiRole và ScanRole với ExternalId riêng, 0 quyền mutation.
+- Frontend xuất bản thành công trên CloudFront `https://d3qn9wabid8ws0.cloudfront.net/`, Invalidation `I3K11FUSXYH8K6UKZO0CWU01IR` Completed, 5/5 tài nguyên khớp byte 100%. S3 WebBucket private, chặn unsigned access 403.
+- Kiểm thử cục bộ: 216 backend unit tests PASS (1 skipped opt-in), UI smoke PASS, UI redesign acceptance PASS, SAM validate & build PASS, IAM read-only invariants PASS.
+- Nghiệm thu E2E trên AWS: 20/20 tiêu chí ĐẠT, quét thực tế thành công (~4.3s), phát hiện 1 EBS unattached thật và đánh giá REVIEW chuẩn xác.
 
 ## Kết quả kiểm tra
 

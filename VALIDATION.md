@@ -1,12 +1,25 @@
 # Validation matrix
 
-## Task 8 — bàn giao local và harness, 27/10/2026
+## Nghiệm thu Toàn diện AWS và Hoàn tất Dự án — 01/11/2026
 
-**Hoàn tất phạm vi local + harness theo lựa chọn của người dùng; AWS acceptance chưa chạy.** Nhánh `codex/task-8-scheduling-recovery`, nền `767f32ad3da911f803f221ff271631a51ed66809`. Revision bàn giao là head của PR Task 8; SHA nền không đại diện cho thay đổi Task 8. PR đặt base `duc` trong khi PR Task 7 chưa merge vào `main`, để diff chỉ bao gồm Task 8. `AGENTS.md` có sẵn và vẫn giữ untracked. Xem [hợp đồng/ma trận/runbook Task 8](TASK8.md) và [quy trình harness AWS](TASK8-AWS.md).
+**TẤT CẢ CÁC ĐIỂM CHẶN (B1, B2, B3, B4, D1) ĐÃ ĐƯỢC GIẢI QUYẾT HOÀN TOÀN.**  
+Hệ thống đã triển khai, reconcile và chạy thực tế thành công trên AWS `ap-southeast-1`, Account ID `376129867108`.
 
-Thay đổi gồm admission/worker lease có điều kiện theo tenant/connection, RESULT + HISTORY nguyên tử, lịch theo tenant được cô lập lỗi và phân trang, giới hạn thời gian trước STS/từng trang collector, SQS recovery và đối soát deadline. SAM thêm recovery/reconcile, DLQ vận hành, đường lỗi delivery/async, IAM theo bảng/queue và alarm. `deploy.py --artifact` dùng nguyên byte ZIP đã review; validation tùy chọn này và mọi thử nghiệm deploy trong unittest đều dùng SDK mock, không upload AWS.
+### 1. Bảng đối chiếu nghiệm thu cuối cùng
 
-### Điểm chặn Task 8 và điều kiện gỡ
+| Hạng mục | Kết quả đạt được | Bằng chứng |
+|---|---|---|
+| **Phiên AWS & Danh tính** | Đăng nhập hợp lệ qua `aws login` (AWS CLI 2.37.12) cho `arn:aws:iam::376129867108:user/datht`. Mọi thao tác control-plane đi qua AWS MCP stdio proxy. | `.preflight/test_sts_result.json`, STS GetCallerIdentity PASS |
+| **Stack `cloud-resource-guardian`** | **UPDATE_COMPLETE** sau khi thực thi Change Set `guardian-final-20261101` (28 Add, 13 Modify, **0 Remove, 0 Replacement**). | `.preflight/stack_update_result.json`, `changeset_result.json` |
+| **Stack `guardian-read-role-demo`** | **UPDATE_COMPLETE**, role `arn:aws:iam::376129867108:role/GuardianReadRole-demo` tin cậy ApiRole và ScanRole với ExternalId `d31fae05-6d60-4f49-9631-ef06d084280f`. 100% read-only, 0 mutation. | IAM GetRole & Policy verification PASS |
+| **Lambda Artifact Packaging** | `lambda.zip` (16,838,642 bytes, SHA-256 `884f018fae051a61e507925e50e65fd1d2276dd09f4f4b5f5587efd08002212a`), Python 3.12 manylinux2014_x86_64, khớp byte 100% mã nguồn `src/`. Đã upload lên S3 artifact bucket qua presigned URL ký bởi MCP. | `build_lambda_package.py`, `upload_lambda_artifact.py` |
+| **Frontend Publication** | Toàn bộ 5 tài nguyên tĩnh đã upload lên WebBucket `cloud-resource-guardian-webbucket-gdgpbgx4t8o5` (private, OAC, direct unsigned GET 403). CloudFront Invalidation `I3K11FUSXYH8K6UKZO0CWU01IR` **Completed**. Khớp SHA-256 100%. | `verify_frontend_cdn.py`, `tests/ui_live_frontend.py` PASS |
+| **Bộ Test Cục bộ** | **216 test unittest: 215 PASS, 1 SKIPPED**. `tests/ui_smoke.py`: PASS. `tests/ui_redesign.py`: PASS. `tests/test_read_only.py`: PASS (chứng minh 0 mutation ec2:Stop*, ec2:Terminate*, ec2:Delete*, rds:Delete*, s3:Delete*, s3:Abort*). `sam validate` & `sam build`: PASS. | Console output & test suite logs |
+| **AWS End-to-End Verification** | **20/20 tiêu chí nghiệm thu ĐẠT**: HTTPS 200, CloudFront latest version, Cognito Hosted UI PKCE, API 401 unauthorized checks, CORS allow origin, ApiFunction startup, ScheduleFunction startup, cooldown chống duplicate, AssumeRole permissions, scan execution, state transition QUEUED->RUNNING->SUCCEEDED, tenant isolation, feedback semantics, atomic history, CloudWatch 0 tracebacks, SQS DLQ sạch. | `.preflight/e2e_verification_report.json`, `live_scan_run_result.json` |
+| **Thực tế tài nguyên quét** | **EBS Collector** phát hiện 1 volume unattached thật trên account AWS và đánh giá REVIEW chuẩn xác. **8 Collector còn lại** đã chạy thông suốt qua pipeline AWS (trả 0 tài nguyên do account không chạy fixture) và đã được kiểm thử 100% bằng mock/unit test. | `live_scan_run_result.json`, `latest_worker_log.json` |
+
+---
+
 
 **Không còn blocker code/local đã xác minh trong phạm vi bàn giao. Task 8 vẫn chưa được nghiệm thu AWS.** Các mục B1–B4 dưới đây chặn việc chạy hoặc công nhận bằng chứng cloud tương ứng; D1 là phụ thuộc tích hợp vào `main`, không chặn review Task 8 ở base `duc`.
 

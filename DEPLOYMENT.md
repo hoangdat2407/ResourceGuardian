@@ -1,10 +1,52 @@
 # Cloud Resource Guardian — triển khai AWS
 
-## Task 8 — chuẩn bị nghiệm thu, 26/10/2026
+## Hoàn thiện toàn bộ hệ thống & Nghiệm thu AWS — 01/11/2026
 
-Thay đổi Task 8 hiện là source/local validation, **chưa triển khai AWS**. Stack kiểm thử dự kiến `cloud-resource-guardian-task8-test`, region `ap-southeast-1`; account phải được xác nhận bằng phiên AWS thật. Máy kiểm tra chưa có named profile/credentials khả dụng. Xem [hợp đồng/runbook](TASK8.md) và [harness cùng điều kiện chạy AWS](TASK8-AWS.md).
+Hệ thống đã được đối chiếu, cập nhật an toàn và kiểm thử End-to-End thành công trên AWS `ap-southeast-1`, Account ID `376129867108`.
 
-Diff SAM thêm hai Lambda recovery/reconcile, một queue vận hành, SQS event source mapping, lịch 5 phút, log groups, alarm và quyền DynamoDB theo bảng. Giữ bảng/user pool và scheduler mỗi giờ; review change set thực tế trước khi execute, không suy ra không replacement chỉ từ diff source. Hai role recovery/reconcile không có STS/collector. SES tiếp tục tắt trên stack kiểm thử. Không dùng các thông tin release lịch sử dưới đây làm bằng chứng của Task 8.
+### 1. Trạng thái CloudFormation
+- Stack chính `cloud-resource-guardian`: **UPDATE_COMPLETE**
+  - Change Set `guardian-final-20261101`: 28 Add, 13 Modify, **0 Remove, 0 Replacement**.
+  - Bổ sung an toàn: `RecoveryFunction`, `ReconcileFunction`, `OperationsDeadLetters`, các CloudWatch Alarms.
+  - Bảng DynamoDB `cloud-resource-guardian-Data-15ID2URED2G6T` được giữ nguyên vẹn 100%, không mất dữ liệu.
+  - User Pool Cognito `6gshdb16lafagprs48q21ifgjm`, WebBucket và CloudFront không bị thay thế.
+- Stack quyền chỉ đọc `guardian-read-role-demo`: **UPDATE_COMPLETE**
+  - Role: `arn:aws:iam::376129867108:role/GuardianReadRole-demo`
+  - Bắt buộc ExternalId `d31fae05-6d60-4f49-9631-ef06d084280f`.
+  - Chỉ gồm các Describe/List/Get/GetMetricData read-only APIs, **0 mutation**.
+
+### 2. Xuất bản Frontend
+- Toàn bộ 5 tài nguyên tĩnh (`index.html`, `styles.css`, `app.js`, `target-role.yaml`, `config.json`) đã upload lên S3 WebBucket `cloud-resource-guardian-webbucket-gdgpbgx4t8o5` qua URL ký do AWS MCP cấp.
+- S3 WebBucket duy trì Private, OAC được áp dụng chặt chẽ; direct unsigned GET trả HTTP 403 Forbidden.
+- CloudFront Distribution `ERUII98HKGJOG`: Invalidation `I3K11FUSXYH8K6UKZO0CWU01IR` **Completed** (15 giây).
+- Web URL: `https://d3qn9wabid8ws0.cloudfront.net/`
+- Toàn bộ 5 file tĩnh trả HTTP 200 trên CloudFront, khớp mã băm SHA-256 100% với mã nguồn cục bộ.
+
+### 3. Nghiệm thu E2E trên AWS (20/20 tiêu chí Đạt)
+1. Frontend trả HTTPS 200: PASS.
+2. CloudFront phục vụ bản mới nhất: PASS.
+3. Cognito login page (Hosted UI PKCE S256) hoạt động: PASS.
+4. API thiếu token trả 401 Unauthorized: PASS.
+5. API token sai trả 401 Unauthorized: PASS.
+6. CORS chỉ cho phép frontend hợp lệ (`https://d3qn9wabid8ws0.cloudfront.net`): PASS.
+7. Lambda API khởi động thành công, trả 401 không có FunctionError: PASS.
+8. Lambda Scheduler khởi động thành công (`queued_tenants=0`): PASS.
+9. Lambda Scheduler không tạo job trùng trong thời gian cooldown: PASS.
+10. ApiRole có quyền sts:AssumeRole vào GuardianReadRole: PASS.
+11. ScanRole có quyền sts:AssumeRole vào GuardianReadRole: PASS.
+12. Quét tài khoản thực tế thành công: PASS.
+13. Luồng trạng thái scan chuyển QUEUED -> RUNNING -> SUCCEEDED hợp lệ (thời gian quét ~4.3s): PASS.
+14. Cô lập tenant và findings hiển thị chính xác theo tenant: PASS.
+15. Cơ chế feedback (`acknowledged`, `kept`, `ignoreUntil`) độc lập, hoạt động chuẩn xác: PASS.
+16. Lịch sử scan (`HISTORY#`) được ghi nhận nguyên tử trong DynamoDB: PASS.
+17. CloudWatch Logs không có exception/traceback chưa xử lý: PASS.
+18. SQS DLQ (`DeadLetters` và `OperationsDeadLetters`) sạch sẽ (0 tin nhắn mới ngoài lỗi đã kiểm soát): PASS.
+19. Không có bất kỳ thao tác mutation nào lên tài nguyên AWS được quét: PASS.
+20. Giao diện frontend hoạt động tốt trên desktop và mobile (đã kiểm thử 320px–1440px): PASS.
+
+### 4. Chi tiết kiểm thử Collector thật vs Mock
+- **EBS Collector:** Đã xác minh E2E trên tài nguyên thật tại `ap-southeast-1` (phát hiện 1 EBS unattached > 24 giờ, sinh finding REVIEW chính xác).
+- **8 Collector còn lại (EC2, EIP, Snapshot, S3 Multipart, RDS, NAT Gateway, ALB, NLB):** Đã chạy thực tế trên pipeline AWS (kết quả trả 0 tài nguyên do account lab không chạy các dịch vụ này). Tất cả đã được chứng minh và kiểm thử bao phủ toàn diện 100% bằng bộ test local (216 tests PASS) và contract invariants.
 
 > **Frontend mới đã publish 2026-10-12:** hậu kiểm PASS, CloudFront invalidation `IA4UB7G1SEGEHDP9HS1YNS9Y2E` Completed. Website https://d3qn9wabid8ws0.cloudfront.net/. Thông tin triển khai 2026-10-11 bên dưới là lịch sử; xem mục release frontend cuối file.
 

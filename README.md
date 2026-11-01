@@ -1,9 +1,12 @@
 # Cloud Resource Guardian — MVP
 
-Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
+Bản hoàn chỉnh của Cloud Resource Guardian, triển khai trên AWS bằng Python 3.12/boto3 và Lambda serverless. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và tài liệu nghiệm thu. Lịch sử triển khai và bàn giao được ghi đầy đủ trong [DEPLOYMENT.md](DEPLOYMENT.md), [HANDOFF.md](HANDOFF.md) và [VALIDATION.md](VALIDATION.md).
 
-Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
-
+Hệ thống đã hoàn tất nghiệm thu và chạy thực tế trên AWS (`ap-southeast-1`, Account ID `376129867108`):
+- Cả hai stack `cloud-resource-guardian` và `guardian-read-role-demo` đều đạt trạng thái **UPDATE_COMPLETE**.
+- Tích hợp toàn diện Task 8 (điều phối giao dịch, phục hồi hàng đợi lỗi SQS, đối soát job quá hạn mỗi 5 phút).
+- Frontend mới đã được xuất bản lên CloudFront `https://d3qn9wabid8ws0.cloudfront.net/` với cơ chế bảo vệ private OAC.
+- Toàn bộ 216 tests local và 20/20 tiêu chí AWS End-to-End đã được kiểm thử và nghiệm thu thành công.
 ## 1. Thử ngay tại máy, không cần AWS
 
 Cài Python 3.12, giải nén ZIP rồi mở terminal tại thư mục `Cloud-Resource-Guardian-MVP`:

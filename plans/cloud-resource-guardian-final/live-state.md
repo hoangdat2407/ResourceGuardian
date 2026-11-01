@@ -122,15 +122,14 @@
 - **SSE:** AES256 (`aws:kms` / `AES256`)
 - **Public Access Block:** `BlockPublicAcls=true`, `IgnorePublicAcls=true`, `BlockPublicPolicy=true`, `RestrictPublicBuckets=true`
 - **Bucket Policy:** Cho phép `s3:GetObject` duy nhất từ CloudFront OAC `ERUII98HKGJOG`. Direct anonymous GET bị 403 Forbidden.
-- **Current Objects:**
-  - `app.js` (24,876 bytes, 2026-10-18)
-  - `config.json` (266 bytes, 2026-10-18)
-  - `index.html` (11,462 bytes, 2026-10-18)
-  - `styles.css` (11,036 bytes, 2026-10-18)
-  - `target-role.yaml` (1,661 bytes, 2026-10-18)
+  - `app.js` (27,550 bytes, 2026-11-01)
+  - `config.json` (266 bytes, 2026-11-01)
+  - `index.html` (11,821 bytes, 2026-11-01)
+  - `styles.css` (11,212 bytes, 2026-11-01)
+  - `target-role.yaml` (1,707 bytes, 2026-11-01)
 - **CloudFront Distribution ID:** `ERUII98HKGJOG`
 - **Web URL:** `https://d3qn9wabid8ws0.cloudfront.net/`
-- **Status:** `Deployed`
+- **Status:** `Deployed`, Invalidation `I3K11FUSXYH8K6UKZO0CWU01IR` (`Completed`)
 
 ### 3.6 IAM Roles & Permissions
 1. **ApiRole (`cloud-resource-guardian-ApiRole-So7rB7aEKrFT`):**
@@ -154,17 +153,22 @@
 
 ---
 
-## 4. Sai lệch giữa AWS hiện tại và Repository (Drift Analysis)
+## 4. Kết quả Reconcile & Đồng bộ AWS (Drift Cleared)
 
 1. **Lambda & Template:**
-   - Code Lambda trên AWS mang timestamp 2026-10-19.
-   - Template local `template.yaml` đã tích hợp Task 8:
-     - Thêm `RecoveryFunction` (SQS DeadLetters consumer)
-     - Thêm `ReconcileFunction` (đối soát định kỳ mỗi 5 phút)
-     - Thêm `OperationsDeadLetters` và policy
-     - Thêm các CloudWatch Alarm
-   - Stack `cloud-resource-guardian` trên AWS hiện tại chưa được cập nhật gói Task 8 này.
+   - Thực thi Change Set `guardian-final-20261101`: 28 Add, 13 Modify, **0 Remove, 0 Replacement**.
+   - Toàn bộ 5 Lambda functions đã được triển khai đồng bộ với mã nguồn repo:
+     - `ApiFunction` (`cloud-resource-guardian-ApiFunction-b3gqpsw3XEW6`)
+     - `WorkerFunction` (`cloud-resource-guardian-WorkerFunction-WjbONL4eaYdT`)
+     - `ScheduleFunction` (`cloud-resource-guardian-ScheduleFunction-LyoJCcdNDe6l`)
+     - `RecoveryFunction` (`cloud-resource-guardian-RecoveryFunction-CBoL8WXR59ED`)
+     - `ReconcileFunction` (`cloud-resource-guardian-ReconcileFunction-Cr3FmxFvKS7S`)
+   - `OperationsDeadLetters` và các CloudWatch Alarms đã được khởi tạo thành công.
+   - Stack đạt trạng thái `UPDATE_COMPLETE`.
 2. **Frontend:**
-   - Frontend trên S3 WebBucket mang timestamp 2026-10-18. Cần được kiểm tra và xuất bản bản mới nhất đồng bộ với mã nguồn repo.
+   - Toàn bộ 5 asset tĩnh đã publish lên S3 WebBucket và invalidate CloudFront `I3K11FUSXYH8K6UKZO0CWU01IR` (Completed).
+   - Khớp SHA-256 100% với mã nguồn repo.
 3. **SES:**
-   - Stack parameter `SenderEmail` đang để rỗng `""`. Điều kiện `EmailEnabled=false`, SES identity không tạo và không gửi mail ngoài (đúng yêu cầu).
+   - `SenderEmail=""`, `EmailEnabled=false` (tiếp tục giữ tắt theo đúng yêu cầu kiến trúc).
+4. **Sai lệch (Drift):**
+   - **0 DRIFT.** Code repository và tài nguyên AWS thực tế đã đồng bộ hoàn toàn 100%.

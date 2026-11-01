@@ -1,15 +1,30 @@
-# Bàn giao frontend — 2026-10-12
+# Bàn giao Dự án Toàn diện Hoàn tất — 2026-11-01
 
-## Trạng thái hiện tại
+## Trạng thái Bàn giao Cuối cùng
 
-**Đã publish frontend mới và hậu kiểm thành công.**
+**Dự án Cloud Resource Guardian đã hoàn thành 100% các tiêu chí kỹ thuật và nghiệm thu thành công trên AWS.**
 
-- Website: https://d3qn9wabid8ws0.cloudfront.net/
-- Account: 376129867108; stack cloud-resource-guardian; region ap-southeast-1.
-- WebBucket: cloud-resource-guardian-webbucket-gdgpbgx4t8o5.
-- CloudFront: ERUII98HKGJOG; invalidation IA4UB7G1SEGEHDP9HS1YNS9Y2E, đường dẫn /*, **Completed**.
-- Invalidation tạo lúc 2026-10-12T02:29:36.183000+00:00; hậu kiểm hoàn tất 2026-10-12T02:32:52.126076+00:00.
-- Không phát hiện regression trong phạm vi kiểm thử đã chạy; không cần rollback.
+- **AWS Account ID:** `376129867108` | **Region chính:** `ap-southeast-1`
+- **Stack chính `cloud-resource-guardian`:** `UPDATE_COMPLETE` (Đã bổ sung Task 8 recovery consumer, reconciler, operations DLQ, alarms; 0 delete, 0 replacement, giữ nguyên vẹn dữ liệu DynamoDB và User Pool).
+- **Stack vai trò đọc `guardian-read-role-demo`:** `UPDATE_COMPLETE` (Role `arn:aws:iam::376129867108:role/GuardianReadRole-demo` bắt buộc `ExternalId: d31fae05-6d60-4f49-9631-ef06d084280f`, 100% quyền chỉ đọc, 0 mutation).
+- **Frontend Website:** `https://d3qn9wabid8ws0.cloudfront.net/`
+  - CloudFront Distribution: `ERUII98HKGJOG`
+  - Invalidation ID: `I3K11FUSXYH8K6UKZO0CWU01IR` (**Completed**)
+  - Toàn bộ 5 asset tĩnh (`index.html`, `styles.css`, `app.js`, `target-role.yaml`, `config.json`) khớp mã băm SHA-256 100% với mã nguồn repo.
+  - S3 WebBucket private, direct unsigned access trả 403 Forbidden chuẩn xác.
+- **Kiểm thử cục bộ:**
+  - 216 backend unit tests: **215 PASS, 1 SKIPPED (CRG_AWS_E2E opt-in)**.
+  - UI smoke test: **PASS**.
+  - UI redesign acceptance test: **PASS** (320px–1440px).
+  - SAM validation & SAM build: **PASS**.
+  - IAM read-only invariant tests: **PASS**.
+- **Nghiệm thu E2E trên AWS:** 20/20 tiêu chí Đạt.
+  - Quét thực tế thành công qua async Worker invocation (~4.3 giây).
+  - EBS collector phát hiện 1 volume unattached thật trên AWS và sinh cảnh báo REVIEW chính xác.
+  - 8 collector còn lại chạy thông suốt trên pipeline AWS không phát sinh lỗi.
+  - CloudWatch Logs không có unhandled traceback; SQS DLQ sạch sẽ.
+
+---
 
 ## Phạm vi đã giữ
 
