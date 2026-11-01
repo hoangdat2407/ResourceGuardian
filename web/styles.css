@@ -13,3 +13,5 @@ main{min-width:0;flex:1;padding:0 40px 48px;max-width:1580px}.topbar{min-height:
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 .connection-step .button+.button{margin-left:8px}.inline-feedback{padding:12px 0;color:#174e65}.inline-feedback.error{color:#a52e38}textarea:focus-visible{outline:3px solid #147f9d;outline-offset:4px}
+.table-actions{display:flex;flex-wrap:wrap;gap:6px;min-width:140px}
+.table-actions .button{padding:6px 10px;min-height:34px;font-size:12px;white-space:nowrap}
