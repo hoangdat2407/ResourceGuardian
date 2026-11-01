@@ -1,8 +1,29 @@
 # Validation matrix
 
+## Plan 10 — artifact/review local, chưa triển khai AWS, 01/11/2026
+
+**Plan 10 chưa hoàn tất AWS: thiếu phiên đăng nhập và đầu vào account/executor/fixture đã xác minh.** Người dùng báo “Hải oke mọi thứ rồi” và yêu cầu tiếp tục; QA local của Hải được ghi theo thông báo này, không suy thành review IAM/change set hoặc tạo log từng ca. Artifact pin runtime revision `3342085ae15c698fd8c2c1be64e495472a65c938`; source tree clean. Các thay đổi lượt này chỉ là tài liệu và evidence ignored, không đổi src/web/template/requirements.
+
+| Kiểm tra / đầu ra | Kết quả / giới hạn |
+|---|---|
+| Artifact Lambda | `.preflight/duc-plan-10/artifacts/task8-final.zip`, **16.840.945 byte/2.202 entries**, SHA-256 `7f7ef6e4233fbd1a9603644e58e9fdfe896ef2b249031890841c3020326e9ead`; Linux x86_64/Python3.12/wheel-only, CRC/source raw byte/path guard PASS, không fault wrapper/Windows binaries |
+| Manifest | `artifacts/artifacts.json` pin source/template/requirements/GitSHA/tree/ZIP, tree SHA-256 `634b2693418ea9bc2953d62a26a517fc3960efb16e3a6042a4195b7232bba048`; `release-manifest.json` ghi trạng thái readiness và inputs còn thiếu, không phải manifest môi trường hợp lệ để chạy harness |
+| SDK/handler isolated | Python3.12 `-I -S`:10 module từ bundle, năm handler callable,14 service models, API401 và EBS/EIP rules PASS. Socket bị chặn/0 network attempt; `build/isolated-sdk-result.json` |
+| Test bằng SDK trong ZIP | **115/115 PASS**, 0 failure/error/skip,19.031 giây toàn runner. Bốn suite API/rules/collector budget/finding observations; module SDK resolve từ ZIP giải nén, source khớp,0 network attempt. `build/bundled-sdk-tests.json` và log |
+| Review độc lập | **33/33 PASS**,17.969 giây: read-only IAM/API, Task8 infrastructure, observation guards. Diff hạ tầng từ a2201f5 chỉ thêm BatchGetItem cho ScanRole/Data.Arn;11 API đọc target, mirror byte-identical; source/artifact review không còn issue actionable mới được xác định |
+| Harness/deploy guards | **17/17 PASS**; final giữ exact bytes, fault ZIP bị deploy từ chối; checked final/fault archive PASS. Fault riêng do package tạo, chưa chạy fault injection |
+| Template | cfn-lint ba template **exit0**. Template43 tài nguyên trước SAM expansion, SES conditionaloff; chưa có change set thật nên chưa thể kết luận số add/modify/replacement |
+| Plan 09 evidence | Full336 test/335 PASS/1 AWS skip và8 UI PASS trên cùng runtime; hash khớp. Không gọi lại bằng tên kiểm thử mới hoặc chạy lại full suite khi runtime không đổi |
+| AWS inputs | Boto3 profiles=[], credential_source=null, default_region=null; AWS config/credentials/env không có; CLI/SAM chưa có. Không có kết nối CloudFormation deploy qua plugin khả dụng trong lần tìm. Account lịch sử376129867108 **CHƯA XÁC NHẬN**, user sẽ hỏi Đạt/Hải |
+| AWS deployment | **CHƯA CHẠY** STS live, DescribeStacks/users/roles/fixture, upload/create change set/execute/publish, verify LambdaCodeSha256/handler/SES. Không có cloud mutation, không push/CI; không tuyên bố đã deploy |
+
+Reviewer local được ghi đúng `Codex independent subagent /root/plan10_release_review`; cloud reviewer/executor/identity/change set còn chưa có. Nếu publish stack thử, bổ sung `target-role.yaml` vì publish.py hiện chỉ upload config/index/css/js; kiểm tra đủ năm object/hash/MIME/cache/invalidation và rollback theo [PLAN10-READINESS.md](PLAN10-READINESS.md). Không tự đổi stack đang dùng hoặc tạo fixture có phí.
+
+Evidence ignored: `.preflight/duc-plan-10/build/`, `artifacts/`, `review/`, `harness-local-tests.txt`, `cfn-lint.txt`, `environment-check.json`, `release-manifest.json`. [Readiness](PLAN10-READINESS.md) ghi artifact, các blocker và đoạn bàn giao cho người quản lý AWS. Task13 vẫn hoãn; **tiếp tục Plan 10 sau khi có phiên/account hợp lệ, chưa chuyển Plan 11.**
+
 ## Plan 09 — demo chín loại và QA tích hợp local, 31/10/2026
 
-**Đạt code/local Plan 09; chờ Hải xác nhận QA trực tiếp, chưa nghiệm thu AWS.** Baseline `5cbf3878495679414ff2bdeb7ec5722adc1d7e35`, nhánh `codex/task-7-finding-observations`. Code commit `1d3d7c22efb78f5de16611c9493e50da2ca70e4a` — feat(demo): align nine-resource findings and observation state. Không thực hiện Plan 10 hoặc Task 13.
+**Đạt code/local Plan 09; cập nhật 01/11: người dùng báo Hải QA OK, chưa nghiệm thu AWS.** Baseline `5cbf3878495679414ff2bdeb7ec5722adc1d7e35`, nhánh `codex/task-7-finding-observations`. Code commit `1d3d7c22efb78f5de16611c9493e50da2ca70e4a` — feat(demo): align nine-resource findings and observation state. Lượt Plan 09 không thực hiện Plan 10 hoặc Task 13.
 
 Demo dùng evaluator thuần thật cho chín loại trên inventory/metrics tổng hợp. Metadata account/region/rule/recommendation/evaluated_at, ngưỡng/window/unit/coverage và mốc first/last đồng bộ schema backend. Mặc định counts mẫu31/10 finding:8 REVIEW/1 OBSERVING/1 INSUFFICIENT_DATA. Registry RAM theo connection/region/finding cập nhật trước feedback; expiry last+30 ngày, first giữ qua level/absence/keep/ignore, last không lùi, reconnect reset. Các snapshot cũ không bị backfill. SES/control email tắt; PUT bật hoặc sai boolean bị từ chối. Không đổi src production, web runtime, template/IAM hoặc thêm dependency.
 
@@ -15,7 +36,7 @@ Demo dùng evaluator thuần thật cho chín loại trên inventory/metrics t�
 | Independent local QA | Subagent chạy độc lập **53/53 demo test và7/7 nhóm probe PASS**, review diff cùng visual không còn issue actionable được xác định. JSON/probe pin cùng demo hash cuối; đây không đại diện Hải QA |
 | Visual/a11y | Bốn viewport **320/390/768/1440px**, năm trang/dialog, keyboard/Escape/focus và nội dung dài/HTML an toàn. Integration có12 ảnh overview/identity/evidence đã cuộn. Tác giả và reviewer đã xem overview1440 + S3 evidence scrolled390; không tràn ngang/cắt nội dung |
 | Static | JS syntax PASS; AST8 Python demo/test đổi hoặc mới; cfn-lint **exit0** trên cả3 SAM/IAM template; target-role hai bản giống byte; link Markdown và whitespace/conflict check PASS. SAM CLI không có trong môi trường nên `sam validate`/`sam build` **CHƯA CHẠY**; cfn-lint đã kiểm SAM transform cục bộ |
-| Bàn giao Hải | Người dùng chọn nhận gói để chuyển Hải. [QA-HANDOFF.md](QA-HANDOFF.md) có checklist H01–H12/lệnh chạy. **CHƯA NHẬN** kết quả hoặc chữ ký Hải; không đánh đồng với subagent review |
+| Bàn giao Hải | Người dùng chọn nhận gói để chuyển Hải. [QA-HANDOFF.md](QA-HANDOFF.md) có checklist H01–H12/lệnh chạy. Tại31/10 chưa nhận phản hồi; **01/11 người dùng báo Hải QA OK**, chưa có biên bản/log từng ca; không đánh đồng với subagent review hoặc cloud review |
 | AWS/CI/release | **CHƯA CHẠY** AWS E2E, tick EventBridge/retry/recovery thật, deploy/publish/CI. SES tắt, B1–B4 còn mở; không tạo artifact deploy hoặc bật harness cloud |
 
 Artifact ignored tại `.preflight/duc-plan-09/`: `baseline.json`, `backend.txt`/`backend.json`, `static.json`, `validation.json`, tám log browser, acceptance JSON/ảnh và `independent-qa/`. `qa-handoff.zip` chứa snapshot source đã chọn, manifest SHA-256, checklist cùng evidence local để người dùng chuyển Hải; không có .env, config triển khai, Git metadata hay credentials. Gói QA này không phải ZIP Lambda được pin cho Plan 10. Source/hash và commit cuối được ghi trong manifest ZIP.

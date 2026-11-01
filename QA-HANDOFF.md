@@ -1,6 +1,6 @@
 # Bàn giao QA local Task 7–9 cho Hải
 
-Gói này phục vụ kiểm tra độc lập bản tích hợp Plan 09. Người dùng nhận và chuyển cho Hải theo yêu cầu ngày 31/10/2026. Đây là checklist kỹ thuật và evidence local; Task 13 báo cáo/slide vẫn hoãn. **Xác nhận trực tiếp của Hải: CHƯA NHẬN.** Review bằng subagent được ghi riêng, không thay chữ ký của Hải.
+Gói này phục vụ kiểm tra độc lập bản tích hợp Plan 09. Người dùng nhận và chuyển cho Hải theo yêu cầu ngày 31/10/2026. Đây là checklist kỹ thuật và evidence local; Task 13 báo cáo/slide vẫn hoãn. **Ngày 01/11/2026, người dùng xác nhận: “Hải oke mọi thứ rồi” và yêu cầu tiếp tục Plan 10.** Ghi nhận QA local của Hải đã được người dùng báo OK; chưa có biên bản/log riêng từng ca. Xác nhận này không phải review change set hoặc nghiệm thu AWS. ZIP Plan 09 đã bàn giao được giữ nguyên theo snapshot/hash cũ.
 
 ## Phiên bản và nội dung gói
 
@@ -32,7 +32,7 @@ Các bộ UI còn lại chạy bằng cùng Python: `ui_scope_filters.py`, `ui_f
 
 ## Checklist Hải kiểm tra và ghi kết quả
 
-Điền PASS/FAIL/CHƯA CHẠY cùng revision, môi trường và evidence quan sát được. Bảng chưa điền dưới đây không phải PASS.
+Checklist dưới đây là biểu mẫu gốc đã gửi ngày 31/10. QA tổng thể đã được người dùng báo OK ngày 01/11; cột từng ca vẫn giữ CHƯA CHẠY của biểu mẫu vì chưa có bảng kết quả chi tiết từ Hải, không tự tạo biên bản thay Hải.
 
 | Ca | Thao tác và kết quả cần quan sát | Kết quả của Hải |
 |---|---|---|

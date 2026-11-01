@@ -87,7 +87,7 @@ Nguồn hiện hành: [src/app.py](src/app.py) và [RULES.md](RULES.md). Metadat
 
 ## 5. Thứ tự các lượt thực hiện
 
-**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 09; không tự chuyển sang Plan 10 khi Plan 09 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
+**Mỗi lượt chọn một plan, hoàn tất thì báo cáo tóm tắt và dừng; phải có yêu cầu mới trực tiếp từ người dùng mới thực hiện plan tiếp theo.** Người dùng đã yêu cầu Plan 10 sau khi báo Hải QA OK ngày 01/11/2026; không tự chuyển sang Plan 11 khi Plan 10 xong. Plan 01 chỉ thay tài liệu kỹ thuật; Plan 02–03 dùng chung nhánh và chỉ phát hành khi cả hai đạt. Plan 01 không thực hiện code/cloud của các plan sau.
 
 **Quy ước commit người dùng yêu cầu ngày 30/10/2026:** sau mỗi phần quan trọng đã hoàn tất và qua kiểm tra liên quan, tạo commit theo phạm vi trước khi bàn giao; không để dồn nhiều plan chưa commit. Kiểm tra staged paths và giữ riêng thay đổi cục bộ không thuộc task. Commit là thao tác local; push/PR theo yêu cầu riêng. Các Plan 01–05 đã tích lũy được bàn giao bằng hai commit code và một commit tài liệu; xem mốc commit ở [VALIDATION.md](VALIDATION.md). Quy ước chờ yêu cầu trước plan tiếp theo giữ nguyên.
 
@@ -103,8 +103,8 @@ Tên commit mô tả hành vi/tính năng, không thêm số Plan hoặc hậu t
 | 06 | Thao tác phản hồi và metadata backend | 05 | ĐÃ TÍCH HỢP UI/backend/demo; kiểm thử local ở VALIDATION.md, chưa deploy |
 | 07 | Quản lý phản hồi ẩn, clear và phân trang | 06 | ĐÃ TÍCH HỢP UI/demo; API hiện có được kiểm chứng bằng regression local, chưa deploy |
 | 08 | History phân trang và chi tiết scan | 05 | ĐÃ TÍCH HỢP UI/demo/API detail; kiểm chứng local ở VALIDATION.md, chưa deploy |
-| 09 | Đồng bộ demo/fixture và QA tích hợp | 03–08 | ĐẠT code/local; gói QA cho Hải bàn giao qua người dùng, chờ Hải xác nhận |
-| 10 | Artifact đã pin, manifest, review và triển khai stack thử | 09 | CHƯA XÁC MINH đầu vào AWS |
+| 09 | Đồng bộ demo/fixture và QA tích hợp | 03–08 | ĐẠT code/local; người dùng báo Hải QA OK ngày 01/11/2026 |
+| 10 | Artifact đã pin, manifest, review và triển khai stack thử | 09 | CÓ artifact/hash/review local; CHƯA HOÀN TẤT AWS do thiếu phiên/account/executor/fixture đã xác minh |
 | 11 | Rule và web thật trên hai tenant | 10 | CHƯA CHẠY AWS |
 | 12 | Scheduler/retry/timeout/recovery và final-smoke | 10 | CHƯA CHẠY AWS |
 
@@ -207,3 +207,11 @@ Bằng chứng mới của Plan 01 và trạng thái B1–B4/D1 nằm ở [VALID
 - Review subagent độc lập: 53/53 demo tests, 7/7 probe contract và visual desktop/mobile đạt, không còn issue actionable trong phạm vi đã kiểm tra. Đây không phải xác nhận của Hải hoặc nghiệm thu AWS.
 - Người dùng yêu cầu nhận gói để chuyển Hải: [QA-HANDOFF.md](QA-HANDOFF.md) có checklist H01–H12, lệnh chạy và trạng thái CHƯA NHẬN xác nhận Hải. ZIP chứa source snapshot, manifest/hash, ảnh/log/evidence local đã chọn; đường dẫn bàn giao trong [VALIDATION.md](VALIDATION.md).
 - Code commit `1d3d7c2`; chưa push/deploy/AWS/CI, Task 13 vẫn hoãn. **Dừng sau Plan 09, chờ yêu cầu trực tiếp cho Plan 10.**
+
+## 16. Plan 10 — đã chuẩn bị local, chưa triển khai AWS
+
+- Người dùng ngày 01/11 báo Hải QA OK và yêu cầu tiếp tục; ghi nhận theo thông báo, không tạo biên bản từng ca hoặc dùng tên Hải ký IAM/change set.
+- Đã đóng gói artifact Linux x86_64/Python3.12 từ revision3342085; final ZIP SHA-256 `7f7ef6e4233fbd1a9603644e58e9fdfe896ef2b249031890841c3020326e9ead`, source tree SHA-256 `634b2693418ea9bc2953d62a26a517fc3960efb16e3a6042a4195b7232bba048`. Final không có fault wrapper; pinned manifest/SDK/source/CRC và archive guards đạt.
+- Review độc lập code/template/IAM33/33 test; harness gates17/17; SDK từ ZIP giải nén115/115 targeted test; cfn-lint ba template exit0. Không sửa runtime production hoặc requirements; thông số artifact/checks tại [PLAN10-READINESS.md](PLAN10-READINESS.md).
+- Kiểm tra phiên hiện tại: boto3 profiles rỗng, credential source null, AWS env/config/credentials không có, AWS CLI/SAM chưa có. Account376129867108 chỉ là lịch sử; chưa xác minh STS/stack/user/role/fixture hoặc tạo change set. Người dùng chưa rõ ai quản lý AWS và sẽ hỏi Đạt/Hải.
+- [Readiness và hướng dẫn tiếp tục](PLAN10-READINESS.md) có manifest/artifact, review, tác động/publish/rollback và đầu vào cần bổ sung. SES tắt theo kế hoạch. **Plan 10 chưa hoàn tất; chưa triển khai AWS và chưa chuyển Plan 11–12.**

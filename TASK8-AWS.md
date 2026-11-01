@@ -2,6 +2,8 @@
 
 Harness [tests/task8_aws_harness.py](tests/task8_aws_harness.py) đã được chuẩn bị cho **stack kiểm thử riêng** `cloud-resource-guardian-task8-test`, region `ap-southeast-1`. Có harness và test local không phải bằng chứng đã chạy AWS. Ngày 26/10/2026, kiểm tra boto3 tại máy phát triển trả `available_profiles=[]`, `credential_source=null`; AWS CLI/SAM không có trên `PATH`. Vì thiếu phiên AWS, các ca cloud trong tài liệu này **CHƯA CHẠY**.
 
+**Cập nhật 01/11/2026:** Plan 10 đã tạo artifact và review local, nhưng kiểm tra phiên hiện tại vẫn không có profile/credentials/CLI dùng được. Người dùng báo Hải QA OK; chưa rõ ai quản lý AWS và sẽ hỏi Đạt/Hải. Hash artifact, manifest và điều kiện nối tiếp ở [PLAN10-READINESS.md](PLAN10-READINESS.md). Stack/account/user/role/fixtures vẫn chưa được đọc live, không kết luận chúng chưa tồn tại.
+
 Phạm vi ở đây là điều phối, lưu trạng thái/history và đường phục hồi Task 8. Inventory rỗng vẫn có thể chứng minh luồng điều phối; nghiệm thu các rule trên tài nguyên thật thực hiện riêng theo [VALIDATION.md](VALIDATION.md). SES luôn tắt trên stack thử.
 
 **Các điểm chặn và điều kiện gỡ được ghi trong [VALIDATION.md](VALIDATION.md):** B1 phiên AWS/account lab; B2 stack và fixture chưa xác minh; B3 luồng AWS/artifact cuối chưa có evidence; B4 coverage cloud chưa tự động hóa đầy đủ. **D1 đã gỡ về tích hợp:** lịch sử checkout main ngày 29/10/2026 có PR #4 tại f1e6cd1 và PR #3 tại a2201f5. Merge không chứng minh deploy hoặc AWS acceptance; xem [baseline Task 7–9](DUC-TASKS.md). Thông tin credentials ngày 26/10 ở trên là snapshot, chưa được kiểm tra live lại trong Plan 01. B1–B4 không được suy ra là PASS từ test local.
