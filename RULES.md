@@ -1,10 +1,10 @@
-# Task 7 — Luật đánh giá và bằng chứng
+# Luật đánh giá và bằng chứng
 
 ## 1. Phạm vi nghiệm thu
 
 Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Đây là phạm vi backend Task 7; việc hiển thị đủ evidence và thao tác trên dashboard thuộc Task 9.
 
-Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. [Checklist Task 7–9 và hợp đồng các plan tiếp theo](DUC-TASKS.md) chốt registry first/last 30 ngày: Plan 02–03 đã có persistence và tích hợp worker/API; Plan 06 bổ sung metadata feedback lấy từ candidate. Semantics observation EBS/EIP giữ nguyên, hai mốc mới chỉ bổ sung trên finding của kết quả quét mới.
+Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. Registry first/last giữ mốc trong 30 ngày không quan sát; metadata feedback lấy từ candidate đã xác minh. Observation EBS/EIP là cơ chế riêng, hai mốc first/last chỉ bổ sung trên finding của kết quả quét mới.
 
 Báo cáo PDF định hướng sáu nhóm dịch vụ và đối chiếu dữ liệu chi phí. Chín loại trên nằm trong bốn nhóm `compute`, `storage`, `database`, `network`; chưa bao phủ mọi dịch vụ trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, hoặc dữ liệu billing/cost. Các phần này cần collector/input của Task 6 và bộ rule được chốt tiếp; không được đánh dấu hoàn tất theo toàn bộ phạm vi PDF.
 
@@ -86,14 +86,14 @@ Mỗi finding mới có `finding_id`, `type`, `resource_id`, `region`, `account_
 
 Không gán cửa sổ metric cho EBS/EIP hoặc tuổi snapshot/upload. Thời gian observation không đồng nghĩa tuổi tài nguyên; `logical_volume_gib` không phải dung lượng snapshot tính phí hoặc tiền tiết kiệm.
 
-Registry finding Plan 02–03 có helper `record_finding_observations(marker, findings, time_check)` trong [src/app.py](src/app.py). Worker gọi ngay sau collector và trước legacy suppression/feedback/cap; tạo bản sao finding với hai mốc ISO UTC, không sửa dữ liệu collector đầu vào:
+Registry finding có helper `record_finding_observations(marker, findings, time_check)` trong [src/app.py](src/app.py). Worker gọi ngay sau collector và trước legacy suppression/feedback/cap; tạo bản sao finding với hai mốc ISO UTC, không sửa dữ liệu collector đầu vào:
 
 - Key `TENANT#sub` / `OBSF#connection_version#region#finding_id`; first/last là epoch UTC, `expires = last_seen_at + 30 ngày`. Finding còn hạn giữ first, last không lùi; đúng hạn 30 ngày không quan sát thì reset dù TTL chưa dọn. Vắng finding không gia hạn TTL. Registry khác observation orphan EBS/EIP.
 - Đầu vào cần ID hợp lệ, đúng region và evaluated_at có timezone. Dedup ID lấy observation mới nhất; không sửa danh sách finding đầu vào. Trả map ID → first/last epoch; danh sách rỗng trả `{}`, phát hiện mất ownership trả `None`. Worker chỉ dừng với `is None`, không coi map rỗng là mất quyền; chuyển epoch sang ISO UTC dạng `+00:00` và gắn hai field trước tính byte cap.
 - BatchGet strong read tối đa 100 key, retry UnprocessedKeys tối đa 3 requests/batch với backoff 0.1/0.2 giây và time budget. Chưa đọc hết hoặc record/response lỗi thì không ghi từ giả định missing. Hoàn tất toàn bộ lượt đọc trước các batch ghi.
 - Mỗi transaction tối đa 98 registry Put và 2 ConditionCheck cho marker/profile: đúng scan/version/run_token, RUNNING, lease/deadline còn hạn và region vẫn thuộc profile. Mỗi record có điều kiện snapshot first/last/expires, hoặc phải chưa tồn tại; CAS conflict khi vẫn owned truyền ClientError để scan retry, không coi là mất quyền.
 - Batch trước đã commit vẫn là observation hợp lệ nếu batch sau lỗi; replay không tự gia hạn từ wall clock. Lỗi hạ tầng/mixed cancellation truyền ra; dữ liệu registry không hợp lệ bị từ chối. Không ghi HISTORY, RESULT, feedback hoặc OBS EBS/EIP từ helper này.
-- IAM chỉ thêm `dynamodb:BatchGetItem` trên bảng platform cho ScanRole/guardian-worker; không đổi GuardianReadRole, không thêm dependency. Bằng chứng local ở [VALIDATION.md](VALIDATION.md); chưa deploy hoặc nghiệm thu AWS.
+- IAM chỉ thêm `dynamodb:BatchGetItem` trên bảng platform cho ScanRole/guardian-worker; không đổi GuardianReadRole, không thêm dependency. Kiểm tra local theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử); nghiệm thu AWS thực hiện riêng theo [DEPLOYMENT.md](DEPLOYMENT.md).
 
 Khi collector dừng ở ngưỡng dự trữ 60 giây và trả PARTIAL, worker dùng budget riêng để lưu registry, chừa tối thiểu 10 giây theo context và lease/deadline cho finalization. Không còn budget persistence thì lưu TIMED_OUT/TIME_BUDGET bằng guard run_token, không công bố findings thiếu mốc; lỗi hạ tầng/CAS vẫn truyền ra để retry. Budget là kiểm tra trước request/batch, không bảo đảm mọi request AWS hoàn tất trước timeout nền tảng.
 
@@ -138,5 +138,5 @@ Key observation: `OBS#<connection_version>#<region>#<type>#<resource_id>`, trong
 - Tối đa 100 tài nguyên/loại/region, 50 finding hiển thị; tối đa 100 private candidates, ưu tiên 50 finding đang hiện. Toàn bộ result JSON UTF-8 trước persistence giới hạn 300 KiB. Khi cắt pool do số lượng/kích thước, trả `PARTIAL` + `FINDING/CANDIDATE_LIMIT`; không khẳng định quét đầy đủ.
 - `finding_count` đếm finding nhìn thấy trong pool còn lưu trước cap hiển thị 50; khi pool bị cắt đây là số đếm trong phần còn giữ, không phải tổng toàn account. `total_candidate_count` là tổng trước retention. Finding bị loại do retention cần scan mới để phục hồi.
 - Trường mới là bổ sung; finding lịch sử có thể thiếu chúng và không được tự tính lại. Reason cũ được giữ cho các trạng thái cũ. Contract helper insufficient đã đổi sang evidence dict; caller và test phải dùng hợp đồng mới.
-- Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Kết quả thực tế tại [VALIDATION.md](VALIDATION.md).
+- Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Chạy các suite liên quan theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử).
 - Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng; UI đầy đủ thuộc Task 9. Không coi thiếu collector Task 6 hoặc cloud chưa chạy là PASS.

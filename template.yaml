@@ -5,7 +5,7 @@ Metadata:
   AWSToolsMetrics:
     AWSAgentToolkit: aws-cloudformation@3
   com.aws.cloudformation.Context:
-    ref: [README.md, PREFLIGHT.md]
+    ref: [README.md, DEPLOYMENT.md]
 Parameters:
   DomainPrefix:
     Type: String

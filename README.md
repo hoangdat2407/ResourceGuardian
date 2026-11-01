@@ -1,24 +1,10 @@
 # Cloud Resource Guardian — MVP
 
-Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
+Cloud Resource Guardian giúp người dùng xem xét tài nguyên AWS có dấu hiệu ít sử dụng. Dự án gồm backend Python/boto3 chạy trên Lambda, dashboard HTML/CSS/JavaScript, hạ tầng AWS SAM và script triển khai.
 
-Phần việc Đức chỉ gồm Task 7–9 trong đợt hiện tại: xem [baseline, checklist nghiệm thu và hợp đồng các plan nhỏ](DUC-TASKS.md). Plan 02–03 đã nối registry first/last vào worker; finding mới trả `first_seen_at`/`last_seen_at` dạng ISO UTC qua kết quả hiện tại, scan và history. Lịch sử cũ không được backfill. [VALIDATION.md](VALIDATION.md) phân biệt kết quả local với bằng chứng AWS còn thiếu. Sau mỗi plan, báo cáo tóm tắt và chờ yêu cầu mới của người dùng trước plan tiếp theo.
+Phạm vi gồm chín loại tài nguyên, chi tiết evidence, hai mốc quan sát first/last, phản hồi đã xem/giữ lại/bỏ qua và lịch sử phân trang. Scheduler dùng EventBridge; worker nhận Lambda Invoke async; lỗi sau retry đi qua SQS failure destination để phục hồi.
 
-Plan 04 đã bổ sung chọn bốn nhóm dịch vụ, bộ lọc chín loại/nhóm/region/mức cảnh báo/đã xem/tìm kiếm và đủ 11 trường cấu hình hiện có của backend. Lưu kết nối rồi tải lại giữ đúng phạm vi; response findings/history của kết nối cũ không ghi đè màn hình kết nối mới.
-
-Plan 05 thêm **Xem chi tiết** ở tổng quan, findings và history, dùng chung phần hiển thị account/region/resource/rule, lý do, khuyến nghị, hai mốc quan sát và evidence đủ chín loại. Ngưỡng/cửa sổ lấy từ snapshot finding; dữ liệu cũ thiếu trường ghi **Chưa có dữ liệu**, không lấy cấu hình hiện tại để điền. Giá trị 0 và boolean false giữ đúng nghĩa. Hộp chi tiết hỗ trợ Escape, trả focus sau polling và nội dung dài trên mobile. Fixture riêng ở [tests/ui_finding_details.py](tests/ui_finding_details.py).
-
-Plan 06 thêm **Đánh dấu đã xem/Bỏ đã xem**, **Giữ lại**, và **Bỏ qua 1–30 ngày** (mặc định 7) ngay trên finding hiện tại. Chỉ cập nhật sau PUT thành công; có trạng thái đang lưu, lỗi để thử lại và bảo vệ response cũ khi polling/đổi kết nối. Đã xem vẫn hiện; giữ/bỏ qua ẩn ngay; history giữ snapshot. Backend lưu metadata type/resource_id/account_id/rule_id từ candidate đã xác minh, không nhận metadata từ trình duyệt.
-
-Plan 07 thêm khu vực **Đang giữ và bỏ qua** dưới danh sách findings, có **Tải thêm**, **Bỏ giữ**, **Hủy bỏ qua** và **Đổi hạn bỏ qua** 1–30 ngày. Cờ được cập nhật độc lập; feedback cũ thiếu nhãn vẫn quản lý bằng finding ID/region. Khi clear, chỉ báo finding đã hiện lại sau khi tải lại và thấy finding trong kết quả; nếu chưa hiện thì hướng dẫn quét mới/kiểm tra giới hạn. Trang feedback chỉ gồm đã xem vẫn giữ cursor để xem trang sau; lỗi trang sau giữ dữ liệu đã tải. Demo cũng có pagination feedback; history pagination tiếp tục thuộc Plan 08.
-
-Plan 08 bổ sung **Tải thêm lịch sử**, loại hàng trùng bằng Scan ID + region, reset cursor khi tải lại và giữ dữ liệu để thử lại nếu trang sau lỗi. **Xem** mở các region của cùng lượt quét, kể cả region nằm ngoài trang đã tải; hiển thị nguồn kích hoạt, thời gian, trạng thái, lỗi và evidence dùng chung. API chi tiết gộp snapshot HISTORY còn hạn với RESULT để lượt quét cũ không mất region khi một phần RESULT đã được thay thế. Feedback mới không sửa lịch sử. Demo hỗ trợ phân trang lịch sử và giữ kết quả trong 30 ngày thay vì giới hạn 20 hàng; đây vẫn là dữ liệu RAM cục bộ. Kiểm chứng local ở [VALIDATION.md](VALIDATION.md); chưa nghiệm thu AWS.
-
-Plan 09 đồng bộ demo đủ chín loại tài nguyên, metadata/evidence từ evaluator thật và mốc first/last trong RAM theo connection/region/finding. Kiểm tra tích hợp dùng demo HTTP thật cùng các fixture cho lỗi, dữ liệu cũ, phân trang, focus và responsive. [Gói bàn giao QA cho Hải](QA-HANDOFF.md) ghi cách chạy lại, checklist và nguồn xác nhận độc lập; kết quả local không thay thế nghiệm thu AWS.
-
-Ngày 01/11/2026, người dùng báo Hải QA OK và yêu cầu tiếp tục. [Plan 10 readiness](PLAN10-READINESS.md) đã có Lambda artifact/hash cùng review local; chưa triển khai vì máy chưa có phiên AWS dùng được và account/executor/stack thử chưa xác minh. Người dùng sẽ hỏi Đạt/Hải về cách nhóm truy cập AWS. Không suy kết quả QA local thành nghiệm thu cloud.
-
-Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
+Hướng dẫn triển khai, chạy harness và khôi phục nằm trong [DEPLOYMENT.md](DEPLOYMENT.md). Demo và test local không xác nhận phiên bản đang chạy trên AWS hoặc kết quả nghiệm thu cloud.
 
 ## 1. Thử ngay tại máy, không cần AWS
 
@@ -143,7 +129,7 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 - Quét thủ công tối thiểu 15 phút/lần. Job có deadline 15 phút; API hiển thị TIMED_OUT khi quá hạn và reconciler lưu trạng thái/history ở lượt đối soát kế tiếp khi hạ tầng hoạt động bình thường. Admission, connection version và run token ngăn job trùng/cũ ghi đè kết quả mới. Không đủ 60 giây trước STS thì worker kết thúc TIMED_OUT; hết budget trong collector tạo PARTIAL với dữ liệu hợp lệ đã có.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
-Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
+Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`; dashboard hỗ trợ đã xem, giữ lại và bỏ qua qua API `/feedback`.
 
 Phạm vi Task 7 được chốt cho chín loại trên. Báo cáo còn nêu các dịch vụ khác trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, cùng dữ liệu billing/cost; cần đầu vào collector của Task 6 và bộ rule tương ứng trước khi nghiệm thu các phần này. Hoàn thiện hiển thị/thao tác dashboard thuộc Task 9; kiểm thử local chưa chứng minh đã chạy trên AWS thật.
 
@@ -172,7 +158,7 @@ Worker giữ ứng viên bị `/feedback` che trong kết quả nội bộ, nên
 
 ## 7. Kiểm thử
 
-Xem `VALIDATION.md` để phân biệt kiểm tra đã chạy và kiểm tra AWS còn thiếu.
+Các lệnh dưới đây kiểm tra local. Điều kiện và cách chạy AWS E2E nằm trong [DEPLOYMENT.md](DEPLOYMENT.md#manual-release-gate).
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
