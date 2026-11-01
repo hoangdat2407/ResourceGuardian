@@ -2,7 +2,7 @@
 
 ## 1. Phạm vi nghiệm thu
 
-Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Đây là phạm vi backend Task 7; việc hiển thị đủ evidence và thao tác trên dashboard thuộc Task 9.
+Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Backend tạo finding và lưu kết quả; dashboard hiện có chi tiết evidence, phản hồi và lịch sử phân trang.
 
 Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. Registry first/last giữ mốc trong 30 ngày không quan sát; metadata feedback lấy từ candidate đã xác minh. Observation EBS/EIP là cơ chế riêng, hai mốc first/last chỉ bổ sung trên finding của kết quả quét mới.
 
@@ -121,7 +121,7 @@ Snapshot chỉ được kết luận không tham chiếu khi đọc đủ AMI th
 ### Tag và phản hồi nội bộ
 
 - `guardian:keep=true` (giá trị không phân biệt hoa thường) chặn finding ở các collector đang có dữ liệu tag: EC2, EBS, EIP, snapshot, RDS, NAT. ALB/NLB chưa gọi DescribeTags; S3 multipart chưa đọc tag bucket, nên không quảng bá tag suppression cho ba loại này. Giữ lại/bỏ qua nội bộ vẫn áp dụng cho mọi finding có ID.
-- `PUT /feedback` nhận `region`, `finding_id`, và subset `acknowledged`/`kept`/`ignoreUntil`. Cờ là boolean; ignore là RFC3339 UTC trong 30 ngày tới hoặc null để bỏ. API kiểm tra ownership của finding trong result/candidate/feedback thuộc tenant, region và connection hiện hành.
+- `PUT /feedback` nhận `region`, `finding_id`, và subset `acknowledged`/`kept`/`ignoreUntil`. Cờ là boolean; ignore là RFC3339 UTC kết thúc bằng `Z` trong 30 ngày tới hoặc null để bỏ, không nhận offset `+00:00`. API kiểm tra ownership của finding trong result/candidate/feedback thuộc tenant, region và connection hiện hành.
 - Metadata feedback `type`, `resource_id`, `account_id`, `rule_id` được lấy từ candidate đúng finding ID/connection/region (fallback findings của result legacy). Chỉ field string không rỗng được cập nhật; thiếu/mất candidate giữ metadata cũ, record legacy vẫn dùng được bằng finding ID/region. Không nhận metadata từ body hoặc suy từ profile/history; không sửa snapshot khi lưu feedback.
 - Đã xem vẫn hiện kèm `acknowledged`; kept/ignore còn hạn bị ẩn khỏi `/findings`. Tắt keep không tắt ignore hoặc tag; expiry xét timestamp dù TTL chưa xóa.
 - Worker giữ private candidates trước feedback để clear keep/ignore hoặc hết hạn có thể hiện lại ngay sau một lượt quét. `/findings` overlay theo trạng thái hiện hành; `/scans/{id}` và `/history` trả snapshot đã lưu, không viết lại lịch sử theo phản hồi mới. Private candidates không xuất hiện trên API/history.
@@ -139,4 +139,4 @@ Key observation: `OBS#<connection_version>#<region>#<type>#<resource_id>`, trong
 - `finding_count` đếm finding nhìn thấy trong pool còn lưu trước cap hiển thị 50; khi pool bị cắt đây là số đếm trong phần còn giữ, không phải tổng toàn account. `total_candidate_count` là tổng trước retention. Finding bị loại do retention cần scan mới để phục hồi.
 - Trường mới là bổ sung; finding lịch sử có thể thiếu chúng và không được tự tính lại. Reason cũ được giữ cho các trạng thái cũ. Contract helper insufficient đã đổi sang evidence dict; caller và test phải dùng hợp đồng mới.
 - Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Chạy các suite liên quan theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử).
-- Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng; UI đầy đủ thuộc Task 9. Không coi thiếu collector Task 6 hoặc cloud chưa chạy là PASS.
+- Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại; UI smoke/fixture kiểm tra hiển thị và thao tác dashboard. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng. Không coi thiếu collector hoặc cloud chưa chạy là PASS.

@@ -31,7 +31,18 @@ Ví dụ tạo change set trên stack thử sau khi đã xác nhận phiên AWS 
 
 Thay `CHUOI-RIENG` bằng chữ thường/số độc nhất. Executor chỉ execute change set đã được reviewer duyệt. Sau khi stack hoàn tất, xác minh cả năm Lambda API/scheduler/worker/recovery/reconciler dùng đúng hash ZIP, handler và cấu hình chuẩn; SES vẫn tắt.
 
-`publish.py --stack cloud-resource-guardian-task8-test --profile guardian-lab --region ap-southeast-1` tạo `config.json` từ Outputs và upload `index.html`, `styles.css`, `app.js`. Script chưa upload `target-role.yaml`; cần đưa [web/target-role.yaml](web/target-role.yaml) lên đúng WebBucket riêng trước khi nghiệm thu luồng tải template. Kiểm tra đủ năm object, MIME/cache/hash, config không phải demo và CloudFront invalidation hoàn tất.
+`publish.py` tạo `config.json` từ Outputs và upload `index.html`, `styles.css`, `app.js`. Script chưa upload `target-role.yaml`; đưa [web/target-role.yaml](web/target-role.yaml) lên đúng WebBucket trước khi gọi publish để invalidation bao phủ đủ năm object. Sau khi xác nhận account/stack và gate, dùng Outputs thực tế:
+
+```powershell
+$reviewStack = 'cloud-resource-guardian-task8-test'
+$webBucket = aws cloudformation describe-stacks --stack-name $reviewStack --profile guardian-lab --region ap-southeast-1 --query "Stacks[0].Outputs[?OutputKey=='WebBucket'].OutputValue | [0]" --output text
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($webBucket) -or $webBucket -eq 'None') { throw 'Khong lay duoc WebBucket cua stack da chon' }
+aws s3 cp .\web\target-role.yaml "s3://$webBucket/target-role.yaml" --content-type application/yaml --cache-control no-store --profile guardian-lab --region ap-southeast-1
+if ($LASTEXITCODE -ne 0) { throw 'Upload target-role.yaml that bai' }
+.\.venv\Scripts\python.exe publish.py --stack $reviewStack --profile guardian-lab --region ap-southeast-1
+```
+
+Kiểm tra đủ năm object, MIME/cache/hash, config không phải demo và CloudFront invalidation hoàn tất. Tạo user bằng Cognito Console trong UserPool của stack; UserPoolId không có trong Outputs hiện tại, nên lấy Physical ID của resource `UserPool` trong CloudFormation → Resources. Admin tạo tối đa 5 user nội bộ, người dùng hoàn tất bước đổi mật khẩu tạm khi đăng nhập lần đầu; không mở self-signup.
 
 Trước UPDATE, lưu template/artifact/config/assets cũ đúng phạm vi để có thể khôi phục. Không tự xóa stack, bucket hoặc dữ liệu tenant để xử lý lỗi triển khai.
 
@@ -72,7 +83,7 @@ Review ZIP vừa tạo rồi tạo gói pin local:
   --output-dir .preflight/task8-artifacts
 ```
 
-Đầu ra gồm `task8-final.zip`, `task8-faults.zip` và `artifacts.json`. Deploy đúng `task8-final.zip`; gói fault chỉ dành cho scenario thử lỗi. Harness từ chối source/template chưa commit, hash sai, ZIP chứa wrapper hoặc đường dẫn không an toàn. Source trong ZIP phải khớp byte checkout; giữ nguyên EOL khi chuẩn bị artifact.
+Đầu ra gồm `task8-final.zip`, `task8-faults.zip` và `artifacts.json`. Deploy đúng `task8-final.zip`; gói fault chỉ dành cho scenario thử lỗi. `package`/`inspect` ghi nhận trạng thái source; `run` từ chối `src/` hoặc template chưa commit. Các bước kiểm tra artifact từ chối hash sai, ZIP cuối chứa wrapper hoặc đường dẫn không an toàn. Source trong ZIP phải khớp byte checkout; giữ nguyên EOL khi chuẩn bị artifact.
 
 Tạo `.preflight/task8-environment.json` theo cấu trúc dưới; thay account/identities/role ARN, lấy hai hash từ `artifacts.json`. Các giá trị minh họa chưa dùng để chạy được:
 
@@ -142,17 +153,23 @@ Harness cố khôi phục ZIP/handler/môi trường chuẩn trong `finally`; ti
 
 [tests/test_aws_e2e.py](tests/test_aws_e2e.py) là suite khác harness điều phối. Chuẩn bị năm biến `CRG_AWS_E2E_API_URL`, `CRG_AWS_E2E_ACCESS_TOKEN`, `CRG_AWS_E2E_SECOND_ACCESS_TOKEN`, `CRG_AWS_E2E_MANIFEST`, `CRG_AWS_E2E_EVIDENCE`; đọc schema/side effect trong test trước khi bật. Suite ghi kết nối/cấu hình và tạo scan thật.
 
+Manifest rule E2E có đúng năm key `role_arn`, `regions`, `settings`, `required_findings`, `optional_findings`; cấu trúc từng finding được kiểm tra trong `AwsEndToEnd._validate_manifest()` của test. Không tái sử dụng manifest `task8-environment.json` của harness điều phối vì hai schema khác nhau.
+
+Suite luôn `PUT /connection`, vì vậy tạo connection version mới và bắt đầu lại observation EBS/EIP. Nó kiểm tra scan/history/isolation và finding theo type/region/resource ID cùng `allowed_levels` của manifest; không tự xác minh toàn bộ evidence hoặc buộc EBS/EIP đã thành REVIEW. Sau suite, giữ nguyên kết nối và quét tiếp qua UI/API để lấy bằng chứng đủ cửa sổ thật; chạy lại suite sẽ reset cửa sổ. Với harness điều phối, `reconnect` cũng đổi version; hoàn tất ca này trước khi bắt đầu đo cửa sổ hoặc đo lại sau đó.
+
 ```powershell
 $env:CRG_AWS_E2E = '1'
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_aws_e2e.py' -v
 ```
+
+Kết thúc phiên AWS E2E, đặt `$env:CRG_AWS_E2E = '0'` trước khi chạy discover local. Phần evidence còn lại và các thao tác web dưới đây cần kiểm tra riêng; không suy ra chúng đã được suite tự động bao phủ.
 
 Kiểm tra web với evidence đủ chín loại, first/last, đã xem, giữ/bỏ giữ, bỏ qua/bỏ ignore, refresh/scan tiếp và history. Feedback mới không sửa snapshot lịch sử; dữ liệu thiếu không thành zero. Chạy AWS E2E có chủ đích, không bật chỉ để hoàn tất suite local.
 
 ## Recovery runbook
 
 - Đọc Outputs/physical resource ID thực tế, trạng thái từng region, scan ID, connection version và log/request ID. Phân biệt retry đang chạy, `PARTIAL`, `FAILED` và `TIMED_OUT`; queue rỗng hoặc alarm OK không chứng minh hệ thống khỏe.
-- Worker timeout 300 giây, run lease 330 giây, deadline job 900 giây; async retry tối đa 2, event age 600 giây. EventBridge gọi scheduler mỗi giờ; reconciler đối soát mỗi 5 phút. Mọi terminal write giữ tenant/connection/scan/run_token và RESULT + HISTORY nguyên tử.
+- Worker timeout 300 giây, run lease 330 giây, deadline job 900 giây; async retry tối đa 2, event age 600 giây. EventBridge gọi scheduler mỗi giờ; reconciler đối soát mỗi 5 phút. Terminal write ràng buộc tenant/connection/scan; worker thêm guard `run_token`, recovery/reconciler chỉ ghi terminal khi không còn lease hoạt động. RESULT + HISTORY được ghi nguyên tử.
 - `DeadLetters` là OnFailure destination có Recovery Lambda consumer; message không xử lý được sẽ redrive sang `OperationsDeadLetters`. Recovery/reconciler chỉ sửa trạng thái platform, không đọc hay sửa tài nguyên account đích.
 - Kiểm tra Errors/Throttles, async drops/destination failures, EventBridge delivery và SQS backlog/age cùng log. SQS metric xấp xỉ; DynamoDB TTL xóa bất đồng bộ. Không xóa marker, sửa lease trực tiếp, purge queue hoặc replay hàng loạt để làm hết lỗi.
 - Sau khi sửa nguyên nhân, scan mới qua UI/API vẫn tuân thủ cooldown 15 phút. Với fault test, khôi phục đúng ZIP/handler/environment của stack thử, xác minh CodeSha256 và final-smoke trước scenario tiếp theo.
