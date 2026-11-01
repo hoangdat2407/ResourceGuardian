@@ -1,11 +1,31 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let cfg,profile,results=[],historyRows=[],token=sessionStorage.getItem('crg-token'),pollTimer,pollCount=0,loadingResults=true,resultsError=false,scanPending=false;
+let cfg,profile,results=[],historyRows=[],token=sessionStorage.getItem('crg-token'),pollTimer,pollCount=0,loadingResults=true,resultsError=false,scanPending=false,scopeGeneration=0,detailFocus=null;
+let findingsRevision=0;
+let historyCursor=null,historyLoading=false,historyError='',historyRequest=0,historyDetailRequest=0,historySelection=null,historyDetailRows=[],historyDetailLoading=false,historyDetailError='';
+const feedbackState=new Map(),feedbackDays=new Map();
+let feedbackRows=[],feedbackCursor=null,feedbackLoaded=false,feedbackLoading=false,feedbackError='',feedbackRequest=0,feedbackRevision=0;
+const managedDays=new Map();
 const pages={overview:['Tổng quan tài nguyên','Tập trung vào tài nguyên cần bạn kiểm tra.'],findings:['Tài nguyên cần kiểm tra','Mỗi cảnh báo đi kèm lý do và bằng chứng.'],history:['Lịch sử quét','Theo dõi kết quả theo thời gian trong từng region.'],connection:['Kết nối tài khoản AWS','Cấp quyền đọc bằng IAM Role và ExternalId riêng.'],settings:['Cấu hình & cảnh báo','Điều chỉnh ngưỡng phát hiện và lịch quét.']};
 const regions=['ap-southeast-1','ap-southeast-2','ap-northeast-1','us-east-1','us-west-2','eu-west-1'];
-const fields={cpu_percent:['Ngưỡng CPU (%)',1,50,1],network_mib_hour:['Ngưỡng network (MiB/giờ)',.1,100,.1],window_hours:['Cửa sổ EC2 (giờ)',24,168,1],orphan_hours:['Theo dõi EBS / EIP (giờ)',1,168,1],snapshot_days:['Tuổi snapshot (ngày)',7,365,1],interval_hours:['Khoảng quét (giờ)',1,24,1]};
-const stateLabels={REVIEW:'Cần kiểm tra',OBSERVING:'Đang quan sát',INSUFFICIENT_DATA:'Thiếu dữ liệu',QUEUED:'Đang chờ',RUNNING:'Đang quét',SUCCEEDED:'Hoàn tất',PARTIAL:'Chưa đầy đủ',FAILED:'Lỗi',TIMED_OUT:'Quá hạn'};
+const serviceGroups={compute:{label:'Tính toán',types:['EC2']},storage:{label:'Lưu trữ và sao lưu',types:['EBS','SNAPSHOT','S3_MULTIPART']},database:{label:'Cơ sở dữ liệu',types:['RDS']},network:{label:'Mạng',types:['EIP','NAT_GATEWAY','ALB','NLB']}};
+const resourceGroups=Object.fromEntries(Object.entries(serviceGroups).flatMap(([group,value])=>value.types.map(type=>[type,group])));
+const fields={cpu_percent:['Ngưỡng CPU EC2 (%)',1,50,'any'],network_mib_hour:['Ngưỡng network EC2 (MiB/giờ)',.1,100,'any'],window_hours:['Cửa sổ metrics (giờ)',24,168,1],orphan_hours:['Theo dõi EBS / EIP (giờ)',1,168,1],snapshot_days:['Tuổi snapshot (ngày)',7,365,1],interval_hours:['Khoảng quét (giờ)',1,24,1],rds_cpu_percent:['Ngưỡng CPU RDS (%)',1,50,'any'],rds_connections:['Ngưỡng kết nối RDS',1,1000,1],nat_mib_hour:['Ngưỡng NAT (MiB/giờ)',.1,10000,'any'],alb_requests_hour:['Ngưỡng ALB (request/giờ)',1,1000000,1],nlb_new_flows_hour:['Ngưỡng NLB (flow mới/giờ)',1,1000000,1]};
+const stateLabels={KEPT:'Đang giữ',REVIEW:'Cần kiểm tra',OBSERVING:'Đang quan sát',INSUFFICIENT_DATA:'Thiếu dữ liệu',QUEUED:'Đang chờ',RUNNING:'Đang quét',SUCCEEDED:'Hoàn tất',PARTIAL:'Chưa đầy đủ',FAILED:'Lỗi',TIMED_OUT:'Quá hạn'};
 const reasons={'Low CPU and network; confirm intended workload':'CPU và network thấp; kiểm tra mục đích sử dụng.','Missing CloudWatch metrics; not classified as idle':'Thiếu metrics CloudWatch; chưa thể kết luận ít hoạt động.','Instance younger than observation window':'Instance mới hơn cửa sổ quan sát.','Unattached volume; validate data retention':'Volume chưa gắn vào instance; kiểm tra nhu cầu giữ dữ liệu.','Unassociated public IPv4; may be intentionally reserved':'Elastic IP chưa liên kết; có thể đang được giữ có chủ đích.','Old snapshot not referenced by listed AMIs; backup purpose requires review':'Snapshot cũ, không được các AMI đã đọc tham chiếu; kiểm tra mục đích sao lưu.'};
+const evidenceFields={
+ EC2:[['cpu_p95','CPU p95','%'],['network_mib_hour','Network trung bình','MiB/giờ'],['launch_time','Thời điểm khởi chạy','time']],
+ EBS:[['size_gib','Dung lượng volume','GiB'],['observed_hours','Theo dõi chưa gắn','giờ'],['threshold_hours','Ngưỡng theo dõi','giờ']],
+ EIP:[['observed_hours','Theo dõi chưa liên kết','giờ'],['threshold_hours','Ngưỡng theo dõi','giờ']],
+ SNAPSHOT:[['age_days','Tuổi snapshot','ngày'],['snapshot_days','Ngưỡng tuổi snapshot','ngày'],['volume_id','Volume nguồn'],['logical_volume_gib','Dung lượng logic của volume','GiB'],['relationships_complete','Đã đọc đầy đủ quan hệ AMI'],['snapshot_started_at','Thời điểm tạo snapshot','time'],['relationship_scope','Phạm vi đối chiếu AMI']],
+ S3_MULTIPART:[['bucket','Bucket'],['key','Object key'],['upload_id','Upload ID'],['age_days','Tuổi upload','ngày'],['threshold_days','Ngưỡng tuổi upload','ngày'],['initiated_at','Thời điểm bắt đầu upload','time']],
+ RDS:[['cpu_p95','CPU p95','%'],['connections_p95','Kết nối p95','kết nối'],['engine','Engine'],['instance_class','Instance class'],['created_at','Thời điểm tạo','time']],
+ NAT_GATEWAY:[['nat_mib_hour','Lưu lượng NAT trung bình','MiB/giờ'],['vpc_id','VPC ID'],['subnet_id','Subnet ID'],['created_at','Thời điểm tạo','time']],
+ ALB:[['requests_hour','Request trung bình','request/giờ'],['scheme','Scheme'],['created_at','Thời điểm tạo','time']],
+ NLB:[['new_flows_hour','Flow mới trung bình','flow mới/giờ'],['scheme','Scheme'],['created_at','Thời điểm tạo','time']]
+};
+const thresholdFields={EC2:['cpu_percent','network_mib_hour'],EBS:['orphan_hours'],EIP:['orphan_hours'],SNAPSHOT:['snapshot_days'],S3_MULTIPART:['multipart_days'],RDS:['rds_cpu_percent','rds_connections'],NAT_GATEWAY:['nat_mib_hour'],ALB:['alb_requests_hour'],NLB:['nlb_new_flows_hour']};
+const thresholdLabels={cpu_percent:['CPU EC2','%'],network_mib_hour:['Network EC2','MiB/giờ'],orphan_hours:['Theo dõi không sử dụng','giờ'],snapshot_days:['Tuổi snapshot','ngày'],multipart_days:['Tuổi multipart upload (lớn hơn)','ngày'],rds_cpu_percent:['CPU RDS','%'],rds_connections:['Kết nối RDS','kết nối'],nat_mib_hour:['Lưu lượng NAT','MiB/giờ'],alb_requests_hour:['Request ALB','request/giờ'],nlb_new_flows_hour:['Flow mới NLB','flow mới/giờ']};
 function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
 function status(text,error=false){$('status').hidden=!text;$('status').textContent=text;$('status').className=error?'error':'';}
 function badge(s){return node('span',stateLabels[s]||s,'badge '+(s==='REVIEW'?'review':s==='FAILED'||s==='PARTIAL'||s==='TIMED_OUT'?'error':s==='SUCCEEDED'?'good':'observing'));}
@@ -13,19 +33,191 @@ function date(t){return t?new Date(t*1000).toLocaleString('vi-VN'):'Chưa có th
 function b64(b){return btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function random(){const b=new Uint8Array(32);crypto.getRandomValues(b);return b64(b);}
 async function login(){if(!cfg)return;if(cfg.demo){token='demo-local-only';sessionStorage.setItem('crg-token',token);await run(init);return;}const verifier=random(),state=random();sessionStorage.setItem('crg-verifier',verifier);sessionStorage.setItem('crg-state',state);const challenge=b64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));location.assign(cfg.auth+'/oauth2/authorize?'+new URLSearchParams({client_id:cfg.clientId,response_type:'code',scope:'openid email aws.cognito.signin.user.admin',redirect_uri:cfg.redirect,state,code_challenge:challenge,code_challenge_method:'S256'}));}
-function logout(){clearTimeout(pollTimer);sessionStorage.removeItem('crg-token');token=null;if(cfg.demo){location.reload();return;}location.assign(cfg.auth+'/logout?'+new URLSearchParams({client_id:cfg.clientId,logout_uri:cfg.redirect}));}
-async function api(path,method='GET',data){const r=await fetch(cfg.api+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(data!==undefined?{body:JSON.stringify(data)}:{})});let v;try{v=await r.json();}catch{throw Error('Máy chủ trả phản hồi không hợp lệ.');}if(r.status===401){clearTimeout(pollTimer);token=null;sessionStorage.removeItem('crg-token');$('app').hidden=true;$('welcome').hidden=false;$('login').textContent='Đăng nhập';$('login').onclick=login;}if(!r.ok)throw Error(friendlyError(v.error||v.message||'HTTP '+r.status));return v;}
+function logout(){closeFindingDetail();clearTimeout(pollTimer);sessionStorage.removeItem('crg-token');token=null;if(cfg.demo){location.reload();return;}location.assign(cfg.auth+'/logout?'+new URLSearchParams({client_id:cfg.clientId,logout_uri:cfg.redirect}));}
+async function api(path,method='GET',data){const r=await fetch(cfg.api+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},...(data!==undefined?{body:JSON.stringify(data)}:{})});let v;try{v=await r.json();}catch{throw Error('Máy chủ trả phản hồi không hợp lệ.');}if(r.status===401){closeFindingDetail();clearTimeout(pollTimer);token=null;sessionStorage.removeItem('crg-token');$('app').hidden=true;$('welcome').hidden=false;$('login').textContent='Đăng nhập';$('login').onclick=login;}if(!r.ok)throw Error(friendlyError(v.error||v.message||'HTTP '+r.status));return v;}
 async function run(fn,button){if(button)button.disabled=true;try{await fn();}catch(e){status(friendlyError(e.message),true);}finally{if(button){const feedback=$(button.id+'-feedback');if(feedback){feedback.hidden=$('status').hidden;feedback.textContent=$('status').textContent;feedback.className='inline-feedback '+$('status').className;}}if(button)button.disabled=button.dataset.saved==='true';if(button===$('scan')&&profile)render();}}
-function showPage(page){if(!profile)return;if(!pages[page])page='overview';for(const key of Object.keys(pages))$('page-'+key).hidden=key!==page;document.querySelectorAll('nav button').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});$('page-title').textContent=pages[page][0];$('page-subtitle').textContent=pages[page][1];$('breadcrumb').textContent=document.querySelector('[data-page="'+page+'"]').textContent.replace(/[\d—]+$/,'').trim();document.title=pages[page][0]+' | Cloud Guardian';if(page==='history')run(loadHistory);}
-function evidence(f){const v=f.evidence||{},lines=[];if(v.cpu_p95!==undefined)lines.push('CPU p95: '+v.cpu_p95+'%');if(v.network_mib_hour!==undefined)lines.push('Network: '+v.network_mib_hour+' MiB/giờ');if(v.coverage!==undefined)lines.push('Độ phủ: '+Math.round(v.coverage*100)+'%');if(v.observed_hours!==undefined)lines.push('Theo dõi: '+v.observed_hours+' giờ');if(v.size_gib!==undefined)lines.push('Dung lượng: '+v.size_gib+' GiB');if(v.age_days!==undefined)lines.push('Tuổi: '+v.age_days+' ngày');if(v.logical_volume_gib!==undefined)lines.push('Dung lượng logic: '+v.logical_volume_gib+' GiB');if(v.volume_id)lines.push('Volume: '+v.volume_id);return lines.join(' · ')||'Xem lý do cảnh báo';}
+function showPage(page){if(!profile)return;closeFindingDetail();if(!pages[page])page='overview';for(const key of Object.keys(pages))$('page-'+key).hidden=key!==page;document.querySelectorAll('nav button').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});$('page-title').textContent=pages[page][0];$('page-subtitle').textContent=pages[page][1];$('breadcrumb').textContent=document.querySelector('[data-page="'+page+'"]').textContent.replace(/[\d—]+$/,'').trim();document.title=pages[page][0]+' | Cloud Guardian';if(page==='history')run(loadHistory);if(page==='findings'&&!feedbackLoaded&&!feedbackLoading)loadFeedback();}
+function detailValue(value,unit){
+ if(value===undefined||value===null||value==='')return 'Chưa có dữ liệu';
+ if(unit==='time'){
+  if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)||!Number.isFinite(Date.parse(value)))return 'Chưa có dữ liệu';
+  return new Date(value).toISOString().replace('T',' ').replace(/\.000Z$/,' UTC').replace(/Z$/,' UTC');
+ }
+ if(typeof value==='number'&&!Number.isFinite(value))return 'Chưa có dữ liệu';
+ if(unit==='coverage')return typeof value==='number'?Number((value*100).toFixed(1))+'%':'Chưa có dữ liệu';
+ if(typeof value==='boolean')return value?'Có':'Không';
+ if(Array.isArray(value))return value.length?value.map(item=>detailValue(item)).join(' · '):'Không ghi nhận';
+ if(typeof value==='object')return Object.keys(value).length?Object.entries(value).map(([key,item])=>key+': '+detailValue(item)).join(' · '):'Không ghi nhận';
+ return String(value)+(unit?' '+unit:'');
+}
+function detailSection(container,title,rows){
+ const section=node('section',undefined,'finding-detail-section'),list=node('dl',undefined,'finding-detail-grid');section.append(node('h3',title));
+ for(const [key,label,value,unit] of rows){const item=node('div');item.dataset.field=key;item.append(node('dt',label),node('dd',detailValue(value,unit)));list.append(item);}
+ section.append(list);container.append(section);return section;
+}
+function closeFindingDetail(){detailFocus=null;if($('finding-dialog').open)$('finding-dialog').close();$('finding-detail-content').replaceChildren();}
+function restoreFindingFocus(){
+ const previous=detailFocus;detailFocus=null;if(!previous||previous.element?.isConnected||$('app').hidden)return;
+ const container=$(previous.container),replacement=container&&[...container.querySelectorAll('.finding-open')].find(button=>button.dataset.findingId===previous.id&&button.dataset.region===previous.region&&button.dataset.resourceId===previous.resource);
+ const fallback=previous.container==='findings-list'?$('search'):previous.container==='history-detail'?$('refresh-history'):$('refresh');
+ (replacement||fallback)?.focus();
+}
+function openFindingDetail(f,history=false,opener=document.activeElement){
+ detailFocus={element:opener,container:opener.closest('[id]')?.id,id:String(f.finding_id??''),region:String(f.region??''),resource:String(f.resource_id??'')};
+ const v=f.evidence&&typeof f.evidence==='object'?f.evidence:{},content=$('finding-detail-content');content.replaceChildren();
+ $('finding-detail-context').textContent=history?'Snapshot lịch sử đã lưu. Phản hồi và cấu hình hiện tại không thay đổi bằng chứng này.':'Bằng chứng đã lưu của finding tại lần đánh giá này. Kiểm tra mục đích sử dụng trước khi xử lý tài nguyên.';
+ detailSection(content,'Thông tin finding',[
+  ['type','Loại tài nguyên',f.type],['resource_id','Resource ID',f.resource_id],['account_id','AWS account',f.account_id??v.account_id],['region','Region',f.region??v.region],['finding_id','Finding ID',f.finding_id],['rule_id','Rule',f.rule_id],['level','Mức cảnh báo',stateLabels[f.level]||f.level],['reason','Lý do',reasons[f.reason]||f.reason],['recommendation','Khuyến nghị',f.recommendation]
+ ]);
+ const times=detailSection(content,'Mốc quan sát finding',[
+  ['first_seen_at','Quan sát lần đầu',f.first_seen_at,'time'],['last_seen_at','Quan sát gần nhất',f.last_seen_at,'time'],['evaluated_at','Thời điểm đánh giá',f.evaluated_at??v.evaluated_at,'time']
+ ]);
+ times.append(node('p','Mốc first/last ghi nhận các lần ứng dụng quan sát finding; không chứng minh tài nguyên ít hoạt động liên tục. Lịch sử cũ thiếu mốc chưa được ghi nhận, không suy từ tuổi tài nguyên hoặc cửa sổ metrics.','footnote'));
+ detailSection(content,'Evidence '+(f.type||''),(evidenceFields[f.type]||[]).map(([key,label,unit])=>[key,label,v[key],unit]));
+ const thresholds=thresholdFields[f.type]||Object.keys(v.thresholds||{}),legacy={orphan_hours:v.threshold_hours,snapshot_days:v.snapshot_days,multipart_days:v.threshold_days};
+ detailSection(content,'Ngưỡng tại lần đánh giá',thresholds.map(key=>['thresholds.'+key,thresholdLabels[key]?.[0]||key,v.thresholds?.[key]??legacy[key],thresholdLabels[key]?.[1]]));
+ if(['EC2','RDS','NAT_GATEWAY','ALB','NLB'].includes(f.type)){
+  detailSection(content,'Cửa sổ và độ phủ metrics',[
+   ['window_hours','Cửa sổ metrics',v.window_hours,'giờ'],['observation_start','Bắt đầu cửa sổ',v.observation_start,'time'],['observation_end','Kết thúc cửa sổ',v.observation_end,'time'],['metric_period_seconds','Chu kỳ mẫu',v.metric_period_seconds,'giây'],['coverage','Độ phủ mẫu hợp lệ',v.coverage,'coverage'],['required_samples','Số mẫu tối thiểu mỗi metric',v.required_samples],['sample_counts','Số mẫu hợp lệ',v.sample_counts],['received_sample_counts','Số mẫu nhận được',v.received_sample_counts],['invalid_sample_counts','Số mẫu không hợp lệ',v.invalid_sample_counts],['metric_units','Đơn vị metric đầu vào',v.metric_units],['metric_statistics','Thống kê mỗi chu kỳ',v.metric_statistics]
+  ]).append(node('p','Rule yêu cầu ít nhất 80% số mẫu theo giờ cho từng metric. Thiếu hoặc sai dữ liệu không được xem là giá trị 0.','footnote'));
+ }else content.append(node('p',evidenceFields[f.type]?'Rule này dùng thời gian hoặc quan hệ tài nguyên; không áp dụng độ phủ CloudWatch.':'Chưa có dữ liệu về cửa sổ và độ phủ của loại tài nguyên này.','footnote'));
+ const quality=['EC2','RDS','NAT_GATEWAY','ALB','NLB'].includes(f.type)?[['missing_metrics','Metric thiếu mẫu',v.missing_metrics],['invalid_metrics','Metric không hợp lệ',v.invalid_metrics],['calculation_errors','Lỗi tính toán',v.calculation_errors],['data_issues','Vấn đề dữ liệu',v.data_issues]]:v.data_issues!==undefined?[['data_issues','Vấn đề dữ liệu',v.data_issues]]:[];
+ if(quality.length)detailSection(content,'Chất lượng dữ liệu',quality);
+ if(f.type==='SNAPSHOT')content.append(node('p','Dung lượng logic của volume không phải dung lượng snapshot được tính phí. Không được AMI đã đọc tham chiếu chưa đủ để quyết định xóa bản sao lưu.','footnote'));
+ if(f.type==='S3_MULTIPART')content.append(node('p','Rule đánh dấu upload có tuổi lớn hơn 7 ngày. Upload ID phân biệt các lượt upload cùng bucket và object key.','footnote'));
+ $('finding-dialog').showModal();
+}
+function evidence(f){const v=f.evidence||{},lines=(evidenceFields[f.type]||[]).filter(([key,,unit])=>unit!=='time'&&v[key]!==undefined&&v[key]!==null).slice(0,3).map(([key,label,unit])=>label+': '+detailValue(v[key],unit));if(v.coverage!==undefined&&v.coverage!==null)lines.push('Độ phủ: '+detailValue(v.coverage,'coverage'));return lines.join(' · ')||'Chưa có dữ liệu';}
 function findings(){return results.flatMap(r=>(r.findings||[]).map(f=>({...f,region:r.region})));}
-function renderTable(container,items,allowIgnore=true){container.replaceChildren();if(!items.length){container.append(node('div','Không có tài nguyên phù hợp với danh sách này.','empty'));return;}const wrap=node('div',undefined,'table-wrap'),table=node('table'),thead=node('thead'),tr=node('tr');for(const h of ['Tài nguyên','Trạng thái & lý do','Bằng chứng',...(allowIgnore?['Thao tác']:[])]){const th=node('th',h);th.scope='col';tr.append(th);};thead.append(tr);table.append(thead);const body=node('tbody');for(const f of items){const row=node('tr'),resource=node('td');resource.append(node('div',f.type,'resource-type'),node('code',f.resource_id),node('small',f.region));const detail=node('td');detail.append(badge(f.level),node('p',reasons[f.reason]||f.reason));row.append(resource,detail,node('td',evidence(f),'evidence'));if(allowIgnore){const td=node('td'),b=node('button','Bỏ qua 7 ngày','button secondary');b.onclick=()=>run(async()=>{const until=new Date(Date.now()+7*86400000).toISOString();await api('/feedback','PUT',{region:f.region,finding_id:f.finding_id,ignoreUntil:until});b.textContent='Đã ghi nhận';b.dataset.saved='true';await refresh();status('Đã bỏ qua 7 ngày. Cảnh báo đã được ẩn.');},b);td.append(b);row.append(td);}[...row.children].forEach((td,i)=>td.dataset.label=['Tài nguyên','Trạng thái & lý do','Bằng chứng','Thao tác'][i]);body.append(row);}table.append(body);wrap.append(table);container.append(wrap);}
+function feedbackKey(f){return JSON.stringify([f.region,f.finding_id]);}
+function feedbackFocus(container){
+ const active=document.activeElement,group=active.closest('.finding-feedback');
+ if(!group||!container.contains(active))return null;
+ return {key:group.dataset.feedbackKey,selector:['feedback-ack','feedback-keep','feedback-ignore','feedback-days','feedback-unkeep','feedback-unignore','feedback-manage-days','feedback-extend','feedback-status'].find(name=>active.classList.contains(name))||'feedback-status'};
+}
+function restoreFeedbackFocus(container,previous){
+ if(!previous||$('app').hidden)return;
+ const group=[...container.querySelectorAll('.finding-feedback')].find(item=>item.dataset.feedbackKey===previous.key),control=group?.querySelector('.'+previous.selector),target=control&&!control.disabled?control:group?.querySelector('.feedback-status');
+ (target||(container.id==='feedback-list'?$('refresh-feedback'):container.id==='findings-list'?$('search'):$('refresh')))?.focus();
+}
+function feedbackHidden(record){return record.expires<=Date.now()/1000?false:!!record.kept||record.ignore_until>Date.now()/1000;}
+function feedbackSaveMessage(record,patch,confirmed=false){
+ if('acknowledged' in patch)return record.acknowledged?'Đã đánh dấu đã xem.':'Đã bỏ trạng thái đã xem.';
+ if(patch.kept===true)return 'Đã giữ lại. Cảnh báo đã được ẩn.';
+ if(patch.ignoreUntil)return 'Đã bỏ qua '+Math.round((Date.parse(patch.ignoreUntil)-Date.now())/86400000)+' ngày. Cảnh báo đã được ẩn.';
+ const cleared=patch.kept===false?'Đã bỏ giữ. ':'Đã hủy bỏ qua. ';
+ if(record.kept)return cleared+'Finding vẫn đang được giữ lại.';
+ if(record.ignore_until>Date.now()/1000)return cleared+'Finding vẫn đang được bỏ qua đến '+date(record.ignore_until)+'.';
+ if(!confirmed)return cleared+'Đang tải lại kết quả để kiểm tra.';
+ return cleared+(findings().some(item=>feedbackKey(item)===feedbackKey(record))?'Finding đã hiện lại trong kết quả hiện tại.':'Finding chưa hiện trong kết quả hiện tại; cần quét mới để kiểm tra lại. Candidate có thể không còn lưu hoặc vượt giới hạn hiển thị.');
+}
+async function saveFindingFeedback(f,patch,generation,managed=false){
+ const key=feedbackKey(f);if(generation!==scopeGeneration||feedbackState.get(key)?.pending)return;
+ const operation={pending:true,message:'Đang lưu…',error:false};feedbackState.set(key,operation);render();
+ let saved=false;
+ try{
+  const record=await api('/feedback','PUT',{region:f.region,finding_id:f.finding_id,...patch});
+  if(generation!==scopeGeneration||!token)return;
+  saved=true;findingsRevision++;feedbackRevision++;feedbackRequest++;feedbackLoading=false;feedbackError='';
+  const index=feedbackRows.findIndex(item=>feedbackKey(item)===key);if(index<0)feedbackRows.unshift(record);else feedbackRows[index]=record;
+  results=results.map(row=>{
+   if(row.region!==f.region)return row;
+   const items=(row.findings||[]).flatMap(item=>item.finding_id!==f.finding_id?[item]:record.kept||record.ignore_until>Date.now()/1000?[]:[{...item,acknowledged:record.acknowledged===true}]);
+   return {...row,findings:items};
+  });
+  operation.pending=false;operation.message=feedbackSaveMessage(record,patch);
+  render();status(operation.message);
+  const confirmed=await refresh();
+  if(generation!==scopeGeneration||!token||feedbackState.get(key)!==operation)return;
+  operation.message=feedbackSaveMessage(record,patch,confirmed===true&&!resultsError);renderFeedback();status(operation.message);
+  if(!feedbackLoaded&&!$('page-findings').hidden)loadFeedback();
+ }catch(error){
+  if(generation!==scopeGeneration||!token||feedbackState.get(key)!==operation)return;
+  operation.pending=false;operation.error=true;operation.message=saved?'Phản hồi đã lưu, nhưng chưa tải được kết quả mới. Chọn Tải lại kết quả.':'Chưa lưu được phản hồi. '+friendlyError(error.message)+' Chọn thao tác để thử lại.';
+  render();status(operation.message,true);
+ }
+}
+async function loadFeedback(more=false){
+ if(more&&(feedbackLoading||!feedbackCursor))return;
+ const generation=scopeGeneration,revision=feedbackRevision,request=++feedbackRequest,cursor=more?feedbackCursor:null;
+ if(!more){feedbackCursor=null;feedbackLoaded=false;}
+ feedbackLoading=true;feedbackError='';renderFeedback();
+ try{
+  const query=new URLSearchParams({limit:'20'});if(cursor)query.set('next_token',cursor);
+  const reply=await api('/feedback?'+query);
+  if(generation!==scopeGeneration||revision!==feedbackRevision||request!==feedbackRequest||!token)return;
+  if(!Array.isArray(reply.results)||(reply.next_token!=null&&typeof reply.next_token!=='string'))throw Error('Phản hồi danh sách phản hồi không hợp lệ.');
+  const rows=reply.results.filter(item=>typeof item.finding_id==='string'&&(profile.regions||[]).includes(item.region));
+  feedbackRows=[...new Map([...(more?feedbackRows:[]),...rows].map(item=>[feedbackKey(item),item])).values()];
+  feedbackCursor=reply.next_token||null;feedbackLoaded=true;
+ }catch(error){
+  if(generation!==scopeGeneration||revision!==feedbackRevision||request!==feedbackRequest||!token)return;
+  feedbackError='Không tải được phản hồi. '+friendlyError(error.message)+' Dữ liệu đã tải vẫn được giữ; chọn '+(more?'Tải thêm':'Tải lại')+' để thử lại.';
+ }finally{
+  if(generation===scopeGeneration&&request===feedbackRequest){feedbackLoading=false;renderFeedback();}
+ }
+}
+function renderFeedback(){
+ const list=$('feedback-list'),previous=feedbackFocus(list),pageControl=document.activeElement,active=feedbackRows.filter(feedbackHidden);list.replaceChildren();
+ $('feedback-summary').textContent=feedbackError||(feedbackLoading?'Đang tải phản hồi…':active.length+' finding đang giữ hoặc bỏ qua trong '+feedbackRows.length+' phản hồi đã tải.'+(feedbackCursor?' Còn phản hồi ở trang sau.':''));
+ $('feedback-summary').className=feedbackError?'error':'muted';$('refresh-feedback').disabled=feedbackLoading;
+ $('feedback-load-more').hidden=!feedbackCursor;$('feedback-load-more').disabled=feedbackLoading;$('feedback-load-more').textContent=feedbackLoading?'Đang tải…':'Tải thêm';
+ if([$('refresh-feedback'),$('feedback-load-more')].includes(pageControl)&&(pageControl.disabled||pageControl.hidden))$('feedback-summary').focus();
+ if(!active.length)emptyState(list,feedbackLoading?'Đang tải danh sách':feedbackCursor?'Chưa có finding đang ẩn trong phần đã tải':feedbackLoaded?'Không có finding đang giữ hoặc bỏ qua trong danh sách đã tải':'Chưa tải phản hồi',feedbackCursor?'Chọn Tải thêm để kiểm tra trang tiếp theo.':'Chọn Tải lại để cập nhật phản hồi của kết nối hiện tại.');
+ for(const record of active){
+  const key=feedbackKey(record),generation=scopeGeneration,state=feedbackState.get(key),article=node('article',undefined,'feedback-record'),info=node('div'),actions=node('div',undefined,'finding-feedback feedback-manager-actions');article.dataset.feedbackKey=key;actions.dataset.feedbackKey=key;
+  info.append(node('h3',record.type||'Finding cũ'),node('code',record.resource_id||record.finding_id),node('p','Region: '+record.region,'muted'));
+  if(record.resource_id)info.append(node('small','Finding ID: '+record.finding_id,'muted'));else info.append(node('p','Feedback cũ thiếu metadata; quản lý bằng Finding ID và region.','footnote'));
+  info.append(node('p','Account: '+(record.account_id||'Chưa có dữ liệu')+' · Rule: '+(record.rule_id||'Chưa có dữ liệu'),'muted'));
+  if(record.kept)info.append(badge('KEPT'));
+  if(record.ignore_until>Date.now()/1000)info.append(node('p','Bỏ qua đến: '+date(record.ignore_until),'muted'));
+  if(record.acknowledged)info.append(node('p','Đã xem','acknowledged-state'));
+  const unkeep=node('button','Bỏ giữ','button secondary feedback-unkeep'),unignore=node('button','Hủy bỏ qua','button secondary feedback-unignore'),label=node('label','Hạn bỏ qua mới'),days=node('select',undefined,'feedback-manage-days'),extend=node('button','Đổi hạn bỏ qua','button secondary feedback-extend');
+  if(!managedDays.has(key))managedDays.set(key,7);for(let day=1;day<=30;day++)days.append(new Option(day+' ngày',day));days.value=managedDays.get(key);days.setAttribute('aria-label','Hạn bỏ qua mới cho '+(record.resource_id||record.finding_id));label.append(days);days.onchange=()=>managedDays.set(key,Number(days.value));
+  unkeep.disabled=!record.kept||!!state?.pending;unignore.disabled=!(record.ignore_until>Date.now()/1000)||!!state?.pending;days.disabled=extend.disabled=!!state?.pending;
+  unkeep.onclick=()=>saveFindingFeedback(record,{kept:false},generation,true);unignore.onclick=()=>saveFindingFeedback(record,{ignoreUntil:null},generation,true);extend.onclick=()=>{const count=Number(days.value);if(Number.isInteger(count)&&count>=1&&count<=30)saveFindingFeedback(record,{ignoreUntil:new Date(Date.now()+count*86400000).toISOString()},generation,true);};
+  for(const button of [unkeep,unignore,extend])button.type='button';
+  const note=node('p',state?.message||'','feedback-status'+(state?.error?' error':''));note.setAttribute('role','status');note.tabIndex=-1;
+  actions.append(unkeep,unignore,label,extend,note);article.append(info,actions);list.append(article);
+ }
+ restoreFeedbackFocus(list,previous);
+}
+function findingFeedback(f){
+ const key=feedbackKey(f),generation=scopeGeneration,state=feedbackState.get(key),group=node('div',undefined,'finding-feedback');group.dataset.feedbackKey=key;
+ const valid=typeof f.finding_id==='string'&&/^[a-f0-9]{64}$/.test(f.finding_id)&&(profile.regions||[]).includes(f.region);
+ const ack=node('button',f.acknowledged?'Bỏ đã xem':'Đánh dấu đã xem','button secondary feedback-ack'),keep=node('button','Giữ lại','button secondary feedback-keep'),label=node('label','Bỏ qua trong'),days=node('select',undefined,'feedback-days'),ignore=node('button',undefined,'button secondary feedback-ignore');
+ if(!feedbackDays.has(key))feedbackDays.set(key,7);
+ for(let day=1;day<=30;day++)days.append(new Option(day+' ngày',day));days.value=feedbackDays.get(key);days.setAttribute('aria-label','Thời hạn bỏ qua cho '+f.resource_id);label.append(days);
+ ignore.textContent='Bỏ qua '+days.value+' ngày';
+ days.onchange=()=>{feedbackDays.set(key,Number(days.value));for(const other of document.querySelectorAll('.finding-feedback:not(.feedback-manager-actions)'))if(other.dataset.feedbackKey===key){other.querySelector('.feedback-days').value=days.value;other.querySelector('.feedback-ignore').textContent='Bỏ qua '+days.value+' ngày';}};
+ ack.onclick=()=>saveFindingFeedback(f,{acknowledged:!f.acknowledged},generation);keep.onclick=()=>saveFindingFeedback(f,{kept:true},generation);
+ ignore.onclick=()=>{const count=Number(days.value);if(!Number.isInteger(count)||count<1||count>30)return;saveFindingFeedback(f,{ignoreUntil:new Date(Date.now()+count*86400000).toISOString()},generation);};
+ for(const button of [ack,keep,ignore])button.type='button';
+ for(const control of [ack,keep,ignore,days])control.disabled=!valid||!!state?.pending;
+ const note=node('p',!valid?'Cảnh báo cũ thiếu mã hợp lệ; cần quét mới để phản hồi.':state?.message||'','feedback-status'+(state?.error?' error':''));note.setAttribute('role','status');note.tabIndex=-1;
+ group.append(ack,keep,label,ignore,note);return group;
+}
+function renderTable(container,items,allowIgnore=true){
+ const previous=feedbackFocus(container);container.replaceChildren();if(!items.length){container.append(node('div','Không có tài nguyên phù hợp với danh sách này.','empty'));restoreFeedbackFocus(container,previous);return;}
+ const wrap=node('div',undefined,'table-wrap'),table=node('table',undefined,'finding-table'+(allowIgnore?' with-actions':'')),thead=node('thead'),tr=node('tr');
+ for(const h of ['Tài nguyên','Trạng thái & lý do','Bằng chứng',...(allowIgnore?['Thao tác']:[])]){const th=node('th',h);th.scope='col';tr.append(th);}thead.append(tr);table.append(thead);
+ const body=node('tbody');
+ for(const f of items){
+  const row=node('tr'),resource=node('td');resource.append(node('div',f.type,'resource-type'),node('code',f.resource_id),node('small',f.region));
+  const detail=node('td');detail.append(badge(f.level),node('p',reasons[f.reason]||f.reason));if(allowIgnore)detail.append(node('small',f.acknowledged?'Đã xem':'Chưa xem','acknowledged-state'));
+  const proof=node('td',undefined,'evidence'),open=node('button','Xem chi tiết','text-button finding-open');open.type='button';open.dataset.findingId=f.finding_id??'';open.dataset.region=f.region??'';open.dataset.resourceId=f.resource_id??'';open.setAttribute('aria-label','Xem chi tiết '+f.resource_id);open.onclick=()=>openFindingDetail(f,!allowIgnore,open);proof.append(node('div',evidence(f)),open);row.append(resource,detail,proof);
+  if(allowIgnore){const td=node('td');td.append(findingFeedback(f));row.append(td);}
+  [...row.children].forEach((td,i)=>td.dataset.label=['Tài nguyên','Trạng thái & lý do','Bằng chứng','Thao tác'][i]);body.append(row);
+ }
+ table.append(body);wrap.append(table);container.append(wrap);restoreFeedbackFocus(container,previous);
+}
 function renderFindings(){
- const q=$('search').value.trim().toLowerCase(),type=$('filter-type').value,level=$('filter-level').value;
- const all=findings(),filtered=all.filter(f=>(!type||f.type===type)&&(!level||f.level===level)&&[f.resource_id,f.reason,reasons[f.reason]||''].some(s=>s.toLowerCase().includes(q)));
- $('findings-scope').textContent=filtered.length+' / '+all.length+' cảnh báo trong kết quả hiện có. '+(results.some(r=>r.status==='PARTIAL')?'Kết quả chưa đầy đủ; một phần tài nguyên hoặc cảnh báo có thể chưa hiển thị.':'Chỉ bao gồm các region đã chọn.');
+ const q=$('search').value.trim().toLowerCase(),type=$('filter-type').value,level=$('filter-level').value,group=$('filter-group').value,region=$('filter-region').value,ack=$('filter-acknowledged').value;
+ const all=findings(),filtered=all.filter(f=>(!type||f.type===type)&&(!level||f.level===level)&&(!group||resourceGroups[f.type]===group)&&(!region||f.region===region)&&(!ack||(ack==='acknowledged'?f.acknowledged===true:f.acknowledged!==true))&&[f.resource_id,f.reason,reasons[f.reason]||''].some(s=>String(s||'').toLowerCase().includes(q)));
+ const active=Boolean(q||type||level||group||region||ack),incomplete=loadingResults||resultsError||results.some(r=>['QUEUED','RUNNING','PARTIAL','FAILED','TIMED_OUT'].includes(r.status));
+ $('findings-scope').textContent=filtered.length+' / '+all.length+' cảnh báo trong kết quả hiện có. '+(incomplete?resultMessage():'Chỉ bao gồm các region và nhóm dịch vụ đã chọn.');
  renderTable($('findings-list'),filtered);
- if(!filtered.length)emptyState($('findings-list'),q||type||level?'Không khớp bộ lọc':'Chưa có cảnh báo để hiển thị',q||type||level?'Thử xóa từ khóa hoặc chọn Tất cả.':resultMessage());
+ if(!filtered.length)emptyState($('findings-list'),active?'Không khớp bộ lọc':'Chưa có cảnh báo để hiển thị',active?'Thử xóa từ khóa hoặc chọn Tất cả.'+(incomplete?' '+resultMessage():''):resultMessage());
 }
 
 function render(){
@@ -35,6 +227,7 @@ function render(){
  for(const [id,level] of [['review','REVIEW'],['observing','OBSERVING'],['insufficient','INSUFFICIENT_DATA']])$(id).textContent=measured?fs.filter(f=>f.level===level).length:'—';
  $('nav-count').textContent=measured?fs.filter(f=>f.level==='REVIEW').length:'—';
  $('account-name').textContent=profile.account_id||'Chưa kết nối AWS';$('account-regions').textContent=(profile.regions||[]).join(' / ');
+ $('account-service-groups').textContent='Nhóm dịch vụ: '+(profile.service_groups||Object.keys(serviceGroups)).map(group=>serviceGroups[group]?.label||group).join(' / ');
  $('account-badge').textContent=profile.role_arn?'Đã kết nối':'Chưa kết nối';$('account-badge').className='badge '+(profile.role_arn?'good':'');
  for(const id of ['scan','first-scan']){$(id).disabled=!profile.role_arn||busy;$(id).textContent=busy?'Đang quét…':'Quét ngay';}
  $('first-scan-note').textContent=!profile.role_arn?'Lưu kết nối ở bước 2 để bắt đầu quét.':busy?'Yêu cầu quét đã được nhận. Xem tổng quan để theo dõi từng region.':'Kết nối đã sẵn sàng. Chọn Quét ngay, rồi xem tổng quan; kết quả tự cập nhật mỗi 5 giây khi đang quét.';
@@ -47,45 +240,122 @@ function render(){
  $('scan-summary').replaceChildren();if(!results.length)$('scan-summary').append(node('p',resultMessage(),'muted'));
  for(const r of results){const div=node('div',undefined,'scan-row');div.append(node('span',r.region),badge(r.status));$('scan-summary').append(div,node('small',date(r.completed_at||r.started_at),'muted'));appendResultNotes($('scan-summary'),r);}
  renderTable($('priority-list'),fs.filter(f=>f.level==='REVIEW').slice(0,5));
- if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Chưa có ứng viên cần kiểm tra',resultMessage());renderFindings();
+ if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Chưa có ứng viên cần kiểm tra',resultMessage());renderFindings();renderFeedback();
 }
 
 async function refresh(){
- try{results=(await api('/findings')).results;resultsError=false;loadingResults=false;render();
- if(results.some(r=>['QUEUED','RUNNING'].includes(r.status))&&pollCount<185){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{pollCount++;run(refresh);},5000);}else clearTimeout(pollTimer);
- }catch(e){loadingResults=false;resultsError=true;clearTimeout(pollTimer);render();throw e;}
+ const generation=scopeGeneration,revision=findingsRevision;
+ try{const reply=await api('/findings');if(generation!==scopeGeneration||revision!==findingsRevision)return false;results=reply.results;resultsError=false;loadingResults=false;render();
+ if(results.some(r=>['QUEUED','RUNNING'].includes(r.status))&&pollCount<185){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{pollCount++;run(refresh);},5000);}else clearTimeout(pollTimer);return true;
+ }catch(e){if(generation!==scopeGeneration||revision!==findingsRevision)return false;loadingResults=false;resultsError=true;clearTimeout(pollTimer);render();throw e;}
 }
 
-async function loadHistory(){
- const c=$('history-list');c.replaceChildren(node('p','Đang tải lịch sử…','muted'));$('history-detail').replaceChildren();
- try{historyRows=(await api('/history')).results;c.replaceChildren();
- if(!historyRows.length){emptyState(c,'Chưa có lịch sử quét','Chạy lần quét đầu tiên. Lịch sử chỉ chứa kết quả của kết nối hiện tại trong 30 ngày gần nhất.');return;}
- const wrap=node('div',undefined,'table-wrap'),t=node('table'),thead=node('thead'),head=node('tr'),labels=['Thời gian','Region','Trạng thái','Cần kiểm tra','Chi tiết'];
- for(const x of labels){const th=node('th',x);th.scope='col';head.append(th);}thead.append(head);t.append(thead);const body=node('tbody');
- for(const r of historyRows){const tr=node('tr'),st=node('td'),action=node('td'),b=node('button','Xem','button secondary');st.append(badge(r.status));b.setAttribute('aria-label','Xem kết quả '+r.region+' '+date(r.completed_at));
- b.onclick=()=>{const detail=$('history-detail');detail.replaceChildren(node('h3','Kết quả '+date(r.completed_at)+' / '+r.region),badge(r.status));appendResultNotes(detail,r);const content=node('div');renderTable(content,(r.findings||[]).map(f=>({...f,region:r.region})),false);if(!(r.findings||[]).length)emptyState(content,'Không có cảnh báo được lưu',r.status==='SUCCEEDED'?'Không phát hiện ứng viên trong phạm vi lần quét này.':'Lần quét chưa hoàn tất đầy đủ; không thể kết luận không có ứng viên.');detail.append(content);detail.focus();};
- action.append(b);tr.append(node('td',date(r.completed_at)),node('td',r.region),st,node('td',['SUCCEEDED','PARTIAL'].includes(r.status)?String((r.findings||[]).filter(f=>f.level==='REVIEW').length):'—'),action);[...tr.children].forEach((td,i)=>td.dataset.label=labels[i]);body.append(tr);}
- t.append(body);wrap.append(t);c.append(wrap);
- }catch(e){emptyState(c,'Không tải được lịch sử','Chọn Tải lại để thử lại. '+friendlyError(e.message));throw e;}
+function historyKey(row){return JSON.stringify(row.scan_id?[row.scan_id,row.region]:[null,row.region,row.created_at??null,row.started_at??null,row.completed_at??null]);}
+function historyTrigger(value){return {manual:'Thủ công',scheduled:'Theo lịch'}[value]||detailValue(value);}
+function validHistoryRows(rows){return rows.filter(row=>row&&typeof row.region==='string'&&(profile.regions||[]).includes(row.region));}
+function mergeHistoryRows(oldRows,newRows){const rows=new Map(oldRows.map(row=>[historyKey(row),row]));for(const row of newRows)rows.set(historyKey(row),row);return [...rows.values()];}
+function renderHistory(){
+ const c=$('history-list'),active=document.activeElement,control=[$('refresh-history'),$('history-load-more')].includes(active)?active:null;
+ const focusedKey=active?.classList.contains('history-open')?active.dataset.historyKey:null;c.replaceChildren();
+ $('refresh-history').disabled=historyLoading;$('history-load-more').hidden=!historyCursor;$('history-load-more').disabled=historyLoading;
+ $('history-load-more').textContent=historyLoading?'Đang tải…':'Tải thêm';
+ const summary=$('history-summary');summary.className=historyError?'error':'muted';summary.textContent=historyError?historyError:historyLoading?'Đang tải lịch sử…':historyRows.length+' kết quả region đã tải. '+(historyCursor?'Còn kết quả ở trang sau.':'Đã tải hết lịch sử hiện có của kết nối này.');
+ if(!historyRows.length)emptyState(c,historyError?'Không tải được lịch sử':historyLoading?'Đang tải lịch sử…':'Chưa có lịch sử quét',historyError?'Chọn Tải lại để thử lại.':historyLoading?'Vui lòng chờ phản hồi từ máy chủ.':'Chạy lần quét đầu tiên. Lịch sử chỉ chứa kết quả của kết nối hiện tại trong 30 ngày gần nhất.');
+ else{
+  const wrap=node('div',undefined,'table-wrap'),t=node('table',undefined,'history-table'),thead=node('thead'),head=node('tr'),labels=['Lượt quét / Thời gian','Region','Trạng thái','Cần kiểm tra','Chi tiết'];
+  for(const label of labels){const th=node('th',label);th.scope='col';head.append(th);}thead.append(head);t.append(thead);const body=node('tbody');
+  for(const r of historyRows){
+   const tr=node('tr'),time=node('td'),st=node('td'),action=node('td'),b=node('button','Xem','button secondary history-open');
+   time.append(node('code',detailValue(r.scan_id)),node('small','Nguồn: '+historyTrigger(r.trigger)),node('small','Bắt đầu: '+date(r.started_at)),node('small','Kết thúc: '+date(r.completed_at)));
+   st.append(badge(r.status));b.dataset.historyKey=historyKey(r);b.setAttribute('aria-label','Xem kết quả '+r.region+' '+date(r.completed_at));b.onclick=()=>openHistoryScan(r);
+   action.append(b);tr.append(time,node('td',r.region),st,node('td',['SUCCEEDED','PARTIAL'].includes(r.status)?String((r.findings||[]).filter(f=>f.level==='REVIEW').length):'—'),action);[...tr.children].forEach((td,i)=>td.dataset.label=labels[i]);body.append(tr);
+  }
+  t.append(body);wrap.append(t);c.append(wrap);
+ }
+ if(control&&(control.disabled||control.hidden))summary.focus();
+ else if(focusedKey){const replacement=[...c.querySelectorAll('.history-open')].find(button=>button.dataset.historyKey===focusedKey);(replacement||summary).focus();}
+}
+async function loadHistory(more=false){
+ if(more&&(historyLoading||!historyCursor))return;
+ const generation=scopeGeneration,request=++historyRequest,cursor=more?historyCursor:null;
+ if(!more){historyCursor=null;historyDetailRequest++;historySelection=null;historyDetailRows=[];historyDetailLoading=false;historyDetailError='';$('history-detail').replaceChildren();closeFindingDetail();}
+ historyLoading=true;historyError='';renderHistory();
+ try{
+  const query=new URLSearchParams({limit:'20'});if(cursor)query.set('next_token',cursor);
+  const reply=await api('/history?'+query);if(generation!==scopeGeneration||request!==historyRequest)return;
+  if(!Array.isArray(reply.results)||(reply.next_token!=null&&typeof reply.next_token!=='string'))throw Error('Máy chủ trả lịch sử không hợp lệ.');
+  historyRows=mergeHistoryRows(more?historyRows:[],validHistoryRows(reply.results));historyCursor=reply.next_token||null;
+ }catch(e){if(generation!==scopeGeneration||request!==historyRequest)return;historyError='Không tải được '+(more?'trang tiếp theo':'lịch sử')+'. '+(historyRows.length?'Dữ liệu đã tải vẫn được giữ. ':'')+'Chọn '+(more?'Tải thêm':'Tải lại')+' để thử lại. '+friendlyError(e.message);
+ }finally{if(generation===scopeGeneration&&request===historyRequest){historyLoading=false;renderHistory();}}
+}
+function renderHistoryDetail(){
+ const detail=$('history-detail');detail.replaceChildren();if(!historySelection)return;
+ detail.append(node('h3','Chi tiết lượt quét'),node('p','Scan ID: '+detailValue(historySelection.scan_id)),node('p','Snapshot đã lưu. Phản hồi và cấu hình hiện tại không thay đổi lịch sử.','muted'));
+ if(historyDetailLoading)detail.append(node('p','Đang tải các region của lượt quét…','muted history-detail-loading'));
+ if(historyDetailError){const message=node('p',historyDetailError,'error'),retry=node('button','Thử lại chi tiết','button secondary history-detail-retry');message.setAttribute('role','status');retry.onclick=()=>loadHistoryScan();detail.append(message,retry);}
+ if(!historySelection.scan_id)detail.append(node('p','Dữ liệu cũ thiếu Scan ID; chỉ hiển thị snapshot region đã lưu ở trang này.','footnote'));
+ for(const r of historyDetailRows){
+  const section=node('section',undefined,'history-region');section.dataset.region=r.region;section.append(node('h3',r.region),badge(r.status));
+  detailSection(section,'Thông tin lượt quét',[
+   ['scan_id','Scan ID',r.scan_id],['trigger','Nguồn kích hoạt',historyTrigger(r.trigger)],['region','Region',r.region],['account_id','AWS account',r.account_id],
+   ['started_at','Bắt đầu',r.started_at==null?undefined:date(r.started_at)],['completed_at','Kết thúc',r.completed_at==null?undefined:date(r.completed_at)],
+   ['error_code','Mã lỗi',r.error_code],['request_id','Request ID',r.request_id]
+  ]);
+  appendResultNotes(section,r);const content=node('div');renderTable(content,(r.findings||[]).map(f=>({...f,region:r.region})),false);
+  if(!(r.findings||[]).length)emptyState(content,'Không có cảnh báo được lưu',r.status==='SUCCEEDED'?'Không phát hiện ứng viên trong phạm vi lần quét này.':'Lần quét chưa hoàn tất đầy đủ; không thể kết luận không có ứng viên.');section.append(content);detail.append(section);
+ }
+}
+function openHistoryScan(row){
+ closeFindingDetail();historySelection=row;historyDetailRequest++;historyDetailError='';historyDetailLoading=false;
+ historyDetailRows=row.scan_id?historyRows.filter(item=>item.scan_id===row.scan_id):[row];
+ renderHistoryDetail();$('history-detail').focus();if(row.scan_id)loadHistoryScan();
+}
+async function loadHistoryScan(){
+ const selected=historySelection;if(!selected?.scan_id)return;const generation=scopeGeneration,request=++historyDetailRequest;
+ const focusedRetry=document.activeElement?.classList.contains('history-detail-retry');
+ historyDetailLoading=true;historyDetailError='';renderHistoryDetail();if(focusedRetry)$('history-detail').focus();
+ try{
+  const reply=await api('/scans/'+encodeURIComponent(selected.scan_id));if(generation!==scopeGeneration||request!==historyDetailRequest)return;
+  if(!Array.isArray(reply.results))throw Error('Máy chủ trả chi tiết lượt quét không hợp lệ.');
+  const rows=validHistoryRows(reply.results).filter(row=>row.scan_id===selected.scan_id);
+  if(!rows.length)throw Error('Không còn kết quả của lượt quét trong kết nối hiện tại.');
+  historyDetailRows=mergeHistoryRows(historyDetailRows,rows);
+ }catch(e){if(generation!==scopeGeneration||request!==historyDetailRequest)return;historyDetailError='Chưa tải đủ chi tiết các region. Snapshot đã tải vẫn được giữ. '+friendlyError(e.message);
+ }finally{if(generation===scopeGeneration&&request===historyDetailRequest){historyDetailLoading=false;renderHistoryDetail();}}
 }
 
-async function init(){profile=await api('/me');$('app').hidden=false;$('welcome').hidden=true;$('login').textContent='Đăng xuất';$('login').onclick=logout;renderPrincipals();$('role').value=profile.role_arn||'';$('region-options').replaceChildren();for(const r of regions){const l=node('label'),i=node('input');i.type='checkbox';i.value=r;i.checked=(profile.regions||['ap-southeast-1']).includes(r);const text=node('span',regionNames[r]);text.append(node('small',r));l.append(i,text);$('region-options').append(l);}$('settings-fields').replaceChildren();for(const [k,[label,min,max,step]] of Object.entries(fields)){const l=node('label',label),i=node('input');i.id=k;i.type='number';i.required=true;i.min=min;i.max=max;i.step=step;i.value=profile.settings[k];l.append(i,node('small','Trong khoảng '+min+'–'+max));$('settings-fields').append(l);}$('email-enabled').checked=!!profile.notifications?.enabled;$('email-enabled').disabled=!profile.email_available;$('save-email').disabled=!profile.email_available;$('email-note').textContent=profile.email_available?(profile.notifications?.email?'Địa chỉ nhận: '+profile.notifications.email:'Sử dụng email Cognito đã xác minh. Nếu SES đang ở sandbox, email nhận cần được xác minh trong SES.'): 'Cảnh báo email chưa được bật cho website này. Bạn vẫn xem cảnh báo trên dashboard.';loadingResults=true;results=[];resultsError=false;render();showPage(location.hash.slice(1)||'overview');await refresh();status(cfg.demo?'Bạn đang dùng bản demo với dữ liệu mẫu.':'');}
+async function init(){
+ closeFindingDetail();const generation=++scopeGeneration;historyRows=[];historyCursor=null;historyLoading=false;historyError='';historyRequest++;historyDetailRequest++;historySelection=null;historyDetailRows=[];historyDetailLoading=false;historyDetailError='';feedbackState.clear();feedbackDays.clear();managedDays.clear();feedbackRows=[];feedbackCursor=null;feedbackLoaded=false;feedbackLoading=false;feedbackError='';feedbackRequest++;feedbackRevision=0;findingsRevision=0;clearTimeout(pollTimer);const nextProfile=await api('/me');if(generation!==scopeGeneration)return;profile=nextProfile;$('history-list').replaceChildren();$('history-detail').replaceChildren();$('history-summary').textContent='';$('history-load-more').hidden=true;$('refresh-history').disabled=false;$('app').hidden=false;$('welcome').hidden=true;$('login').textContent='Đăng xuất';$('login').onclick=logout;renderPrincipals();$('role').value=profile.role_arn||'';
+ $('region-options').replaceChildren();for(const r of regions){const l=node('label'),i=node('input');i.type='checkbox';i.value=r;i.checked=(profile.regions||['ap-southeast-1']).includes(r);const text=node('span',regionNames[r]);text.append(node('small',r));l.append(i,text);$('region-options').append(l);}
+ $('service-group-options').replaceChildren();for(const [group,value] of Object.entries(serviceGroups)){const l=node('label'),i=node('input');i.type='checkbox';i.value=group;i.checked=(profile.service_groups||Object.keys(serviceGroups)).includes(group);const text=node('span',value.label);text.append(node('small',value.types.join(' / ')));l.append(i,text);$('service-group-options').append(l);}
+ $('filter-type').replaceChildren(new Option('Tất cả',''),...Object.keys(resourceGroups).map(type=>new Option(type,type)));
+ $('filter-group').replaceChildren(new Option('Tất cả',''),...Object.entries(serviceGroups).map(([group,value])=>new Option(value.label,group)));
+ $('filter-region').replaceChildren(new Option('Tất cả',''),...(profile.regions||[]).map(region=>new Option((regionNames[region]||region)+' — '+region,region)));
+ for(const id of ['search','filter-level','filter-acknowledged'])$(id).value='';
+ $('settings-fields').replaceChildren();for(const [k,[label,min,max,step]] of Object.entries(fields)){const l=node('label',label),i=node('input');i.id=k;i.type='number';i.required=true;i.min=min;i.max=max;i.step=step;i.value=profile.settings[k];l.append(i,node('small','Trong khoảng '+min+'–'+max));$('settings-fields').append(l);}
+ $('email-enabled').checked=!!profile.notifications?.enabled;$('email-enabled').disabled=!profile.email_available;$('save-email').disabled=!profile.email_available;$('email-note').textContent=profile.email_available?(profile.notifications?.email?'Địa chỉ nhận: '+profile.notifications.email:'Sử dụng email Cognito đã xác minh. Nếu SES đang ở sandbox, email nhận cần được xác minh trong SES.'): 'Cảnh báo email chưa được bật cho website này. Bạn vẫn xem cảnh báo trên dashboard.';loadingResults=true;results=[];resultsError=false;render();showPage(location.hash.slice(1)||'overview');await refresh();if(generation!==scopeGeneration)return;status(cfg.demo?'Bạn đang dùng bản demo với dữ liệu mẫu.':'');
+}
 function navigate(page){if(location.hash.slice(1)===page)showPage(page);else location.hash=page;}
-document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>navigate(b.dataset.page));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));window.addEventListener('hashchange',()=>showPage(location.hash.slice(1)));for(const id of ['search','filter-type','filter-level'])$(id).addEventListener('input',renderFindings);
+document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>navigate(b.dataset.page));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>navigate(b.dataset.go));window.addEventListener('hashchange',()=>showPage(location.hash.slice(1)));for(const id of ['search','filter-type','filter-level','filter-group','filter-region','filter-acknowledged'])$(id).addEventListener('input',renderFindings);
 $('connection-form').onsubmit=e=>{e.preventDefault();run(async()=>{
  let saved=false;const feedback=$('connection-feedback');feedback.hidden=false;feedback.className='';feedback.textContent='Đang xác minh quyền truy cập AWS…';$('connect').textContent='Đang kiểm tra…';
  try{const selected=[...document.querySelectorAll('#region-options input:checked')].map(i=>i.value);
  if(selected.length<1||selected.length>3)throw Error('Chọn từ 1 đến 3 region.');
+ const groups=[...document.querySelectorAll('#service-group-options input:checked')].map(i=>i.value);
+ if(groups.length<1||groups.length>4)throw Error('Chọn từ 1 đến 4 nhóm dịch vụ.');
  const arn=$('role').value.trim();if(!/^arn:aws:iam::\d{12}:role\/GuardianReadRole-[A-Za-z0-9+=,.@_-]{1,40}$/.test(arn))throw Error('Nhập RoleArn từ Outputs: arn:aws:iam::123456789012:role/GuardianReadRole-<suffix>. Không dùng principal ARN.');
- await api('/connection','PUT',{role_arn:arn,regions:selected});saved=true;await init();feedback.textContent='Đã xác minh và lưu kết nối AWS. Tiếp tục bước 3 để quét lần đầu.';status('Đã xác minh và lưu kết nối AWS.');
+ await api('/connection','PUT',{role_arn:arn,regions:selected,service_groups:groups});saved=true;await init();feedback.textContent='Đã xác minh và lưu kết nối AWS. Tiếp tục bước 3 để quét lần đầu.';status('Đã xác minh và lưu kết nối AWS.');
  }catch(e){feedback.className='error';feedback.textContent=(saved?'Kết nối đã lưu, nhưng chưa tải được dữ liệu mới. Tải lại trang để tiếp tục. ':'')+friendlyError(e.message);throw e;}finally{$('connect').textContent='Kiểm tra và lưu kết nối';}
  },$('connect'));};
-$('settings-form').onsubmit=e=>{e.preventDefault();run(async()=>{const v={};for(const k of Object.keys(fields))v[k]=Number($(k).value);profile.settings=await api('/settings','PUT',v);status('Đã lưu ngưỡng và lịch quét.');},$('save-settings'));};
+$('settings-form').onsubmit=e=>{e.preventDefault();run(async()=>{const v={};for(const [key,[label,min,max,step]] of Object.entries(fields)){const value=$(key).valueAsNumber;if(!Number.isFinite(value)||value<min||value>max||(step===1&&!Number.isInteger(value)))throw Error('Kiểm tra giá trị: '+label+'.');v[key]=value;}profile.settings=await api('/settings','PUT',v);status('Đã lưu ngưỡng và lịch quét.');},$('save-settings'));};
 $('save-email').onclick=()=>run(async()=>{profile.notifications=await api('/notifications','PUT',{enabled:$('email-enabled').checked});$('email-note').textContent=profile.notifications.enabled?'Địa chỉ nhận: '+profile.notifications.email:'Đã tắt cảnh báo email.';status('Đã lưu lựa chọn email.');},$('save-email'));
 $('scan').onclick=()=>run(async()=>{scanPending=true;render();try{const r=await api('/scans','POST');sessionStorage.setItem('crg-last-scan',r.scan_id);pollCount=0;status('Đã nhận yêu cầu quét. Dashboard tự cập nhật mỗi 5 giây.');await refresh();}finally{scanPending=false;render();}},$('scan'));
 $('first-scan').onclick=()=>{navigate('overview');$('scan').click();};
-$('refresh').onclick=()=>run(async()=>{pollCount=0;await refresh();status('Đã tải lại kết quả.');},$('refresh'));$('refresh-history').onclick=()=>run(loadHistory,$('refresh-history'));
+$('refresh').onclick=()=>run(async()=>{pollCount=0;await refresh();status('Đã tải lại kết quả.');},$('refresh'));$('refresh-history').onclick=()=>loadHistory();$('history-load-more').onclick=()=>loadHistory(true);
+$('refresh-feedback').onclick=()=>loadFeedback();$('feedback-load-more').onclick=()=>loadFeedback(true);
 $('start').onclick=()=>run(login,$('start'));
+$('close-finding-detail').onclick=()=>$('finding-dialog').close();
+$('finding-dialog').onclose=restoreFindingFocus;
 
 const regionNames={'ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-northeast-1':'Tokyo','us-east-1':'N. Virginia','us-west-2':'Oregon','eu-west-1':'Ireland'};
 function friendlyError(message){const translations={

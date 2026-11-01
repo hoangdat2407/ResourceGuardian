@@ -1,8 +1,10 @@
-# Task 7 — Luật đánh giá và bằng chứng
+# Luật đánh giá và bằng chứng
 
 ## 1. Phạm vi nghiệm thu
 
-Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Đây là phạm vi backend Task 7; việc hiển thị đủ evidence và thao tác trên dashboard thuộc Task 9.
+Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Backend tạo finding và lưu kết quả; dashboard hiện có chi tiết evidence, phản hồi và lịch sử phân trang.
+
+Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. Registry first/last giữ mốc trong 30 ngày không quan sát; metadata feedback lấy từ candidate đã xác minh. Observation EBS/EIP là cơ chế riêng, hai mốc first/last chỉ bổ sung trên finding của kết quả quét mới.
 
 Báo cáo PDF định hướng sáu nhóm dịch vụ và đối chiếu dữ liệu chi phí. Chín loại trên nằm trong bốn nhóm `compute`, `storage`, `database`, `network`; chưa bao phủ mọi dịch vụ trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, hoặc dữ liệu billing/cost. Các phần này cần collector/input của Task 6 và bộ rule được chốt tiếp; không được đánh dấu hoàn tất theo toàn bộ phạm vi PDF.
 
@@ -69,7 +71,7 @@ Khóa giá trị khi tính được: EC2 `cpu_p95`, `network_mib_hour`; RDS `cpu
 
 ## 4. Finding và collector
 
-Mỗi finding mới có `finding_id`, `type`, `resource_id`, `region`, `account_id`, `evaluated_at`, `level`, `reason`, `evidence`, `rule_id`, `recommendation`. Collector bổ sung account/region/evaluated_at vào evidence để bằng chứng có thể kiểm tra độc lập. Thời gian là ISO 8601 có timezone UTC, lấy cùng mốc scan, không do evaluator tự đọc đồng hồ.
+Mỗi finding mới có `finding_id`, `type`, `resource_id`, `region`, `account_id`, `evaluated_at`, `level`, `reason`, `evidence`, `rule_id`, `recommendation`; worker bổ sung `first_seen_at`, `last_seen_at` sau khi lưu registry. Collector bổ sung account/region/evaluated_at vào evidence để bằng chứng có thể kiểm tra độc lập. Thời gian là ISO 8601 có timezone UTC, lấy cùng mốc scan, không do evaluator tự đọc đồng hồ. Hai mốc public mới nằm trên finding, không tự thêm vào evidence của collector.
 
 `finding_id` là SHA-256 của JSON có cấu trúc `[type, region, stable_identity]`, ổn định qua các lượt quét và không phụ thuộc metric/thời gian. Identity dùng ID/ARN theo collector; S3 multipart dùng `[bucket, key, upload_id]`. Tenant và connection được ràng buộc ở partition/key ứng dụng; `resource_id` để hiển thị, không thay thế khóa feedback.
 
@@ -83,6 +85,19 @@ Mỗi finding mới có `finding_id`, `type`, `resource_id`, `region`, `account_
 | RDS/NAT/LB | Metadata engine/instance class, VPC/subnet hoặc scheme, cùng diagnostics và giá trị metric tương ứng |
 
 Không gán cửa sổ metric cho EBS/EIP hoặc tuổi snapshot/upload. Thời gian observation không đồng nghĩa tuổi tài nguyên; `logical_volume_gib` không phải dung lượng snapshot tính phí hoặc tiền tiết kiệm.
+
+Registry finding có helper `record_finding_observations(marker, findings, time_check)` trong [src/app.py](src/app.py). Worker gọi ngay sau collector và trước legacy suppression/feedback/cap; tạo bản sao finding với hai mốc ISO UTC, không sửa dữ liệu collector đầu vào:
+
+- Key `TENANT#sub` / `OBSF#connection_version#region#finding_id`; first/last là epoch UTC, `expires = last_seen_at + 30 ngày`. Finding còn hạn giữ first, last không lùi; đúng hạn 30 ngày không quan sát thì reset dù TTL chưa dọn. Vắng finding không gia hạn TTL. Registry khác observation orphan EBS/EIP.
+- Đầu vào cần ID hợp lệ, đúng region và evaluated_at có timezone. Dedup ID lấy observation mới nhất; không sửa danh sách finding đầu vào. Trả map ID → first/last epoch; danh sách rỗng trả `{}`, phát hiện mất ownership trả `None`. Worker chỉ dừng với `is None`, không coi map rỗng là mất quyền; chuyển epoch sang ISO UTC dạng `+00:00` và gắn hai field trước tính byte cap.
+- BatchGet strong read tối đa 100 key, retry UnprocessedKeys tối đa 3 requests/batch với backoff 0.1/0.2 giây và time budget. Chưa đọc hết hoặc record/response lỗi thì không ghi từ giả định missing. Hoàn tất toàn bộ lượt đọc trước các batch ghi.
+- Mỗi transaction tối đa 98 registry Put và 2 ConditionCheck cho marker/profile: đúng scan/version/run_token, RUNNING, lease/deadline còn hạn và region vẫn thuộc profile. Mỗi record có điều kiện snapshot first/last/expires, hoặc phải chưa tồn tại; CAS conflict khi vẫn owned truyền ClientError để scan retry, không coi là mất quyền.
+- Batch trước đã commit vẫn là observation hợp lệ nếu batch sau lỗi; replay không tự gia hạn từ wall clock. Lỗi hạ tầng/mixed cancellation truyền ra; dữ liệu registry không hợp lệ bị từ chối. Không ghi HISTORY, RESULT, feedback hoặc OBS EBS/EIP từ helper này.
+- IAM chỉ thêm `dynamodb:BatchGetItem` trên bảng platform cho ScanRole/guardian-worker; không đổi GuardianReadRole, không thêm dependency. Kiểm tra local theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử); nghiệm thu AWS thực hiện riêng theo [DEPLOYMENT.md](DEPLOYMENT.md).
+
+Khi collector dừng ở ngưỡng dự trữ 60 giây và trả PARTIAL, worker dùng budget riêng để lưu registry, chừa tối thiểu 10 giây theo context và lease/deadline cho finalization. Không còn budget persistence thì lưu TIMED_OUT/TIME_BUDGET bằng guard run_token, không công bố findings thiếu mốc; lỗi hạ tầng/CAS vẫn truyền ra để retry. Budget là kiểm tra trước request/batch, không bảo đảm mọi request AWS hoàn tất trước timeout nền tảng.
+
+GET `/findings` overlay feedback hiện tại và giữ hai mốc từ candidate đã lưu; GET `/scans/{id}` và `/history` trả snapshot của scan, không truy vấn registry để sửa mốc cũ. Lịch sử thiếu timestamps vẫn trả được và không được backfill. Observation của mọi finding đã collect được ghi dù sau đó bị Keep/Ignore hoặc bị cắt khỏi pool; các API không công bố item OBSF hay private candidates.
 
 Chữ ký evaluator thuần:
 
@@ -106,7 +121,8 @@ Snapshot chỉ được kết luận không tham chiếu khi đọc đủ AMI th
 ### Tag và phản hồi nội bộ
 
 - `guardian:keep=true` (giá trị không phân biệt hoa thường) chặn finding ở các collector đang có dữ liệu tag: EC2, EBS, EIP, snapshot, RDS, NAT. ALB/NLB chưa gọi DescribeTags; S3 multipart chưa đọc tag bucket, nên không quảng bá tag suppression cho ba loại này. Giữ lại/bỏ qua nội bộ vẫn áp dụng cho mọi finding có ID.
-- `PUT /feedback` nhận `region`, `finding_id`, và subset `acknowledged`/`kept`/`ignoreUntil`. Cờ là boolean; ignore là RFC3339 UTC trong 30 ngày tới hoặc null để bỏ. API kiểm tra ownership của finding trong result/candidate/feedback thuộc tenant, region và connection hiện hành.
+- `PUT /feedback` nhận `region`, `finding_id`, và subset `acknowledged`/`kept`/`ignoreUntil`. Cờ là boolean; ignore là RFC3339 UTC kết thúc bằng `Z` trong 30 ngày tới hoặc null để bỏ, không nhận offset `+00:00`. API kiểm tra ownership của finding trong result/candidate/feedback thuộc tenant, region và connection hiện hành.
+- Metadata feedback `type`, `resource_id`, `account_id`, `rule_id` được lấy từ candidate đúng finding ID/connection/region (fallback findings của result legacy). Chỉ field string không rỗng được cập nhật; thiếu/mất candidate giữ metadata cũ, record legacy vẫn dùng được bằng finding ID/region. Không nhận metadata từ body hoặc suy từ profile/history; không sửa snapshot khi lưu feedback.
 - Đã xem vẫn hiện kèm `acknowledged`; kept/ignore còn hạn bị ẩn khỏi `/findings`. Tắt keep không tắt ignore hoặc tag; expiry xét timestamp dù TTL chưa xóa.
 - Worker giữ private candidates trước feedback để clear keep/ignore hoặc hết hạn có thể hiện lại ngay sau một lượt quét. `/findings` overlay theo trạng thái hiện hành; `/scans/{id}` và `/history` trả snapshot đã lưu, không viết lại lịch sử theo phản hồi mới. Private candidates không xuất hiện trên API/history.
 - Legacy `/keep` và `/ignore` dùng resource ID, áp dụng từ scan sau; không dùng thay `/feedback` cho ARN/S3 URI. Chúng còn trong code tương thích nội bộ, nhưng template HTTP API hiện dùng `/feedback`. Không suy ra route cloud chỉ từ handler tồn tại.
@@ -122,5 +138,5 @@ Key observation: `OBS#<connection_version>#<region>#<type>#<resource_id>`, trong
 - Tối đa 100 tài nguyên/loại/region, 50 finding hiển thị; tối đa 100 private candidates, ưu tiên 50 finding đang hiện. Toàn bộ result JSON UTF-8 trước persistence giới hạn 300 KiB. Khi cắt pool do số lượng/kích thước, trả `PARTIAL` + `FINDING/CANDIDATE_LIMIT`; không khẳng định quét đầy đủ.
 - `finding_count` đếm finding nhìn thấy trong pool còn lưu trước cap hiển thị 50; khi pool bị cắt đây là số đếm trong phần còn giữ, không phải tổng toàn account. `total_candidate_count` là tổng trước retention. Finding bị loại do retention cần scan mới để phục hồi.
 - Trường mới là bổ sung; finding lịch sử có thể thiếu chúng và không được tự tính lại. Reason cũ được giữ cho các trạng thái cũ. Contract helper insufficient đã đổi sang evidence dict; caller và test phải dùng hợp đồng mới.
-- Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Kết quả thực tế tại [VALIDATION.md](VALIDATION.md).
-- Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng; UI đầy đủ thuộc Task 9. Không coi thiếu collector Task 6 hoặc cloud chưa chạy là PASS.
+- Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Chạy các suite liên quan theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử).
+- Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại; UI smoke/fixture kiểm tra hiển thị và thao tác dashboard. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng. Không coi thiếu collector hoặc cloud chưa chạy là PASS.

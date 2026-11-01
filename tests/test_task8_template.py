@@ -1,4 +1,5 @@
 """Operational invariants for Task 8's failure and reconciliation paths."""
+import fnmatch
 import unittest
 
 from tests.test_read_only import load
@@ -69,6 +70,34 @@ class Task8Infrastructure(unittest.TestCase):
             self.assertEqual(actions["dynamodb:ConditionCheckItem"], "Data.Arn")
             self.assertEqual(actions["dynamodb:DeleteItem"], "Data.Arn")
             self.assertNotIn("dynamodb:TransactWriteItems", actions)
+
+    def test_finding_observation_batch_read_is_only_granted_to_worker_table(self):
+        def statements(value):
+            if isinstance(value, dict):
+                if "Action" in value:
+                    yield value
+                else:
+                    for child in value.values():
+                        yield from statements(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from statements(child)
+
+        grants = []
+        for path in ("template.yaml", "target-role.yaml", "web/target-role.yaml"):
+            for name, resource in load(path)["Resources"].items():
+                if resource["Type"] != "AWS::IAM::Role":
+                    continue
+                for policy in resource["Properties"].get("Policies", []):
+                    for statement in statements(policy["PolicyDocument"]):
+                        actions = statement["Action"]
+                        actions = actions if isinstance(actions, list) else [actions]
+                        if statement.get("Effect") == "Allow" and any(
+                            fnmatch.fnmatchcase("dynamodb:batchgetitem", action.lower())
+                            for action in actions
+                        ):
+                            grants.append((path, name, policy["PolicyName"], statement["Resource"]))
+        self.assertEqual(grants, [("template.yaml", "ScanRole", "guardian-worker", "Data.Arn")])
 
     def test_alarms_cover_lost_failures_and_unhandled_messages(self):
         lambda_metrics = self.properties("DestinationDeliveryAlarm")["Metrics"]

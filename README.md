@@ -1,12 +1,14 @@
 # Cloud Resource Guardian — MVP
 
-Bản MVP của Cloud-T9, triển khai trên AWS bằng Python/boto3 và Lambda. Gồm mã nguồn frontend, backend, hạ tầng AWS SAM và script triển khai. Lịch sử triển khai được ghi trong [DEPLOYMENT.md](DEPLOYMENT.md) và [HANDOFF.md](HANDOFF.md); cần xác minh revision đang chạy và bằng chứng AWS trước khi nghiệm thu bản thay đổi hiện tại.
+Cloud Resource Guardian giúp người dùng xem xét tài nguyên AWS có dấu hiệu ít sử dụng. Dự án gồm backend Python/boto3 chạy trên Lambda, dashboard HTML/CSS/JavaScript, hạ tầng AWS SAM và script triển khai.
 
-Task 8 bổ sung admission/lease bằng giao dịch, RESULT + HISTORY nguyên tử, consumer phục hồi failure queue và đối soát job quá hạn mỗi 5 phút. Xem [hợp đồng và runbook Task 8](TASK8.md), [harness AWS opt-in](TASK8-AWS.md) và [kết quả validation](VALIDATION.md). Phần AWS của thay đổi này chưa được nghiệm thu; dữ liệu triển khai cũ bên dưới không xác nhận revision Task 8.
+Phạm vi gồm chín loại tài nguyên, chi tiết evidence, hai mốc quan sát first/last, phản hồi đã xem/giữ lại/bỏ qua và lịch sử phân trang. Scheduler dùng EventBridge; worker nhận Lambda Invoke async; lỗi sau retry đi qua SQS failure destination để phục hồi.
+
+Hướng dẫn triển khai, chạy harness và khôi phục nằm trong [DEPLOYMENT.md](DEPLOYMENT.md). Demo và test local không xác nhận phiên bản đang chạy trên AWS hoặc kết quả nghiệm thu cloud.
 
 ## 1. Thử ngay tại máy, không cần AWS
 
-Cài Python 3.12, giải nén ZIP rồi mở terminal tại thư mục `Cloud-Resource-Guardian-MVP`:
+Cài Python 3.12 rồi mở PowerShell tại root repository, nơi có `demo.py`, `src/` và `web/`. Demo chỉ dùng thư viện chuẩn Python, không cần cài dependencies AWS:
 
 ```powershell
 python demo.py
@@ -14,7 +16,11 @@ python demo.py
 
 Mở **http://127.0.0.1:8080**, chọn **Mở dashboard demo**. Dữ liệu gắn nhãn DEMO là dữ liệu mẫu; chế độ này không dùng AWS SDK, không xác thực Cognito thật, không gửi email và không phát hiện tài nguyên thật. Dữ liệu demo nằm trong RAM, khởi động lại sẽ reset.
 
-Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày, quét ngay và lịch sử. Quét demo chạy trong khoảng ba giây, dashboard cập nhật mỗi năm giây. Demo không áp dụng cooldown 15 phút của AWS thật. Dừng bằng Ctrl+C.
+Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, đã xem/bỏ đã xem, giữ lại, bỏ qua 1–30 ngày, quét ngay và lịch sử. Các cờ độc lập và giữ qua refresh/scan tiếp; history không bị sửa theo feedback mới. Quét demo chạy trong khoảng ba giây; dashboard lấy kết quả mỗi năm giây khi còn lượt quét đang chạy. Demo không áp dụng cooldown 15 phút của AWS thật. Dừng bằng Ctrl+C.
+
+Demo có EC2, EBS, Elastic IP, snapshot, S3 multipart, RDS, NAT Gateway, ALB và NLB thuộc bốn nhóm. Cấu hình mặc định có số đếm inventory mẫu tổng cộng 31, với 10 finding: 8 REVIEW, 1 OBSERVING và 1 INSUFFICIENT_DATA. Inventory/metrics là dữ liệu tổng hợp, được đánh giá bằng evaluator thuần hiện hành; đổi ngưỡng/cửa sổ có thể đổi finding và evidence ở scan tiếp theo. Không suy từ các số mẫu này sang tài nguyên hoặc chi phí AWS thật.
+
+Demo lưu/lọc bốn nhóm và 11 cấu hình. First/last được cập nhật trước feedback, giữ qua lượt quét tiếp và tạm biến mất, hết hạn sau 30 ngày không quan sát; đổi kết nối reset registry cùng dữ liệu phiên. Thời gian quan sát EBS/EIP trong mẫu là dữ liệu tổng hợp riêng, không phải thời gian thật đã chờ trên AWS. Snapshot history giữ giá trị lúc quét. SES và control email mặc định tắt; demo từ chối bật email. [Kiểm tra tích hợp demo](tests/ui_integrated_demo.py) và các fixture riêng kiểm tra chín loại, mốc quan sát, feedback và phân trang.
 
 ## 2. Phạm vi AWS thật
 
@@ -25,11 +31,11 @@ Có thể thử dashboard, tìm/lọc cảnh báo, cấu hình, bỏ qua 7 ngày
 | Kết nối AWS | Một account/người dùng; STS AssumeRole, Role ARN và ExternalId riêng; chọn 1–4 nhóm dịch vụ |
 | Quét tài nguyên | EC2; EBS/Snapshot/S3 multipart; RDS; EIP/NAT Gateway/ALB/NLB; tối đa ba region/người dùng |
 | Quét ngay | POST `/scans` không có body, trả `scan_id`; Lambda backend Invoke async Lambda worker |
-| Theo dõi tiến độ | API trạng thái và frontend tự lấy kết quả mỗi năm giây |
+| Theo dõi tiến độ | Frontend lấy `/findings` mỗi năm giây khi còn QUEUED/RUNNING; dừng khi terminal hoặc lỗi |
 | Quét định kỳ | EventBridge kích hoạt Lambda scheduler mỗi giờ, chọn profile đến hạn |
 | Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, phân trang 20 lần quét region mặc định |
 | Phản hồi & Ngoại lệ | Tag `guardian:keep=true` cho EC2/EBS/EIP/snapshot/RDS/NAT; API `/feedback` cho cả chín loại (acknowledged, kept, ignoreUntil tối đa 30 ngày); handler `/keep` và `/ignore` tương thích ngược chỉ dùng nội bộ |
-| Email tùy chọn | SES mặc định tắt; khi được cấu hình, gửi tới email Cognito đã xác minh nếu danh sách REVIEW thay đổi |
+| Email tùy chọn | SES mặc định tắt; khi bật, gửi tới email Cognito đã xác minh nếu tập REVIEW đang hiện không rỗng, thay đổi và đã qua cooldown |
 | Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry → SQS failure destination → recovery; đối soát TIMED_OUT mỗi 5 phút; DLQ vận hành |
 
 Ứng dụng không có quyền dừng hoặc xóa tài nguyên account cần quét. Người dùng kiểm tra cảnh báo rồi xử lý trong AWS Console.
@@ -48,44 +54,55 @@ aws configure set region ap-southeast-1 --profile guardian-lab
 aws sts get-caller-identity --profile guardian-lab
 ```
 
-`aws login` mở trình duyệt để bạn tự đăng nhập. IAM identity cần `SignInLocalDevelopmentAccess` cho cách đăng nhập này. Nếu account dùng IAM Identity Center, dùng `aws configure sso --profile guardian-lab` rồi `aws sso login --profile guardian-lab`.
+`aws login` mở trình duyệt để bạn tự đăng nhập. IAM identity cần `SignInLocalDevelopmentAccess` cho cách đăng nhập này; quyền đăng nhập không thay thế quyền triển khai. Nếu account dùng IAM Identity Center, dùng `aws configure sso --profile guardian-lab` rồi `aws sso login --profile guardian-lab` theo [hướng dẫn AWS](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html). Xác nhận cách truy cập với người quản lý account trước khi chọn luồng đăng nhập.
 
 Không gửi access key, secret, session token, mật khẩu hoặc mã MFA vào chat. Đăng nhập tại máy không tự chia sẻ phiên AWS với ChatGPT.
 
 ### 3.2. Cài dependencies triển khai
 
 ```powershell
+python --version
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-deploy.txt
 ```
 
-Trong Linux/macOS, dùng `.venv/bin/python` thay `.\.venv\Scripts\python.exe`.
+`python` phải là Python 3.12; nếu máy có nhiều bản, dùng đúng executable 3.12 hoặc `py -3.12` khi đã đăng ký với Python Launcher để tạo venv. Nếu `.venv` đã tồn tại, kiểm tra `.\.venv\Scripts\python.exe --version` rồi dùng lại môi trường phù hợp. Nếu báo `No module named pip`, chạy `.\.venv\Scripts\python.exe -m ensurepip --upgrade` trước khi cài dependencies. Trong Linux/macOS, dùng `.venv/bin/python` thay `.\.venv\Scripts\python.exe`.
 
-### 3.3. Tạo bản thay đổi để kiểm tra trước (tùy chọn)
+### 3.3. Chuẩn bị artifact và change set để review
 
-```powershell
-.\.venv\Scripts\python.exe deploy.py --profile guardian-lab --region ap-southeast-1 --domain-prefix crg-cloudt9-CHUOI-RIENG --plan
-```
-
-Thay `CHUOI-RIENG` bằng chữ thường/số để domain Cognito không trùng toàn vùng. `--plan` tạo bucket artifact và upload code, rồi tạo change set; chưa thực thi hạ tầng ứng dụng. Script in các tài nguyên dự kiến và lệnh execute change set. Chỉ thực thi change set sau khi bạn kiểm tra đúng account và stack. Đợi CREATE_COMPLETE/UPDATE_COMPLETE rồi chạy `publish.py`.
-
-### 3.4. Hoặc triển khai và xuất bản web trong một lệnh
+Đọc [release gate và bước đóng gói offline](DEPLOYMENT.md#manual-release-gate); hoàn tất kiểm tra local, review source/template, commit revision và pin ZIP trước khi tạo change set. Ví dụ dưới dùng stack nghiệm thu riêng; chỉ chạy sau khi đã xác nhận account/region và quyền triển khai:
 
 ```powershell
-.\.venv\Scripts\python.exe deploy.py --profile guardian-lab --region ap-southeast-1 --domain-prefix crg-cloudt9-CHUOI-RIENG
+.\.venv\Scripts\python.exe deploy.py `
+  --profile guardian-lab --region ap-southeast-1 `
+  --stack cloud-resource-guardian-task8-test `
+  --domain-prefix crg-task8-CHUOI-RIENG `
+  --artifact .preflight/task8-artifacts/task8-final.zip --plan
 ```
 
-Script đóng gói Lambda, upload S3, tạo change set, thực thi, chờ CloudFormation rồi upload ba file frontend và `config.json`. CloudFront có thể cần vài phút. Cuối cùng script in **WebUrl**; mở URL đó để đăng ký tài khoản bằng email và xác minh email.
+Thay `CHUOI-RIENG` bằng chữ thường/số để domain Cognito không trùng toàn vùng. `--plan` vẫn tạo/cấu hình artifact bucket, upload ZIP và tạo change set; đây là thao tác ghi AWS. Reviewer kiểm tra change set thực tế, IAM và tác động dữ liệu trước khi executor thực thi. `deploy.py` mặc định dùng stack `cloud-resource-guardian`, vì vậy luôn truyền rõ `--stack` đúng phạm vi.
 
-Hạ tầng chính: private S3 + CloudFront → Cognito / API Gateway → Lambda backend / scheduler / worker → DynamoDB; worker dùng STS và AWS SDK đọc account người dùng. SQS chỉ nhận các sự kiện quét thất bại sau retry.
+### 3.4. Thực thi change set đã review và xuất bản web
 
-Template hiện không đặt ReservedConcurrentExecutions cho worker để phù hợp account lab có quota Lambda bằng 10. API, scheduler và worker dùng chung concurrency của account; worker không có giới hạn riêng bằng 3. Lease theo tenant, cooldown và API throttling vẫn được giữ. Chỉ đặt reserved concurrency sau khi quota cho phép giữ đủ phần unreserved mà AWS yêu cầu. Khi stack lỗi, xem CloudFormation Events trước khi thử lại.
+Executor dùng đúng lệnh `execute-change-set` mà script in ra cho change set đã duyệt, rồi chờ stack đạt `CREATE_COMPLETE`/`UPDATE_COMPLETE`. Upload `web/target-role.yaml` vào WebBucket của stack trước theo [hướng dẫn triển khai](DEPLOYMENT.md#artifact-và-xuất-bản-web), rồi xuất bản web vào cùng stack:
+
+```powershell
+.\.venv\Scripts\python.exe publish.py --profile guardian-lab --region ap-southeast-1 --stack cloud-resource-guardian-task8-test
+```
+
+Script upload ba file frontend và `config.json`, rồi tạo CloudFront invalidation bao phủ cả template đã upload. Kiểm tra đủ năm object, config thật và invalidation hoàn tất.
+
+Admin tạo user trong đúng Cognito UserPool của stack, giới hạn tối đa 5 user nội bộ theo release gate. Người dùng mở **WebUrl**, đăng nhập bằng tài khoản được cấp và đổi mật khẩu tạm ở lần đầu nếu được yêu cầu. UserPool tắt tự đăng ký; không có bước tự tạo tài khoản trên web. Xem [hướng dẫn AWS về user do admin tạo](https://docs.aws.amazon.com/cognito/latest/developerguide/how-to-create-user-accounts.html).
+
+Hạ tầng chính: private S3 + CloudFront → Cognito / API Gateway → Lambda backend / scheduler / worker → DynamoDB; worker dùng STS và AWS SDK đọc account người dùng. SQS `DeadLetters` nhận OnFailure worker và có recovery consumer; `OperationsDeadLetters` nhận redrive và lỗi vận hành của scheduler/reconciler/delivery.
+
+Template không đặt ReservedConcurrentExecutions; năm Lambda dùng chung concurrency của account. Xác minh quota thực tế trước khi thay đổi concurrency, không lấy số quota từ lần triển khai cũ. Lease theo tenant, cooldown và API throttling vẫn được giữ. Khi stack lỗi, xem CloudFormation Events trước khi thử lại. Chạy `deploy.py` không có `--plan` sẽ tự execute và publish; luồng nghiệm thu ở đây dùng change set đã review.
 
 ### 3.5. Bật email (tùy chọn)
 
 Thêm `--sender-email email-cua-ban@example.com` vào lệnh deploy. CloudFormation tạo SES EmailIdentity; mở thư xác minh được AWS gửi tới địa chỉ đó. Nếu SES đang trong sandbox, địa chỉ người nhận cũng phải được xác minh tại SES **ap-southeast-1**. Địa chỉ nhận của ứng dụng lấy từ email Cognito đã xác minh; người dùng không nhập tùy ý người nhận.
 
-Trên web, mở Cấu hình & cảnh báo → bật email. Digest gửi sau lượt quét, theo region và địa chỉ Cognito đã xác minh; lịch gửi đi cùng lịch quét, không thêm scheduler riêng. Conditional write giữ quyền gửi cho một worker; cooldown bằng `interval_hours` hạn chế gửi lại khi tập REVIEW thay đổi. Dedup theo loại tài nguyên, resource ID và rule, không theo dao động CPU; đổi kết nối hoặc người nhận không dùng lại dấu gửi cũ.
+Trên web, mở Cấu hình & cảnh báo → bật email. Digest gửi sau lượt quét nếu tập REVIEW đang hiển thị không rỗng, thay đổi fingerprint và đã qua cooldown, theo region và địa chỉ Cognito đã xác minh. Khi toàn bộ REVIEW biến mất, ứng dụng cập nhật dedup nhưng không gửi thư báo hết finding. Lịch gửi đi cùng lịch quét, không thêm scheduler riêng. Conditional write giữ quyền gửi cho một worker; cooldown bằng `interval_hours`. Dedup theo loại tài nguyên, resource ID và rule, không theo dao động CPU; đổi kết nối hoặc người nhận không dùng lại dấu gửi cũ.
 
 Thông báo lưu trạng thái, thời điểm, fingerprint và SES `message_id` trong bản ghi `NOTICE#...`. `SENT` chỉ có nghĩa SES nhận yêu cầu, không chứng minh email đã vào hộp thư. `FAILED` là lỗi SES rõ ràng; `UNKNOWN` là chưa biết SES đã nhận hay chưa; `STATE_FAILED` là lỗi trạng thái trước khi gọi SES; `SENT_UNRECORDED` là SES đã nhận nhưng chưa ghi được kết quả vào DynamoDB. Kết quả quét vẫn được giữ. Cooldown áp dụng cả lỗi/không rõ kết quả; lần quét sau đủ hạn mới thử lại. Không bảo đảm exactly-once vì SES và DynamoDB không có giao dịch chung; kiểm tra log và NOTICE trước khi gửi lại thủ công.
 
@@ -118,14 +135,14 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 - Mọi metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ hợp lệ. Sample 0 thật được tính; thiếu mẫu, số âm, boolean, kiểu sai, NaN/infinity hoặc phép tính overflow tạo `INSUFFICIENT_DATA`. Tài nguyên thiếu thời điểm tạo hoặc chưa tồn tại đủ cửa sổ cũng có trạng thái này. Evidence giữ ngưỡng, đơn vị, số mẫu nhận/hợp lệ/lỗi và nguyên nhân; dữ liệu thiếu/lỗi không được thay bằng 0 hoặc dùng để kết luận ít hoạt động.
 - Collector lọc timestamp theo `[observation_start, observation_end)`, yêu cầu đúng lưới giờ và khử trùng điểm cùng timestamp. Phản hồi CloudWatch sai cấu trúc, timestamp xung đột hoặc phân trang lỗi làm scan `PARTIAL`, không sinh kết luận ít hoạt động từ chuỗi lỗi.
 - Bốn nhóm dịch vụ: `compute` (EC2), `storage` (EBS/Snapshot/S3 multipart), `database` (RDS), `network` (EIP/NAT/ALB/NLB). Profile cũ mặc định bật đủ bốn nhóm.
-- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn kết quả lưu ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt; `total_candidate_count` ghi số ứng viên trước khi cắt. Worker time budget 300 giây và dừng AWS reads trước 30 giây còn lại.
+- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn kết quả lưu ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt; `total_candidate_count` ghi số ứng viên trước khi cắt. Worker timeout 300 giây; collector dừng khi còn dưới 60 giây theo context/deadline để lưu dữ liệu. Registry dùng budget riêng, chừa tối thiểu 10 giây cho finalization.
 - Một account/người dùng, tối đa ba region. Mọi PUT `/connection` tạo connection version mới; result, observation và feedback cũ không áp dụng cho kết nối mới.
 - Quét thủ công tối thiểu 15 phút/lần. Job có deadline 15 phút; API hiển thị TIMED_OUT khi quá hạn và reconciler lưu trạng thái/history ở lượt đối soát kế tiếp khi hạ tầng hoạt động bình thường. Admission, connection version và run token ngăn job trùng/cũ ghi đè kết quả mới. Không đủ 60 giây trước STS thì worker kết thúc TIMED_OUT; hết budget trong collector tạo PARTIAL với dữ liệu hợp lệ đã có.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
-Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`, giữ các trường cũ cho frontend hiện tại. Nút giữ lại trên dashboard thuộc mục 9, chưa bổ sung ở mục 7.
+Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`; dashboard hỗ trợ đã xem, giữ lại và bỏ qua qua API `/feedback`.
 
-Phạm vi Task 7 được chốt cho chín loại trên. Báo cáo còn nêu các dịch vụ khác trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, cùng dữ liệu billing/cost; cần đầu vào collector của Task 6 và bộ rule tương ứng trước khi nghiệm thu các phần này. Hoàn thiện hiển thị/thao tác dashboard thuộc Task 9; kiểm thử local chưa chứng minh đã chạy trên AWS thật.
+Phạm vi hiện tại gồm chín loại trên cùng màn chi tiết evidence, phản hồi và lịch sử trên dashboard. Báo cáo còn nêu các dịch vụ khác trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, cùng dữ liệu billing/cost; cần đầu vào collector và bộ rule tương ứng trước khi nghiệm thu các phần này. Kiểm thử local chưa chứng minh đã chạy trên AWS thật.
 
 ## 6. API contract
 
@@ -141,29 +158,37 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 | GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện; bỏ keep/ignore khôi phục ứng viên còn được lưu |
 | GET | /history | Snapshot bất biến; `limit` 1–100, mặc định 20; `next_token` tenant-bound |
 | GET | /feedback | Feedback của kết nối hiện tại; `limit`/`next_token` như history |
-| PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; clear cũng dùng PUT |
+| PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; thời hạn UTC kết thúc bằng `Z`, null để xóa; clear cũng dùng PUT |
 | PUT | /notifications | Chỉ `enabled` boolean; email nhận lấy từ Cognito GetUser |
 | PUT | /keep | Handler nội bộ tương thích ngược: `region`, `resource_id`, `enabled` boolean; template hiện không xuất bản route |
 | PUT | /ignore | Handler nội bộ tương thích ngược: `region`, `resource_id`, `days` 1–30; template hiện không xuất bản route |
 
-Frontend poll `/findings` để cập nhật toàn bộ region; `/scans/{scanId}` theo dõi một job. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. `SUCCEEDED` chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
+Frontend poll `/findings` khi có QUEUED/RUNNING, tối đa 185 lượt; khi terminal hoặc lỗi thì dừng. `/scans/{scanId}` trả chi tiết một job, được UI dùng để mở lịch sử nhiều region. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. `SUCCEEDED` chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
 
 Worker giữ ứng viên bị `/feedback` che trong kết quả nội bộ, nên bỏ keep hoặc ignore hết hạn có thể làm chúng hiện lại mà không cần quét mới, kể cả sau lượt quét tiếp theo. Khả năng khôi phục giới hạn trong ứng viên được giữ; dữ liệu cũ chưa lưu ứng viên cần một lượt quét mới. API không xuất trường `candidates`. `/history` và `/scans/{scanId}` giữ snapshot lúc quét; phản hồi mới chỉ overlay `/findings`, không sửa lịch sử. Handler `/keep` và `/ignore` cũ dùng resource ID và chỉ tác động lượt quét sau; đây là cơ chế độc lập với `/feedback`.
 
 ## 7. Kiểm thử
 
-Xem `VALIDATION.md` để phân biệt kiểm tra đã chạy và kiểm tra AWS còn thiếu.
+Các lệnh dưới đây kiểm tra local, cần Python 3.12; Node.js cho kiểm tra JavaScript và Git cho kiểm tra diff. Tạo `.venv` nếu chưa có, hoặc dùng lại môi trường Python 3.12 phù hợp. Nếu thiếu pip, xem mục 3.2. Đặt `CRG_AWS_E2E=0` trong phiên này để discover không bật API thật từ biến môi trường được kế thừa. Điều kiện và cách chạy AWS E2E nằm trong [DEPLOYMENT.md](DEPLOYMENT.md#manual-release-gate).
 
 ```powershell
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+$env:CRG_AWS_E2E = '0'
+.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe -m playwright install chromium
+$env:UI_QA_DIR = Join-Path (Get-Location) '.preflight\ui-qa'
 .\.venv\Scripts\python.exe tests/ui_smoke.py
+node --check web/app.js
+.\.venv\Scripts\cfn-lint.exe template.yaml target-role.yaml web/target-role.yaml
+git diff --check
 ```
+
+Smoke tự khởi động demo riêng; không cần giữ server demo khác. Có thể dùng Chrome đã cài bằng cách đặt `CHROMIUM_EXECUTABLE` tới executable đã xác minh thay cho tải Chromium. Chọn regression theo thay đổi: `tests/ui_scope_filters.py`, `tests/ui_finding_details.py`, `tests/ui_finding_feedback.py`, `tests/ui_feedback_management.py`, `tests/ui_history_management.py`; `tests/ui_redesign.py` kiểm tra các trạng thái và `tests/ui_integrated_demo.py` kiểm tra tích hợp demo HTTP. Chạy từng script bằng Python trong `.venv`. Các suite này là local/demo/fixture.
 
 Nếu dùng SAM CLI: `sam validate --lint --region ap-southeast-1` rồi `sam build`. Dùng virtualenv riêng cho SAM nếu dependencies của SAM CLI xung đột với phiên bản test đã pin.
 
-Sau deploy, reviewer và executor phải là hai người khác nhau. Reviewer xác nhận change set không replace UserPool, Cognito chỉ admin tạo user, `ListUsers` không quá 5 user và target role đúng allowlist chỉ đọc. Executor chạy `CRG_AWS_E2E=1 ... test_aws_e2e.py` với hai token và manifest đã sanitize. EC2/EBS/EIP/Snapshot/S3 multipart cần evidence thật; RDS/NAT/ALB/NLB chỉ được SKIPPED với `RESOURCE_NOT_AVAILABLE` hoặc `COST_NOT_APPROVED`. SES không là release gate.
+Trước execute, reviewer và executor phải là hai người khác nhau; reviewer rà tác động UserPool replacement, Cognito admin-only, số user không quá 5 và allowlist chỉ đọc. Sau deploy, executor chạy AWS E2E riêng theo [DEPLOYMENT.md](DEPLOYMENT.md#aws-e2e-cho-rule-và-web); suite này đổi connection version, nên bằng chứng EBS/EIP đủ thời gian phải lấy bằng scan tiếp trên cùng kết nối. EC2/EBS/EIP/Snapshot/S3 multipart cần evidence thật; RDS/NAT/ALB/NLB chỉ được SKIPPED với `RESOURCE_NOT_AVAILABLE` hoặc `COST_NOT_APPROVED`. SES không là release gate.
 
 ## 8. Chi phí và dọn dẹp
 
@@ -171,7 +196,7 @@ Không giả định Free Tier bao phủ tất cả. Tài nguyên platform có t
 
 Không cần tạo EC2/RDS/NAT chỉ để trình diễn MVP. Tận dụng tài nguyên lab có sẵn hoặc xem demo mẫu. EBS/EIP/snapshot thử cũng có thể phát sinh phí.
 
-Để xóa: lấy đúng WebBucket trong Outputs và dọn **chỉ các file MVP** của bucket đó, rồi xóa stack `cloud-resource-guardian` trong CloudFormation. Xóa stack read role ở account đích để thu hồi truy cập. Artifact bucket `crg-artifacts-<account>-<region>` và Lambda log groups có thể cần dọn riêng sau khi kiểm tra. Xóa platform không xóa tài nguyên được quét. Không dọn bucket, stack hoặc resource khác của bạn.
+Khi được yêu cầu dọn môi trường, xác nhận đúng account/region/tên stack đã triển khai, lấy WebBucket từ Outputs và dọn **chỉ các file MVP** thuộc stack đó trước khi xóa chính stack đã xác nhận trong CloudFormation. Không mặc định tên stack vì môi trường thử dùng tên riêng. Xóa đúng stack read role ở account đích để thu hồi truy cập. Artifact bucket `crg-artifacts-<account>-<region>` có thể dùng chung nhiều stack; chỉ dọn artifact liên quan và kiểm tra log groups còn lại trước khi xử lý riêng. Xóa platform không xóa tài nguyên được quét.
 
 ## 9. Sơ đồ và tài liệu chính thức
 

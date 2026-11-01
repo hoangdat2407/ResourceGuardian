@@ -7,6 +7,7 @@ import sys
 import time
 import unittest
 import uuid
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -192,7 +193,7 @@ class ApiTest(unittest.TestCase):
 
     def test_scan_id_requires_canonical_uuid4(self):
         valid = str(uuid.uuid4())
-        row = {"scan_id": valid, "connection_version": "v1", "expires": int(time.time()) + 10}
+        row = {"scan_id": valid, "region": "ap-southeast-1", "connection_version": "v1", "expires": int(time.time()) + 10}
         with patch.object(app, "get", return_value=self.profile), patch.object(app, "all_items", return_value=[row]):
             self.assertEqual(app.api(event("GET", "/scans/" + valid), None)["statusCode"], 200)
         for invalid in ("11111111-1111-1111-1111-111111111111", valid.upper(), "-" * 36):
@@ -241,7 +242,8 @@ class ApiTest(unittest.TestCase):
     def test_feedback_clear_restores_worker_candidate_without_rewriting_history(self):
         clock = int(time.time())
         ident = "a" * 64
-        finding = {"finding_id": ident, "type": "EBS", "resource_id": "vol-demo", "level": "REVIEW"}
+        finding = {"finding_id": ident, "type": "EBS", "resource_id": "vol-demo", "level": "REVIEW",
+                   "region": "ap-southeast-1", "account_id": "123456789012", "evaluated_at": datetime_iso(clock)}
         collected = {"findings": [finding], "counts": {"EBS": 1}, "errors": [], "partial": False}
         context = MagicMock()
         context.get_remaining_time_in_millis.return_value = 200000
@@ -259,6 +261,9 @@ class ApiTest(unittest.TestCase):
 
                 with patch.object(app, "session"), patch.object(app, "collect_region", return_value=collected), patch.object(app.time, "time", return_value=clock):
                     scan(first)
+                    observed_finding = app.get(self.profile["pk"], "RESULT#ap-southeast-1")["findings"][0]
+                    for key in ("first_seen_at", "last_seen_at"):
+                        self.assertEqual(datetime.fromisoformat(observed_finding[key]).timestamp(), clock)
                     payload = {"region": "ap-southeast-1", "finding_id": ident, field: active}
                     self.assertEqual(app.api(event("PUT", "/feedback", body=payload), None)["statusCode"], 200)
                     scan(second)
@@ -266,7 +271,7 @@ class ApiTest(unittest.TestCase):
                     snapshot = next(row for row in app.all_items(self.profile["pk"], "HISTORY#") if row["scan_id"] == second)
                     self.assertNotIn("candidates", snapshot)
                     if field == "ignoreUntil":
-                        for offset, expected in ((3599, []), (3600, [finding])):
+                        for offset, expected in ((3599, []), (3600, [observed_finding])):
                             with patch.object(app.time, "time", return_value=clock + offset):
                                 current = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"][0]
                                 self.assertEqual(current["findings"], expected)
@@ -274,7 +279,7 @@ class ApiTest(unittest.TestCase):
                     payload[field] = clear
                     self.assertEqual(app.api(event("PUT", "/feedback", body=payload), None)["statusCode"], 200)
                     current = json.loads(app.api(event("GET", "/findings"), None)["body"])["results"][0]
-                    self.assertEqual(current["findings"], [finding])
+                    self.assertEqual(current["findings"], [observed_finding])
                     self.assertEqual(current["finding_count"], 1)
                     self.assertNotIn("candidates", current)
                     self.assertEqual(snapshot["findings"], [])
@@ -293,7 +298,7 @@ class ApiTest(unittest.TestCase):
     def test_scan_status_and_history_never_expose_private_candidates(self):
         scan_id = str(uuid.uuid4())
         row = {
-            "status": "SUCCEEDED", "scan_id": scan_id, "connection_version": "v1",
+            "status": "SUCCEEDED", "scan_id": scan_id, "region": "ap-southeast-1", "connection_version": "v1",
             "findings": [], "candidates": [{"finding_id": "a" * 64}],
         }
         for path in ("/scans/" + scan_id, "/history"):

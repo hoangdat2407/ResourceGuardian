@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -77,7 +78,9 @@ class Notifications(unittest.TestCase):
             "region": self.result["region"], "connection_version": "v1",
         })
         findings = [
-            {**finding, "finding_id": str(index) * 64}
+            {**finding, "finding_id": str(index) * 64, "region": self.result["region"],
+             "account_id": self.profile["account_id"],
+             "evaluated_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat()}
             for index, finding in enumerate(self.result["findings"])
         ]
         collected = {"findings": findings, "counts": {"EBS": 2}, "partial": False, "errors": []}
