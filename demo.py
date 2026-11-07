@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from rules import (config, evaluate_ebs, evaluate_ec2, evaluate_eip, evaluate_load_balancer,
-                   evaluate_nat_gateway, evaluate_rds, evaluate_s3_multipart, evaluate_snapshot, finding_id)
+                   evaluate_lambda, evaluate_log_group, evaluate_nat_gateway, evaluate_rds, evaluate_s3_multipart, evaluate_snapshot, finding_id)
 WEB = Path(__file__).parent / 'web'
 LOCK = threading.RLock()
 SERVICE_GROUPS = ('compute','storage','database','network')
@@ -44,7 +44,7 @@ def sample_findings(region, observed_at):
   (evaluate_nat_gateway({'NatGatewayId':'nat-demo','State':'available','CreateTime':created,'VpcId':'vpc-demo','SubnetId':'subnet-demo'},[zeros,zeros],cfg,start),'nat-demo'),
   (evaluate_load_balancer({'LoadBalancerName':'alb-demo','LoadBalancerArn':alb_arn,'Type':'application','State':{'Code':'active'},'CreatedTime':created,'Scheme':'internet-facing'},[zeros],cfg,start),alb_arn),
   (evaluate_load_balancer({'LoadBalancerName':'nlb-demo','LoadBalancerArn':nlb_arn,'Type':'network','State':{'Code':'active'},'CreatedTime':created,'Scheme':'internal'},[zeros],cfg,start),nlb_arn),
- ]
+]
  statistics={'EC2':{'cpu':'Maximum','netin':'Sum','netout':'Sum'},'RDS':{'cpu':'Maximum','connections':'Maximum'},
              'NAT_GATEWAY':{'source':'Sum','destination':'Sum'},'ALB':{'requests':'Sum'},'NLB':{'flows':'Sum'}}
  findings=[]
@@ -65,10 +65,10 @@ def observe_finding(item, observed_at):
  item.update(first_seen_at=datetime.fromtimestamp(first,timezone.utc).isoformat().replace('+00:00','Z'),
              last_seen_at=datetime.fromtimestamp(last,timezone.utc).isoformat().replace('+00:00','Z'))
 def normalized_groups(value):
- if value is None:return list(SERVICE_GROUPS)
- if not isinstance(value,list) or not 1<=len(value)<=4 or any(not isinstance(group,str) or group not in SERVICE_GROUPS for group in value) or len(set(value))!=len(value):
-  raise ValueError('Choose 1 to 4 unique supported service groups')
- return list(value)
+  if value is None:return list(SERVICE_GROUPS)
+  if not isinstance(value,list) or not 1<=len(value)<=len(SERVICE_GROUPS) or any(not isinstance(group,str) or group not in SERVICE_GROUPS for group in value) or len(set(value))!=len(value):
+   raise ValueError('Choose 1 to {} unique supported service groups'.format(len(SERVICE_GROUPS)))
+  return list(value)
 def feedback_findings(candidates):
  visible=[];now=time.time()
  for finding in candidates:

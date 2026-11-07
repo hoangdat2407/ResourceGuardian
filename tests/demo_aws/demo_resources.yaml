@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Resource Guardian - Real AWS Resource Detection Experiment Resources.
+  All resources are isolated, minimal footprint, clearly tagged, and strictly intended for testing detection rules.
+
+Parameters:
+  Project:
+    Type: String
+    Default: CloudResourceGuardian
+  Environment:
+    Type: String
+    Default: Demo
+  Purpose:
+    Type: String
+    Default: UnusedResourceDetection
+
+Resources:
+  # TC01 - EBS Volume unattached (1 GiB gp3 minimal size)
+  DemoEbsVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Size: 1
+      VolumeType: gp3
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC01-EBS-Unattached
+        - Key: Name
+          Value: crg-demo-ebs-unattached
+
+  # TC02 - Elastic IP unassociated
+  DemoElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC02-EIP-Unassociated
+        - Key: Name
+          Value: crg-demo-eip-unassociated
+
+  # TC03 - Security Group unused (no ENI, no reference)
+  DemoSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Demo Security Group with no ENI attachment or cross-group reference
+      GroupName: crg-demo-sg-unused
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC03-SG-Unused
+
+  # TC06 - False Positive Control: Security Group tagged with guardian:keep=true
+  DemoKeepSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Demo Security Group with guardian:keep tag to verify false positive suppression
+      GroupName: crg-demo-sg-keep-control
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC06-FP-Control-Keep
+        - Key: "guardian:keep"
+          Value: "true"
+
+  # TC04 - ECR Repository with no lifecycle policy
+  DemoEcrRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: crg-demo-ecr-no-lifecycle
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC04-ECR-No-Lifecycle
+
+  # TC05 - Minimal Lambda Function with 0 invocations
+  DemoLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BasicExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+
+  DemoLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: crg-demo-lambda-unused
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DemoLambdaRole.Arn
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"statusCode": 200, "body": "demo"}
+      MemorySize: 128
+      Timeout: 10
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: !Ref Purpose
+        - Key: TestCase
+          Value: TC05-Lambda-Unused
+
+Outputs:
+  EbsVolumeId:
+    Description: Unattached EBS Volume ID (TC01)
+    Value: !Ref DemoEbsVolume
+  ElasticIpAllocationId:
+    Description: Unassociated Elastic IP Allocation ID (TC02)
+    Value: !GetAtt DemoElasticIp.AllocationId
+  ElasticIpAddress:
+    Description: Unassociated Public IP Address (TC02)
+    Value: !Ref DemoElasticIp
+  UnusedSecurityGroupId:
+    Description: Unused Security Group ID (TC03)
+    Value: !Ref DemoSecurityGroup
+  KeepSecurityGroupId:
+    Description: Exemption Controlled Security Group ID (TC06)
+    Value: !Ref DemoKeepSecurityGroup
+  EcrRepositoryName:
+    Description: ECR Repository without Lifecycle Policy (TC04)
+    Value: !Ref DemoEcrRepo
+  LambdaFunctionName:
+    Description: Unused Lambda Function Name (TC05)
+    Value: !Ref DemoLambdaFunction

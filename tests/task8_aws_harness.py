@@ -142,7 +142,11 @@ def checked_archive(path):
             if entry.name == "task8_faults.py":
                 raise ValueError("Final ZIP must not contain a Task 8 fault wrapper")
         for source in (ROOT / "src").glob("*.py"):
-            if archive.read(source.name) != source.read_bytes():
+            try:
+                source_bytes = archive.read(source.name)
+            except KeyError:
+                raise ValueError("Final ZIP is missing required source: " + source.name)
+            if source_bytes != source.read_bytes():
                 raise ValueError("Final ZIP source does not match checkout: " + source.name)
     return data
 

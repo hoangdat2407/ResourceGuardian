@@ -12,7 +12,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config
-from rules import config, keep, evaluate_ec2, evaluate_ebs, evaluate_eip, evaluate_snapshot
+from rules import config, keep, THRESHOLD_METADATA
 from collectors import SDK_CONFIG, collect_region
 
 log = logging.getLogger()
@@ -21,6 +21,7 @@ table = boto3.resource("dynamodb").Table(os.environ["TABLE"])
 invoker = boto3.client("lambda")
 REGIONS = {"ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "us-east-1", "us-west-2", "eu-west-1"}
 SERVICE_GROUPS = ("compute", "storage", "database", "network")
+ALL_SERVICE_GROUPS = ("compute", "storage", "database", "network", "serverless", "monitoring", "security", "backup", "containers", "nosql", "integration")
 STATIC_ROUTES = {
     "/me": {"GET"},
     "/connection": {"PUT"},
@@ -87,11 +88,11 @@ def normalized_groups(value):
         return list(SERVICE_GROUPS)
     if (
         not isinstance(value, list)
-        or not 1 <= len(value) <= len(SERVICE_GROUPS)
-        or any(not isinstance(group, str) or group not in SERVICE_GROUPS for group in value)
+        or not 1 <= len(value) <= len(ALL_SERVICE_GROUPS)
+        or any(not isinstance(group, str) or group not in ALL_SERVICE_GROUPS for group in value)
         or len(set(value)) != len(value)
     ):
-        raise ValueError("Choose 1 to 4 unique supported service groups")
+        raise ValueError(f"Choose 1 to {len(ALL_SERVICE_GROUPS)} unique supported service groups")
     return value
 
 
@@ -115,6 +116,7 @@ def public_profile(profile):
         api_principal=os.environ["API_PRINCIPAL"],
         scan_principal=os.environ["SCAN_PRINCIPAL"],
         email_available=bool(os.environ.get("SES_SENDER")),
+        threshold_metadata=THRESHOLD_METADATA,
     )
     return result
 

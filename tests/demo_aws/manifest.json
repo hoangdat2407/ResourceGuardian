@@ -1,0 +1,49 @@
+{
+  "experiment": "CloudResourceGuardian_RealDetectionDemo",
+  "created_at": "2026-11-07T13:55:36Z",
+  "account_id": "376129867108",
+  "region": "ap-southeast-1",
+  "stack_name": "crg-demo-experiment-stack",
+  "elapsed_seconds": 35.9,
+  "resources": {
+    "TC01_EBS_UNATTACHED": {
+      "service": "EBS",
+      "resource_id": "vol-0dd1bd1d0f63a7f87",
+      "expected_rule": "EBS_UNATTACHED",
+      "initial_status": "OBSERVING"
+    },
+    "TC02_EIP_UNASSOCIATED": {
+      "service": "EIP",
+      "resource_id": "eipalloc-094552008df2fbdc3",
+      "public_ip": "54.151.234.194",
+      "expected_rule": "EIP_UNASSOCIATED",
+      "initial_status": "OBSERVING"
+    },
+    "TC03_SECURITY_GROUP_UNUSED": {
+      "service": "SECURITY_GROUP",
+      "resource_id": "sg-08a66cd261539c3e4",
+      "group_name": "crg-demo-sg-unused",
+      "expected_rule": "SECURITY_GROUP_UNUSED",
+      "initial_status": "OBSERVING"
+    },
+    "TC04_ECR_NO_LIFECYCLE": {
+      "service": "ECR_REPOSITORY",
+      "resource_id": "crg-demo-ecr-no-lifecycle",
+      "expected_rule": "ECR_NO_LIFECYCLE",
+      "initial_status": "REVIEW"
+    },
+    "TC05_LAMBDA_UNUSED": {
+      "service": "LAMBDA_FUNCTION",
+      "resource_id": "crg-demo-lambda-unused",
+      "expected_rule": "LAMBDA_UNUSED",
+      "initial_status": "REVIEW"
+    },
+    "TC06_FALSE_POSITIVE_CONTROL": {
+      "service": "SECURITY_GROUP",
+      "resource_id": "sg-092e7ea0b1bd40bd9",
+      "group_name": "crg-demo-sg-keep-control",
+      "expected_rule": "NONE_TAGGED_KEEP",
+      "initial_status": "SUPPRESSED"
+    }
+  }
+}

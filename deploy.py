@@ -28,7 +28,9 @@ def artifact_bytes(path):
    if any(part=='.env' or part.startswith('.env.') for part in entry.parts) or entry.name in {'credentials', 'credentials.json', '.pypirc', 'id_rsa', 'id_ed25519'} or '.aws' in entry.parts:raise ValueError('Sensitive configuration/key filename in artifact')
    if entry.name=='task8_faults.py':raise ValueError('Test fault wrappers cannot be deployed with deploy.py')
   for source in (ROOT/'src').glob('*.py'):
-   if archive.read(source.name)!=source.read_bytes():raise ValueError('Artifact source does not match checkout: '+source.name)
+   try: content=archive.read(source.name)
+   except KeyError: raise ValueError('Artifact missing source: '+source.name)
+   if content!=source.read_bytes():raise ValueError('Artifact source does not match checkout: '+source.name)
  return data
 
 def main(argv=None):

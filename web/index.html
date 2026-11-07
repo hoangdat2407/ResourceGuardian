@@ -1,25 +1,285 @@
 <!doctype html>
 <html lang="vi">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#193849"><title>Cloud Resource Guardian</title><link rel="stylesheet" href="styles.css"><script src="app.js" defer></script></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#193849">
+<title>Cloud Resource Guardian</title>
+<link rel="stylesheet" href="styles.css">
+<script src="app.js?v=5" defer></script>
+</head>
 <body>
 <a class="skip-link" href="#main">Bỏ qua điều hướng</a>
 <div id="demo-banner" class="demo-banner" hidden>Bản demo trên máy • Dữ liệu mẫu, không kết nối AWS</div>
 <div class="shell">
-<aside class="sidebar"><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true">G</span><span>Cloud Guardian<small>Giám sát tài nguyên AWS</small></span></a><nav aria-label="Điều hướng"><button data-page="overview" class="active">Tổng quan</button><button data-page="findings">Cần kiểm tra <span id="nav-count">—</span></button><button data-page="history">Lịch sử quét</button><button data-page="connection">Kết nối AWS</button><button data-page="settings">Cấu hình & cảnh báo</button></nav><div class="sidebar-foot"><span class="dot"></span> Quyền đọc. Quyền chủ động.<p>Guardian đưa ra bằng chứng.<br>Bạn quyết định cách xử lý.</p><span class="resource-scope">Tính toán · Lưu trữ · Cơ sở dữ liệu · Mạng<br>EC2 / EBS / Elastic IP / Snapshot / S3 multipart / RDS / NAT Gateway / ALB / NLB</span></div></aside>
-<main id="main" tabindex="-1"><header class="topbar"><span>AWS / <strong id="breadcrumb">Tổng quan</strong></span><button id="login" class="button secondary">Đăng nhập</button></header>
+<aside class="sidebar">
+<a class="brand" href="#overview">
+<span>Cloud Guardian</span>
+</a>
+<nav aria-label="Điều hướng">
+<div id="nav-guest">
+<button id="nav-login" data-guest="login" class="active">Đăng nhập</button>
+<button id="nav-register" data-guest="register">Đăng ký</button>
+<button id="nav-forgot" data-guest="forgot">Quên mật khẩu</button>
+</div>
+<div id="nav-auth" hidden>
+<button data-page="overview" class="active">Tổng quan</button>
+<button data-page="findings">Tài nguyên cần kiểm tra <span id="nav-count">—</span></button>
+<button data-page="history">Lịch sử quét</button>
+<button data-page="connection">Kết nối AWS</button>
+<button data-page="settings">Cấu hình</button>
+<button id="nav-logout" class="nav-logout">Đăng xuất</button>
+</div>
+</nav>
+</aside>
+<main id="main" tabindex="-1">
+<header class="topbar">
+<span>AWS / <strong id="breadcrumb">Đăng nhập</strong></span>
+<button id="login" class="button secondary">Đăng nhập</button>
+</header>
 <div id="status" role="status" aria-live="polite" hidden></div>
-<section id="welcome" class="welcome"><h1>Tài nguyên có thể bị bỏ quên.<br>Bằng chứng thì không.</h1><p>Kiểm tra chín loại tài nguyên trong bốn nhóm: tính toán (EC2), lưu trữ (EBS, snapshot, S3 multipart), cơ sở dữ liệu (RDS) và mạng (Elastic IP, NAT Gateway, ALB, NLB).</p><p>Kết nối tài khoản AWS bằng quyền đọc. Kiểm tra lý do, rồi quyết định tài nguyên nào cần giữ.</p><button id="start" class="button primary">Đăng nhập để bắt đầu</button><div class="welcome-features"><div><strong>Kết nối bằng role</strong><span>Không nhập access key hay secret key.</span></div><div><strong>Theo dõi qua từng lần quét</strong><span>Có cửa sổ quan sát và bằng chứng cụ thể.</span></div><div><strong>Bạn giữ quyền xử lý</strong><span>Không tự dừng hoặc xóa tài nguyên.</span></div></div></section>
+<section id="welcome" class="welcome">
+<div id="view-login" class="guest-view">
+<article class="card auth-card">
+<h2>Đăng nhập</h2>
+<button id="start" class="button primary auth-btn">Đăng nhập với AWS Cognito</button>
+<div class="auth-links">
+<span>Chưa có tài khoản? <button type="button" class="text-button" data-switch="register">Đăng ký</button></span>
+<span><button type="button" class="text-button" data-switch="forgot">Quên mật khẩu?</button></span>
+</div>
+</article>
+</div>
+<div id="view-register" class="guest-view" hidden>
+<article class="card auth-card">
+<h2>Đăng ký tài khoản</h2>
+<form id="register-form" novalidate>
+<label for="reg-email">Email<input id="reg-email" type="email" required autocomplete="email" placeholder="name@company.com"></label>
+<label for="reg-password">Mật khẩu
+<div class="field-password-wrap">
+<input id="reg-password" type="password" required autocomplete="new-password">
+<button type="button" class="btn-toggle-pw" data-for="reg-password">Hiện</button>
+</div>
+</label>
+<small class="input-hint">Tối thiểu 12 ký tự, gồm chữ hoa, chữ thường, số và ký tự đặc biệt</small>
+<label for="reg-confirm">Xác nhận mật khẩu
+<div class="field-password-wrap">
+<input id="reg-confirm" type="password" required autocomplete="new-password">
+<button type="button" class="btn-toggle-pw" data-for="reg-confirm">Hiện</button>
+</div>
+</label>
+<button id="reg-submit" class="button primary auth-btn" type="submit">Đăng ký</button>
+<div id="reg-feedback" class="inline-feedback" role="status" hidden></div>
+</form>
+<div class="auth-links">
+<span>Đã có tài khoản? <button type="button" class="text-button" data-switch="login">Đăng nhập</button></span>
+</div>
+</article>
+</div>
+<div id="view-verify" class="guest-view" hidden>
+<article class="card auth-card">
+<h2>Xác minh email</h2>
+<p id="verify-info" class="muted">Nhập mã xác minh đã gửi tới email của bạn.</p>
+<form id="verify-form" novalidate>
+<label for="verify-email">Email<input id="verify-email" type="email" required autocomplete="email"></label>
+<label for="verify-code">Mã xác minh<input id="verify-code" type="text" placeholder="123456" required autocomplete="one-time-code"></label>
+<div class="auth-actions">
+<button id="verify-submit" class="button primary" type="submit">Xác minh</button>
+<button id="verify-resend" class="button secondary" type="button">Gửi lại mã</button>
+</div>
+<div id="verify-feedback" class="inline-feedback" role="status" hidden></div>
+</form>
+<div class="auth-links">
+<span><button type="button" class="text-button" data-switch="login">Quay lại Đăng nhập</button></span>
+</div>
+</article>
+</div>
+<div id="view-forgot" class="guest-view" hidden>
+<article class="card auth-card">
+<h2>Quên mật khẩu</h2>
+<form id="forgot-form" novalidate>
+<label for="forgot-email">Email<input id="forgot-email" type="email" required autocomplete="email" placeholder="name@company.com"></label>
+<button id="forgot-submit" class="button primary auth-btn" type="submit">Gửi mã xác nhận</button>
+<div id="forgot-feedback" class="inline-feedback" role="status" hidden></div>
+</form>
+<div class="auth-links">
+<span><button type="button" class="text-button" data-switch="login">Quay lại Đăng nhập</button></span>
+<span><button type="button" class="text-button" data-switch="reset">Đã có mã? Đặt lại mật khẩu</button></span>
+</div>
+</article>
+</div>
+<div id="view-reset" class="guest-view" hidden>
+<article class="card auth-card">
+<h2>Đặt lại mật khẩu</h2>
+<form id="reset-form" novalidate>
+<label for="reset-email">Email<input id="reset-email" type="email" required autocomplete="email"></label>
+<label for="reset-code">Mã xác minh<input id="reset-code" type="text" placeholder="123456" required></label>
+<label for="reset-password">Mật khẩu mới
+<div class="field-password-wrap">
+<input id="reset-password" type="password" required autocomplete="new-password">
+<button type="button" class="btn-toggle-pw" data-for="reset-password">Hiện</button>
+</div>
+</label>
+<small class="input-hint">Tối thiểu 12 ký tự, gồm chữ hoa, chữ thường, số và ký tự đặc biệt</small>
+<label for="reset-confirm">Xác nhận mật khẩu mới
+<div class="field-password-wrap">
+<input id="reset-confirm" type="password" required autocomplete="new-password">
+<button type="button" class="btn-toggle-pw" data-for="reset-confirm">Hiện</button>
+</div>
+</label>
+<button id="reset-submit" class="button primary auth-btn" type="submit">Đặt lại mật khẩu</button>
+<div id="reset-feedback" class="inline-feedback" role="status" hidden></div>
+</form>
+<div class="auth-links">
+<span><button type="button" class="text-button" data-switch="login">Quay lại Đăng nhập</button></span>
+</div>
+</article>
+</div>
+</section>
 <div id="app" hidden>
-<div class="page-heading"><div><h1 id="page-title">Tổng quan tài nguyên</h1><p id="page-subtitle">Tập trung vào tài nguyên cần bạn kiểm tra.</p></div><button id="scan" class="button primary">Quét ngay</button></div>
-<section id="page-overview" class="page"><div id="overview-state" class="state-panel" aria-live="polite"></div><div class="metrics"><article><span>Tài nguyên đã đọc</span><strong id="total">—</strong><small>Trong kết quả hiện có</small></article><article class="metric-review"><span>Cần kiểm tra</span><strong id="review">—</strong><small>Cảnh báo đang hiển thị</small></article><article><span>Đang quan sát</span><strong id="observing">—</strong><small>Chưa đủ thời gian theo dõi</small></article><article><span>Thiếu dữ liệu</span><strong id="insufficient">—</strong><small>Chưa thể kết luận</small></article></div><div class="overview-grid"><article class="card"><div class="card-head"><h2>Phạm vi theo dõi</h2><span id="account-badge" class="badge">Chưa kết nối</span></div><p id="account-name" class="account-name">Kết nối tài khoản AWS của bạn</p><p id="account-regions" class="muted"></p><p id="account-service-groups" class="muted"></p><button class="button secondary" data-go="connection">Quản lý kết nối</button></article><article class="card"><h2>Lần quét gần nhất</h2><div id="scan-summary"></div><button id="refresh" class="button secondary">Tải lại kết quả</button></article></div><article class="card"><div class="card-head"><h2>Ưu tiên kiểm tra</h2><button class="text-button" data-go="findings">Xem tất cả</button></div><div id="priority-list"></div></article><p class="footnote">Chỉ quét các region đã chọn, tối đa 100 tài nguyên mỗi loại và hiển thị 50 cảnh báo mỗi region. Cảnh báo là ứng viên cần xem xét, không phải quyết định xóa.</p></section>
-<section id="page-findings" class="page" hidden><article class="card"><div class="filters"><label>Tìm tài nguyên<input id="search" type="search" placeholder="Resource ID hoặc lý do"></label><label>Nhóm dịch vụ<select id="filter-group"><option value="">Tất cả</option></select></label><label>Loại tài nguyên<select id="filter-type"><option value="">Tất cả</option></select></label><label>Region<select id="filter-region"><option value="">Tất cả</option></select></label><label>Trạng thái<select id="filter-level"><option value="">Tất cả</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label><label>Đã xem<select id="filter-acknowledged"><option value="">Tất cả</option><option value="acknowledged">Đã xem</option><option value="unacknowledged">Chưa xem</option></select></label></div><p id="findings-scope" class="muted" aria-live="polite"></p><div id="findings-list"></div></article><article id="feedback-management" class="card"><div class="card-head"><h2>Đang giữ và bỏ qua</h2><button id="refresh-feedback" type="button" class="button secondary">Tải lại phản hồi</button></div><p class="muted">Quản lý phản hồi của kết nối hiện tại. Bỏ một cờ không xóa các cờ khác; finding chỉ hiện lại khi còn được lưu và không bị cơ chế khác ẩn.</p><p id="feedback-summary" class="muted" role="status" aria-live="polite" tabindex="-1">Chưa tải phản hồi.</p><div id="feedback-list"></div><button id="feedback-load-more" type="button" class="button secondary" hidden>Tải thêm</button></article></section>
-<section id="page-history" class="page" hidden><article class="card"><div class="card-head"><h2>Kết quả quét theo region</h2><button id="refresh-history" class="button secondary">Tải lại</button></div><p class="muted">Lưu tối đa 30 ngày, chỉ hiển thị kết quả của kết nối hiện tại. Chọn Xem để mở các region của cùng lượt quét.</p><p id="history-summary" class="muted" role="status" aria-live="polite" tabindex="-1"></p><div id="history-list"></div><button id="history-load-more" class="button secondary" hidden>Tải thêm</button><div id="history-detail" tabindex="-1"></div></article></section>
+<div class="page-heading">
+<div>
+<h1 id="page-title">Tổng quan</h1>
+<p id="page-subtitle" hidden></p>
+</div>
+<button id="scan" class="button primary">Quét ngay</button>
+</div>
+<section id="page-overview" class="page">
+<div id="overview-state" class="state-panel" aria-live="polite"></div>
+<div class="metrics">
+<article><span>Tài nguyên đã quét</span><strong id="total">—</strong></article>
+<article class="metric-review"><span>Cần kiểm tra</span><strong id="review">—</strong></article>
+<article><span>Đang quan sát</span><strong id="observing">—</strong></article>
+<article><span>Thiếu dữ liệu</span><strong id="insufficient">—</strong></article>
+</div>
+<div class="overview-grid">
+<article class="card">
+<div class="card-head"><h2>Phạm vi theo dõi</h2><span id="account-badge" class="badge">Chưa kết nối</span></div>
+<p id="account-name" class="account-name">Chưa kết nối AWS</p>
+<p id="account-regions" class="muted"></p>
+<p id="account-service-groups" class="muted"></p>
+<button class="button secondary" data-go="connection">Quản lý kết nối</button>
+</article>
+<article class="card">
+<h2>Lần quét gần nhất</h2>
+<div id="scan-summary"></div>
+<button id="refresh" class="button secondary">Tải lại kết quả</button>
+</article>
+</div>
+<article class="card">
+<div class="card-head"><h2>Ưu tiên kiểm tra</h2><button class="text-button" data-go="findings">Xem tất cả</button></div>
+<div id="priority-list"></div>
+</article>
+</section>
+<section id="page-findings" class="page" hidden>
+<article class="card">
+<div class="filters">
+<label>Tìm tài nguyên<input id="search" type="search" placeholder="Resource ID hoặc lý do"></label>
+<label>Nhóm dịch vụ<select id="filter-group"><option value="">Tất cả</option></select></label>
+<label>Loại tài nguyên<select id="filter-type"><option value="">Tất cả</option></select></label>
+<label>Region<select id="filter-region"><option value="">Tất cả</option></select></label>
+<label>Trạng thái<select id="filter-level"><option value="">Tất cả</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label>
+<label>Đã xem<select id="filter-acknowledged"><option value="">Tất cả</option><option value="acknowledged">Đã xem</option><option value="unacknowledged">Chưa xem</option></select></label>
+</div>
+<p id="findings-scope" class="muted" aria-live="polite"></p>
+<div id="findings-list"></div>
+</article>
+<article id="feedback-management" class="card">
+<div class="card-head"><h2>Đang giữ và bỏ qua</h2><button id="refresh-feedback" type="button" class="button secondary">Tải lại phản hồi</button></div>
+<p class="muted">Quản lý phản hồi của kết nối hiện tại.</p>
+<p id="feedback-summary" class="muted" role="status" aria-live="polite" tabindex="-1">Chưa tải phản hồi.</p>
+<div id="feedback-list"></div>
+<button id="feedback-load-more" type="button" class="button secondary" hidden>Tải thêm</button>
+</article>
+</section>
+<section id="page-history" class="page" hidden>
+<article class="card">
+<div class="card-head"><h2>Lịch sử quét</h2><button id="refresh-history" class="button secondary">Tải lại</button></div>
+<p class="muted">Lưu tối đa 30 ngày cho kết nối hiện tại.</p>
+<p id="history-summary" class="muted" role="status" aria-live="polite" tabindex="-1"></p>
+<div id="history-list"></div>
+<button id="history-load-more" class="button secondary" hidden>Tải thêm</button>
+<div id="history-detail" tabindex="-1"></div>
+</article>
+</section>
 <section id="page-connection" class="page" hidden>
-<div class="connection-intro"><h2>Một role chỉ đọc, kết nối với tài khoản của bạn.</h2><p>Chuẩn bị quyền tạo IAM Role trong AWS account cần quét. Mỗi người dùng kết nối một account, chọn từ 1 đến 3 region và từ 1 đến 4 nhóm dịch vụ. Không cần access key.</p></div>
-<article class="connection-step"><div class="step-heading"><span class="step-number">1</span><h2>Tạo read role trong AWS</h2></div><div class="setup-grid"><div><p>Tải template có sẵn. Template cấp quyền đọc inventory và metrics cho chín loại MVP: EC2, EBS, Elastic IP, snapshot, S3 multipart, RDS, NAT Gateway, ALB và NLB; có đọc AMI để đối chiếu snapshot.</p><a id="download-template" class="button secondary" href="target-role.yaml" download>Tải target-role.yaml</a><ol class="instructions"><li>Mở <a href="https://console.aws.amazon.com/cloudformation/home?region=ap-southeast-1" target="_blank" rel="noopener noreferrer">AWS CloudFormation (tab mới)</a> trong <strong>account cần quét</strong>.</li><li>Chọn <strong>Create stack → With new resources (standard)</strong>. Chọn <strong>Choose an existing template → Upload a template file → Choose file</strong>, tải file vừa lưu rồi chọn <strong>Next</strong>.</li><li>Đặt <strong>Stack name</strong>, ví dụ <code>guardian-read-role-yourname</code>. Trong <strong>Parameters</strong>, dán ba giá trị bên cạnh vào các ô cùng tên. Đặt <strong>RoleSuffix</strong> riêng, ví dụ <code>yourname</code> (1–30 chữ, số hoặc dấu gạch ngang).</li><li>Chọn <strong>Next</strong>, giữ tùy chọn mặc định. Ở bước cấu hình hoặc trang xem lại, đánh dấu xác nhận tạo IAM resources với custom names, rồi chọn <strong>Submit</strong>.</li><li>Chờ <strong>CREATE_COMPLETE</strong>. Mở tab <strong>Outputs</strong>, sao chép giá trị <strong>RoleArn</strong> và dán ở bước 2.</li></ol><details><summary>Đã có role hoặc tạo stack bị lỗi?</summary><p>Role đã có phải tin cậy đúng hai principal và ExternalId của người dùng đang đăng nhập. Không tạo lại stack đang tồn tại. Nếu tên role bị trùng, dùng RoleSuffix riêng; xem tab Events để biết lỗi cụ thể.</p></details></div><aside class="parameter-sheet"><h3>Điền vào Parameters</h3><p class="muted">Sao chép nguyên giá trị. Đây là đầu vào của template, không phải Role ARN cần nhập bên dưới.</p><div id="principals"></div><p class="footnote">ExternalId gắn với người dùng đang đăng nhập. Không dùng ExternalId của tài khoản Guardian khác.</p></aside></div></article>
-<article class="connection-step"><div class="step-heading"><span class="step-number">2</span><h2>Kiểm tra và lưu kết nối</h2></div><form id="connection-form"><label>Role ARN từ tab Outputs<input id="role" required placeholder="arn:aws:iam::123456789012:role/GuardianReadRole-yourname" autocomplete="off" spellcheck="false" aria-describedby="role-help"></label><p id="role-help" class="muted">Dùng role tên GuardianReadRole-&lt;suffix&gt;, không có path. Không dán ARN của API principal hoặc scan principal.</p><fieldset><legend>Region được quét <span class="muted">— chọn từ 1 đến 3</span></legend><div id="region-options" class="region-options"></div></fieldset><fieldset aria-describedby="service-group-help"><legend>Nhóm dịch vụ được quét <span class="muted">— chọn từ 1 đến 4</span></legend><div id="service-group-options" class="region-options service-group-options"></div><p id="service-group-help" class="muted">MVP hỗ trợ chín loại tài nguyên trong bốn nhóm: tính toán, lưu trữ, cơ sở dữ liệu và mạng. Chỉ các nhóm đã chọn được quét.</p></fieldset><p class="footnote">Chọn region đang chứa tài nguyên của bạn. Thay đổi role, region hoặc nhóm dịch vụ sẽ bắt đầu cửa sổ quan sát mới và chỉ hiển thị lịch sử của kết nối mới.</p><button id="connect" class="button primary" type="submit">Kiểm tra và lưu kết nối</button><div id="connection-feedback" role="status" aria-live="polite" hidden></div></form></article>
-<article class="connection-step"><div class="step-heading"><span class="step-number">3</span><h2>Chạy lần quét đầu tiên</h2></div><p id="first-scan-note">Sau khi lưu kết nối, chọn Quét ngay. Kết quả tự cập nhật mỗi 5 giây khi đang quét.</p><button id="first-scan" class="button primary" disabled>Quét ngay</button><button class="button secondary" data-go="overview">Xem tổng quan</button><p class="footnote">Hai lần quét cách nhau ít nhất 15 phút. EBS và Elastic IP cần thời gian quan sát; EC2, RDS, NAT Gateway, ALB và NLB có thể thiếu metrics. Không có cảnh báo ở lần đầu không đồng nghĩa toàn bộ account đã tối ưu.</p></article></section>
-<section id="page-settings" class="page" hidden><article class="card"><h2>Ngưỡng phát hiện và lịch quét</h2><form id="settings-form"><div class="settings-grid" id="settings-fields"></div><p class="muted">Cửa sổ quan sát dùng chung cho EC2, RDS, NAT Gateway, ALB và NLB. EBS và Elastic IP tính thời gian từ khi ứng dụng quan sát trạng thái không sử dụng. Ngưỡng S3 multipart cố định: quá 7 ngày. Ngưỡng mới áp dụng cho lần quét tiếp theo.</p><button id="save-settings" class="button primary" type="submit">Lưu cấu hình</button><div id="save-settings-feedback" class="inline-feedback" role="status" hidden></div></form></article><article class="card"><h2>Cảnh báo email</h2><p>Gửi tới email đã xác minh của tài khoản đăng nhập khi danh sách tài nguyên cần kiểm tra thay đổi.</p><label class="check"><input id="email-enabled" type="checkbox"> Bật cảnh báo email</label><p id="email-note" class="muted"></p><button id="save-email" class="button secondary">Lưu lựa chọn email</button><div id="save-email-feedback" class="inline-feedback" role="status" hidden></div></article><article class="card note-card"><h2>Phản hồi cảnh báo</h2><p>Đánh dấu đã xem vẫn giữ cảnh báo trong danh sách. Giữ lại hoặc bỏ qua từ 1 đến 30 ngày (mặc định 7 ngày) sẽ ẩn cảnh báo sau khi lưu thành công. Các cờ phản hồi độc lập; tài nguyên AWS không thay đổi.</p></article></section>
-</div></main></div>
-<dialog id="finding-dialog" aria-labelledby="finding-detail-title" aria-describedby="finding-detail-context"><div class="finding-dialog-heading"><h2 id="finding-detail-title">Chi tiết finding</h2><button id="close-finding-detail" type="button" class="button secondary" autofocus>Đóng chi tiết</button></div><p id="finding-detail-context" class="muted"></p><div id="finding-detail-content"></div></dialog>
-</body></html>
+<article class="connection-step">
+<div class="step-heading"><span class="step-number">1</span><h2>Tạo read role trong AWS</h2></div>
+<div class="setup-grid">
+<div>
+<p>Tải template CloudFormation tạo IAM Role chỉ đọc cho account cần quét.</p>
+<a id="download-template" class="button secondary" href="target-role.yaml" download>Tải target-role.yaml</a>
+<ol class="instructions">
+<li>Mở AWS CloudFormation trong AWS account cần quét.</li>
+<li>Tạo Stack từ file <code>target-role.yaml</code>.</li>
+<li>Nhập Parameters tương ứng từ khung bên cạnh.</li>
+<li>Sau khi stack hoàn tất (CREATE_COMPLETE), sao chép RoleArn từ tab Outputs.</li>
+</ol>
+</div>
+<aside class="parameter-sheet">
+<h3>Parameters cho template</h3>
+<div id="principals"></div>
+</aside>
+</div>
+</article>
+<article class="connection-step">
+<div class="step-heading"><span class="step-number">2</span><h2>Kiểm tra và lưu kết nối</h2></div>
+<form id="connection-form">
+<label>Role ARN từ Outputs<input id="role" required placeholder="arn:aws:iam::123456789012:role/GuardianReadRole-yourname" autocomplete="off" spellcheck="false"></label>
+<fieldset>
+<legend>Region được quét <span class="muted">— chọn từ 1 đến 3</span></legend>
+<div id="region-options" class="region-options"></div>
+</fieldset>
+<fieldset>
+<legend>Nhóm dịch vụ được quét <span class="muted">— chọn từ 1 đến 4</span></legend>
+<div id="service-group-options" class="region-options service-group-options"></div>
+</fieldset>
+<button id="connect" class="button primary" type="submit">Kiểm tra và lưu kết nối</button>
+<div id="connection-feedback" role="status" aria-live="polite" hidden></div>
+</form>
+</article>
+<article class="connection-step">
+<div class="step-heading"><span class="step-number">3</span><h2>Chạy lần quét đầu tiên</h2></div>
+<p id="first-scan-note">Sau khi lưu kết nối, chọn Quét ngay.</p>
+<button id="first-scan" class="button primary" disabled>Quét ngay</button>
+<button class="button secondary" data-go="overview">Xem tổng quan</button>
+</article>
+</section>
+<section id="page-settings" class="page" hidden>
+<div class="card settings-header-card">
+<h2>Cấu hình</h2>
+</div>
+<form id="settings-form">
+<div id="settings-general" hidden></div>
+<div id="settings-groups"></div>
+<div class="settings-actions-bar">
+<div class="settings-actions-left">
+<button id="restore-defaults" class="button secondary" type="button">Khôi phục mặc định</button>
+<span id="unsaved-indicator" class="unsaved-badge" hidden>Có thay đổi chưa lưu</span>
+</div>
+<div class="settings-actions-right">
+<button id="save-settings" class="button primary" type="submit">Lưu thay đổi</button>
+</div>
+</div>
+<div id="save-settings-feedback" class="inline-feedback" role="status" hidden></div>
+</form>
+<article class="card">
+<h2>Cảnh báo email</h2>
+<label class="check"><input id="email-enabled" type="checkbox"> Bật cảnh báo email</label>
+<p id="email-note" class="muted"></p>
+<button id="save-email" class="button secondary">Lưu lựa chọn email</button>
+<div id="save-email-feedback" class="inline-feedback" role="status" hidden></div>
+</article>
+</section>
+</div>
+</main>
+</div>
+<dialog id="finding-dialog" aria-labelledby="finding-detail-title" aria-describedby="finding-detail-context">
+<div class="finding-dialog-heading">
+<h2 id="finding-detail-title">Chi tiết finding</h2>
+<button id="close-finding-detail" type="button" class="button secondary" autofocus>Đóng chi tiết</button>
+</div>
+<p id="finding-detail-context" class="muted"></p>
+<div id="finding-detail-content"></div>
+</dialog>
+</body>
+</html>

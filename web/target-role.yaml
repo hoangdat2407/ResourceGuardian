@@ -32,9 +32,53 @@ Resources:
                   - ec2:DescribeSnapshots
                   - ec2:DescribeImages
                   - ec2:DescribeNatGateways
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeVpcEndpoints
                   - cloudwatch:GetMetricData
                   - rds:DescribeDBInstances
+                  - rds:DescribeDBSnapshots
                   - elasticloadbalancing:DescribeLoadBalancers
+                  - lambda:ListFunctions
+                  - lambda:ListEventSourceMappings
+                  - lambda:GetPolicy
+                  - logs:DescribeLogGroups
+                  - dynamodb:ListTables
+                  - dynamodb:DescribeTable
+                  - ecr:DescribeRepositories
+                  - ecr:GetLifecyclePolicy
+                  - sqs:ListQueues
+                  - sqs:GetQueueAttributes
+                  - elasticache:DescribeCacheClusters
+                  - elasticfilesystem:DescribeFileSystems
+                  - ecs:ListClusters
+                  - ecs:DescribeClusters
+                  - ecs:ListServices
+                  - ecs:DescribeServices
+                  - autoscaling:DescribeAutoScalingGroups
+                  - apigateway:GET
+                  - sns:ListTopics
+                  - sns:GetTopicAttributes
+                  - events:ListRules
+                  - events:ListTargetsByRule
+                  - states:ListStateMachines
+                  - sagemaker:ListEndpoints
+                  - sagemaker:DescribeEndpoint
+                  - es:ListDomainNames
+                  - es:DescribeDomains
+                  - redshift:DescribeClusters
+                  - kafka:ListClusters
+                  - kinesis:ListStreams
+                  - cloudfront:ListDistributions
+                  - backup:ListBackupVaults
+                  - backup:ListRecoveryPointsByBackupVault
+                  - eks:ListClusters
+                  - eks:DescribeCluster
+                  - eks:ListNodegroups
+                  - eks:ListFargateProfiles
+                  - fsx:DescribeFileSystems
+                  - memorydb:DescribeClusters
+                  - rds:DescribeDBClusters
                 Resource: '*'
               - Effect: Allow
                 Action: s3:ListAllMyBuckets
