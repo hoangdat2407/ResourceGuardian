@@ -1,12 +1,13 @@
 """Capture live demo screenshots and verify full UI interaction with real AWS experiment data."""
-import json, pathlib
+import json, pathlib, threading
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from functools import partial
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DOCS_SCREENSHOTS = ROOT / "docs" / "screenshots"
 DOCS_SCREENSHOTS.mkdir(parents=True, exist_ok=True)
 SCAN_DATA = json.load(open("/tmp/scan_result.json"))
-WEB_URL = "https://d3qn9wabid8ws0.cloudfront.net/"
 
 PROFILE_DATA = {
     "account_id": "376129867108",
@@ -36,7 +37,13 @@ PROFILE_DATA = {
 feedback_db = []
 
 def run():
-    print("[CAPTURE] Launching browser to test live CloudFront frontend with real AWS scan results...")
+    print("[CAPTURE] Serving web/ directory locally to capture bugfixed UI with real AWS scan results...")
+    handler = partial(SimpleHTTPRequestHandler, directory=str(ROOT / "web"))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    web_url = f"http://127.0.0.1:{port}/"
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(viewport={"width": 1440, "height": 900})
@@ -65,9 +72,9 @@ def run():
             else:
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
 
-        page.route("**execute-api**", route_api)
+        page.route("**/config.json", lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps({"api": "/api", "demo": False, "auth": "https://crg-demo.auth.ap-southeast-1.amazoncognito.com", "clientId": "demo-client", "redirect": web_url})))
         page.route("**/api/**", route_api)
-        page.goto(WEB_URL)
+        page.goto(web_url)
         page.wait_for_selector("#app:not([hidden])", timeout=10000)
 
         # 1. Overview Page Screenshot
@@ -117,7 +124,7 @@ def run():
         page.screenshot(path=str(DOCS_SCREENSHOTS / "06-feedback-keep-ignore.png"))
         print("[6] Saved 06-feedback-keep-ignore.png")
 
-        # 7. Settings Page Screenshot (6 Groups, 40 Fields)
+        # 7. Settings Page Screenshot (6 Groups, 40 Fields, with Descriptions and Bounds)
         page.locator('[data-page="settings"]').click()
         expect(page.locator("#page-settings")).to_be_visible()
         expect(page.locator("details.settings-group")).to_have_count(6)
@@ -128,15 +135,16 @@ def run():
         mobile_ctx = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True)
         mobile_ctx.add_init_script("sessionStorage.setItem('crg-token', 'live-demo-token')")
         mp = mobile_ctx.new_page()
-        mp.route("**execute-api**", route_api)
+        mp.route("**/config.json", lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps({"api": "/api", "demo": False, "auth": "https://crg-demo.auth.ap-southeast-1.amazoncognito.com", "clientId": "demo-client", "redirect": web_url})))
         mp.route("**/api/**", route_api)
-        mp.goto(WEB_URL + "#findings")
+        mp.goto(web_url + "#findings")
         mp.wait_for_selector("#findings-list tbody tr")
         assert mp.evaluate("document.documentElement.scrollWidth <= innerWidth")
         mp.screenshot(path=str(DOCS_SCREENSHOTS / "08-mobile-responsive-findings.png"))
         print("[8] Saved 08-mobile-responsive-findings.png")
 
         browser.close()
+        server.shutdown()
         print("\n[SUCCESS] All live demo screenshots successfully captured!")
 
 if __name__ == "__main__":

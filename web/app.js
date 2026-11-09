@@ -24,53 +24,55 @@ const regions=['ap-southeast-1','ap-southeast-2','ap-northeast-1','us-east-1','u
 const serviceGroups={compute:{label:'Tính toán (EC2)',types:['EC2']},storage:{label:'Lưu trữ & Sao lưu',types:['EBS','SNAPSHOT','S3_MULTIPART']},database:{label:'Cơ sở dữ liệu (RDS)',types:['RDS']},network:{label:'Mạng (EIP, NAT, Load Balancer)',types:['EIP','NAT_GATEWAY','ALB','NLB']},serverless:{label:'Serverless (Lambda)',types:['LAMBDA_FUNCTION']},monitoring:{label:'Giám sát & Logs',types:['LOG_GROUP']},security:{label:'Bảo mật (Security Groups, VPC Endpoints)',types:['SECURITY_GROUP','VPC_ENDPOINT']},backup:{label:'Sao lưu mở rộng (RDS Snapshots, EFS, ECR)',types:['RDS_SNAPSHOT','EFS_FILE_SYSTEM','ECR_REPOSITORY']},nosql:{label:'NoSQL & Cache (DynamoDB, ElastiCache)',types:['DYNAMODB_TABLE','ELASTICACHE_CLUSTER']},containers:{label:'Containers (ASG, ECS)',types:['AUTO_SCALING_GROUP','ECS_CLUSTER','ECS_SERVICE']},integration:{label:'Tích hợp & Hàng đợi (SQS, SNS, EventBridge, Step Functions, API Gateway)',types:['SQS_QUEUE','SNS_TOPIC','EVENTBRIDGE_RULE','STEP_FUNCTION','API_GATEWAY']}};
 const resourceGroups=Object.fromEntries(Object.entries(serviceGroups).flatMap(([group,value])=>value.types.map(type=>[type,group])));
 const thresholdGroupTitles={compute:'1. Tính toán & Container',storage:'2. Lưu trữ & Sao lưu',database:'3. Cơ sở dữ liệu & Cache',network:'4. Mạng & Phân phối nội dung',analytics:'5. Phân tích dữ liệu & AI',integration:'6. Giám sát & Tích hợp'};
+
 const serviceHierarchy=[
  {group:'compute',title:'1. Tính toán & Container',services:[
-  {name:'Amazon EC2',fields:['cpu_percent','network_mib_hour','window_hours','interval_hours']},
-  {name:'AWS Lambda',fields:['lambda_unused_days','lambda_max_invocations']},
-  {name:'Auto Scaling Groups',fields:['asg_zero_days']},
-  {name:'Amazon ECS',fields:['ecs_empty_days']},
-  {name:'Amazon EKS',fields:['eks_idle_days']}
+  {name:'Amazon EC2',desc:'Máy chủ ảo điện toán đám mây và lưu lượng mạng',fields:['cpu_percent','network_mib_hour','window_hours','interval_hours']},
+  {name:'AWS Lambda',desc:'Hàm xử lý sự kiện serverless không cần máy chủ',fields:['lambda_unused_days','lambda_max_invocations']},
+  {name:'Auto Scaling Groups',desc:'Nhóm tự động mở rộng quy mô máy chủ',fields:['asg_zero_days']},
+  {name:'Amazon ECS',desc:'Cụm điều phối container Docker',fields:['ecs_empty_days']},
+  {name:'Amazon EKS',desc:'Cụm Kubernetes được quản lý trên AWS',fields:['eks_idle_days']}
  ]},
  {group:'storage',title:'2. Lưu trữ & Sao lưu',services:[
-  {name:'Amazon EBS',fields:['orphan_hours','snapshot_days']},
-  {name:'RDS Snapshots',fields:['rds_snapshot_days']},
-  {name:'Amazon EFS',fields:['efs_no_mount_days']},
-  {name:'Amazon ECR',fields:['ecr_image_days']},
-  {name:'Amazon FSx',fields:['fsx_idle_days']},
-  {name:'AWS Backup',fields:['backup_point_days']}
+  {name:'Amazon EBS',desc:'Ổ lưu trữ dạng khối đính kèm EC2',fields:['orphan_hours','snapshot_days']},
+  {name:'RDS Snapshots',desc:'Bản sao lưu chụp nhanh cơ sở dữ liệu thủ công',fields:['rds_snapshot_days']},
+  {name:'Amazon EFS',desc:'Hệ thống tệp mạng dùng chung cho compute',fields:['efs_no_mount_days']},
+  {name:'Amazon ECR',desc:'Kho lưu trữ ảnh container Docker riêng tư',fields:['ecr_image_days']},
+  {name:'Amazon FSx',desc:'Hệ thống tệp Windows / Lustre hiệu năng cao',fields:['fsx_idle_days']},
+  {name:'AWS Backup',desc:'Kho điểm khôi phục sao lưu tập trung',fields:['backup_point_days']}
  ]},
  {group:'database',title:'3. Cơ sở dữ liệu & Cache',services:[
-  {name:'Amazon RDS',fields:['rds_cpu_percent','rds_connections']},
-  {name:'Amazon DynamoDB',fields:['dynamodb_idle_days']},
-  {name:'Amazon ElastiCache',fields:['elasticache_idle_days']},
-  {name:'Amazon MemoryDB',fields:['memorydb_idle_days']},
-  {name:'Amazon DocumentDB',fields:['documentdb_idle_days']},
-  {name:'Amazon Neptune',fields:['neptune_idle_days']}
+  {name:'Amazon RDS',desc:'Cơ sở dữ liệu quan hệ (PostgreSQL, MySQL...)',fields:['rds_cpu_percent','rds_connections']},
+  {name:'Amazon DynamoDB',desc:'Cơ sở dữ liệu NoSQL hiệu năng cao theo khóa-giá trị',fields:['dynamodb_idle_days']},
+  {name:'Amazon ElastiCache',desc:'Cụm lưu trữ đệm in-memory Redis / Memcached',fields:['elasticache_idle_days']},
+  {name:'Amazon MemoryDB',desc:'Cơ sở dữ liệu in-memory tương thích Redis bền vững',fields:['memorydb_idle_days']},
+  {name:'Amazon DocumentDB',desc:'Cơ sở dữ liệu tài liệu tương thích MongoDB',fields:['documentdb_idle_days']},
+  {name:'Amazon Neptune',desc:'Cơ sở dữ liệu đồ thị Graph Database',fields:['neptune_idle_days']}
  ]},
  {group:'network',title:'4. Mạng & Phân phối nội dung',services:[
-  {name:'NAT Gateway',fields:['nat_mib_hour']},
-  {name:'Load Balancers (ALB / NLB)',fields:['alb_requests_hour','nlb_new_flows_hour']},
-  {name:'Security Groups',fields:['sg_unused_days']},
-  {name:'VPC Endpoints',fields:['vpc_endpoint_unused_days']},
-  {name:'Amazon CloudFront',fields:['cloudfront_requests_day']}
+  {name:'NAT Gateway',desc:'Cổng dịch địa chỉ mạng cho subnet riêng tư',fields:['nat_mib_hour']},
+  {name:'Load Balancers (ALB / NLB)',desc:'Bộ cân bằng tải ứng dụng và mạng',fields:['alb_requests_hour','nlb_new_flows_hour']},
+  {name:'Security Groups',desc:'Tường lửa ảo kiểm soát lưu lượng mạng',fields:['sg_unused_days']},
+  {name:'VPC Endpoints',desc:'Điểm cuối kết nối riêng tư trong mạng VPC',fields:['vpc_endpoint_unused_days']},
+  {name:'Amazon CloudFront',desc:'Mạng lưới phân phối nội dung CDN toàn cầu',fields:['cloudfront_requests_day']}
  ]},
  {group:'analytics',title:'5. Phân tích dữ liệu & AI',services:[
-  {name:'Amazon SageMaker',fields:['sagemaker_idle_days']},
-  {name:'Amazon OpenSearch',fields:['opensearch_idle_days']},
-  {name:'Amazon Redshift',fields:['redshift_idle_days']},
-  {name:'Amazon MSK (Kafka)',fields:['msk_idle_days']},
-  {name:'Amazon Kinesis',fields:['kinesis_idle_days']}
+  {name:'Amazon SageMaker',desc:'Điểm cuối suy luận mô hình học máy',fields:['sagemaker_idle_days']},
+  {name:'Amazon OpenSearch',desc:'Cụm tìm kiếm và phân tích nhật ký tập trung',fields:['opensearch_idle_days']},
+  {name:'Amazon Redshift',desc:'Cụm kho dữ liệu phân tích quy mô lớn',fields:['redshift_idle_days']},
+  {name:'Amazon MSK (Kafka)',desc:'Cụm xử lý luồng tin nhắn Apache Kafka',fields:['msk_idle_days']},
+  {name:'Amazon Kinesis',desc:'Luồng thu thập dữ liệu thời gian thực',fields:['kinesis_idle_days']}
  ]},
  {group:'integration',title:'6. Giám sát & Tích hợp',services:[
-  {name:'Amazon CloudWatch Logs',fields:['log_group_retention_days']},
-  {name:'Amazon SQS',fields:['sqs_idle_days']},
-  {name:'Amazon SNS',fields:['sns_unused_days']},
-  {name:'Amazon EventBridge',fields:['eventbridge_unused_days']},
-  {name:'AWS Step Functions',fields:['stepfunctions_unused_days']},
-  {name:'Amazon API Gateway',fields:['apigateway_unused_days']}
+  {name:'Amazon CloudWatch Logs',desc:'Nhóm nhật ký log ứng dụng và hệ thống',fields:['log_group_retention_days']},
+  {name:'Amazon SQS',desc:'Hàng đợi thông điệp bất đồng bộ',fields:['sqs_idle_days']},
+  {name:'Amazon SNS',desc:'Kênh phát hành và đăng ký thông báo',fields:['sns_unused_days']},
+  {name:'Amazon EventBridge',desc:'Bus định tuyến sự kiện và quy tắc kích hoạt',fields:['eventbridge_unused_days']},
+  {name:'AWS Step Functions',desc:'Quy trình điều phối luồng công việc serverless',fields:['stepfunctions_unused_days']},
+  {name:'Amazon API Gateway',desc:'Cổng giao tiếp API HTTP / REST',fields:['apigateway_unused_days']}
  ]}
 ];
+
 const friendlyFieldMeta={
  cpu_percent:{label:'CPU thấp hơn',unit:'%',help:'Cảnh báo khi CPU p95 thấp hơn mức này trong toàn bộ cửa sổ metrics.'},
  network_mib_hour:{label:'Lưu lượng mạng thấp hơn',unit:'MiB/giờ',help:'Cảnh báo khi tổng lưu lượng mạng vào/ra trung bình thấp hơn mức này.'},
@@ -113,6 +115,7 @@ const friendlyFieldMeta={
  stepfunctions_unused_days:{label:'Quy trình không có lượt chạy trong',unit:'ngày',help:'Cảnh báo State Machine không có bất kỳ lượt thực thi (execution) nào được bắt đầu.'},
  apigateway_unused_days:{label:'Cổng API không nhận request trong',unit:'ngày',help:'Cảnh báo REST/HTTP API không có lưu lượng truy cập qua thời gian theo dõi.'}
 };
+
 const defaultThresholdConfig={
  cpu_percent:{group:'compute',resource:'EC2',rule:'EC2_LOW_UTILIZATION',label:'Ngưỡng CPU EC2 (%)',min:1,max:50,integer:false,default:5,unit:'%'},
  network_mib_hour:{group:'compute',resource:'EC2',rule:'EC2_LOW_UTILIZATION',label:'Ngưỡng network EC2 (MiB/giờ)',min:0.1,max:100,integer:false,default:1,unit:'MiB/giờ'},
@@ -155,8 +158,32 @@ const defaultThresholdConfig={
  stepfunctions_unused_days:{group:'integration',resource:'STEP_FUNCTION',rule:'STEP_FUNCTION_UNUSED',label:'Thời gian Step Functions không chạy (ngày)',min:1,max:90,integer:true,default:30,unit:'ngày'},
  apigateway_unused_days:{group:'integration',resource:'API_GATEWAY',rule:'API_GATEWAY_UNUSED',label:'Thời gian API Gateway không có request (ngày)',min:1,max:90,integer:true,default:14,unit:'ngày'}
 };
+
 const fields=Object.fromEntries(Object.entries(defaultThresholdConfig).map(([k,v])=>[k,[v.label,v.min,v.max,v.integer?1:'any']]));
-const stateLabels={KEPT:'Đang giữ',REVIEW:'Cần kiểm tra',OBSERVING:'Đang quan sát',INSUFFICIENT_DATA:'Thiếu dữ liệu',QUEUED:'Đang chờ',RUNNING:'Đang quét',SUCCEEDED:'Hoàn tất',PARTIAL:'Chưa đầy đủ',FAILED:'Lỗi',TIMED_OUT:'Quá hạn'};
+
+const stateLabels={
+ KEPT:'Đang giữ',
+ REVIEW:'Cần kiểm tra',
+ OBSERVING:'Đang quan sát',
+ INSUFFICIENT_DATA:'Thiếu dữ liệu',
+ QUEUED:'Đang chờ',
+ RUNNING:'Đang quét',
+ SUCCEEDED:'Hoàn tất',
+ SUCCESS:'Hoàn tất',
+ PARTIAL:'Chưa đầy đủ',
+ FAILED:'Thất bại',
+ TIMED_OUT:'Quá hạn'
+};
+
+const errorDescriptions={
+ SubscriptionRequiredException:'Chưa kích hoạt subscription cho dịch vụ này trong AWS account',
+ AccessDenied:'Thiếu quyền IAM đọc tài nguyên',
+ AccessDeniedException:'Thiếu quyền IAM đọc tài nguyên',
+ UnauthorizedOperation:'Thiếu quyền IAM đọc tài nguyên',
+ RequestLimitExceeded:'Vượt giới hạn gọi API (Throttling)',
+ TIME_BUDGET:'Hết thời gian xử lý an toàn của Lambda'
+};
+
 const reasons={
  'Low CPU and network; confirm intended workload':'CPU và network thấp; kiểm tra mục đích sử dụng.',
  'Missing CloudWatch metrics; not classified as idle':'Thiếu metrics CloudWatch; chưa thể kết luận ít hoạt động.',
@@ -170,7 +197,7 @@ const reasons={
  'Security Group is not attached to any network interface or referenced by another group':'Security Group không gắn vào bất kỳ ENI nào hoặc được group khác tham chiếu.',
  'Manual RDS snapshot older than retention threshold; verify backup necessity':'Bản chụp thủ công RDS cũ hơn ngưỡng lưu trữ; kiểm tra nhu cầu giữ backup.',
  'DynamoDB table has zero read/write activity in observation window':'Bảng DynamoDB không có hoạt động đọc/ghi trong cửa sổ quan sát.',
- 'ECR repository has no lifecycle policy configured; images accumulate indefinitely':'Repository ECR không có Lifecycle Policy; image tích tụ vô hạn.',
+ 'ECR repository has no lifecycle policy configured; images accumulate indefinitely':'Kho ảnh ECR chưa thiết lập Lifecycle Policy để tự động dọn dẹp các image cũ.',
  'SQS queue has zero message traffic in observation window':'Hàng đợi SQS không có message đến/đi trong cửa sổ quan sát.',
  'ElastiCache cluster has zero client connections in observation window':'Cụm ElastiCache không có kết nối client nào trong cửa sổ quan sát.',
  'EFS file system has no mount targets configured; not connected to any compute instance':'Hệ thống tệp EFS không có mount target nào; chưa kết nối tới compute.',
@@ -195,6 +222,45 @@ const reasons={
  'DocumentDB cluster has zero client connections in observation window':'Cụm DocumentDB không có kết nối client nào trong cửa sổ quan sát.',
  'Neptune graph database cluster has zero client connections in observation window':'Cụm Neptune Graph DB không có kết nối client nào trong cửa sổ quan sát.'
 };
+
+function friendlyReason(f){
+ if(!f)return 'Chưa có thông tin lý do.';
+ const v=f.evidence||{};
+ if(f.rule_id==='ECR_NO_LIFECYCLE'||f.type==='ECR_REPOSITORY'){
+  return 'Kho ảnh ECR chưa thiết lập Lifecycle Policy để tự động dọn dẹp các image cũ.';
+ }
+ if(f.rule_id==='LAMBDA_UNUSED'||f.type==='LAMBDA_FUNCTION'){
+  if(f.resource_id&&f.resource_id.includes('RecoveryFunction')){
+   return 'Hàm phục hồi sự cố thuộc hệ thống Cloud Resource Guardian; có thể bấm Giữ lại để đánh dấu ngoại lệ có kiểm soát.';
+  }
+  if(f.reason&&f.reason.includes('dormant')){
+   return 'Hàm có trigger hoặc quyền nhưng không có lượt gọi trong 24h; kiểm tra xem có phải hàm xử lý sự kiện hiếm không.';
+  }
+  return 'Hàm không phát sinh lệnh gọi nào trong cửa sổ 24 giờ; kiểm tra nhu cầu sử dụng trước khi xem xét gỡ bỏ.';
+ }
+ if(f.rule_id==='EBS_UNATTACHED'||f.type==='EBS'){
+  const hours=v.observed_hours??0;
+  const thresh=v.threshold_hours??24;
+  return `Ổ đĩa ở trạng thái available trong ${hours} giờ (ngưỡng theo dõi ${thresh} giờ). Kiểm tra nhu cầu gắn lại hoặc sao lưu.`;
+ }
+ if(f.rule_id==='EIP_UNASSOCIATED'||f.type==='EIP'){
+  const hours=v.observed_hours??0;
+  return `Địa chỉ IP tĩnh chưa liên kết trong ${hours} giờ; AWS tính phí giữ public IPv4 không sử dụng.`;
+ }
+ if(f.rule_id==='SECURITY_GROUP_UNUSED'||f.type==='SECURITY_GROUP'){
+  const hours=v.observed_hours??0;
+  const days=v.threshold_days??14;
+  return `Nhóm bảo mật không gắn vào ENI nào và không được nhóm khác tham chiếu (đã theo dõi ${hours}h, ngưỡng ${days} ngày).`;
+ }
+ if(f.rule_id==='ALB_LOW_UTILIZATION'||f.type==='ALB'||f.type==='NLB'){
+  if(f.level==='INSUFFICIENT_DATA'){
+   return 'Chưa nhận đủ số mẫu CloudWatch cần thiết; hệ thống không tự ý coi là ít hoạt động.';
+  }
+  return 'Lưu lượng request thấp hơn ngưỡng trong cửa sổ theo dõi; kiểm tra mục đích sử dụng.';
+ }
+ return reasons[f.reason]||f.reason||'Cần kiểm tra theo quy tắc phát hiện.';
+}
+
 const evidenceFields={
  EC2:[['cpu_p95','CPU p95','%'],['network_mib_hour','Network trung bình','MiB/giờ'],['launch_time','Thời điểm khởi chạy','time']],
  EBS:[['size_gib','Dung lượng volume','GiB'],['observed_hours','Theo dõi chưa gắn','giờ'],['threshold_hours','Ngưỡng theo dõi','giờ']],
@@ -234,6 +300,7 @@ const evidenceFields={
  DOCUMENTDB_CLUSTER:[['cluster_identifier','DocumentDB Cluster ID'],['engine','Engine'],['cluster_members_count','Số Instance trong cụm'],['database_connections','Số kết nối']],
  NEPTUNE_CLUSTER:[['cluster_identifier','Neptune Cluster ID'],['engine','Engine'],['cluster_members_count','Số Instance trong cụm'],['database_connections','Số kết nối']]
 };
+
 const thresholdFields={
  EC2:['cpu_percent','network_mib_hour'],EBS:['orphan_hours'],EIP:['orphan_hours'],SNAPSHOT:['snapshot_days'],S3_MULTIPART:['multipart_days'],
  RDS:['rds_cpu_percent','rds_connections'],RDS_SNAPSHOT:['rds_snapshot_days'],NAT_GATEWAY:['nat_mib_hour'],ALB:['alb_requests_hour'],NLB:['nlb_new_flows_hour'],
@@ -245,11 +312,36 @@ const thresholdFields={
  KINESIS_STREAM:['kinesis_idle_days'],CLOUDFRONT_DISTRIBUTION:['cloudfront_requests_day'],BACKUP_VAULT:['backup_point_days'],EKS_CLUSTER:['eks_idle_days'],
  FSX_FILE_SYSTEM:['fsx_idle_days'],MEMORYDB_CLUSTER:['memorydb_idle_days'],DOCUMENTDB_CLUSTER:['documentdb_idle_days'],NEPTUNE_CLUSTER:['neptune_idle_days']
 };
+
 const thresholdLabels={cpu_percent:['CPU EC2','%'],network_mib_hour:['Network EC2','MiB/giờ'],orphan_hours:['Theo dõi không sử dụng','giờ'],snapshot_days:['Tuổi snapshot','ngày'],multipart_days:['Tuổi multipart upload (lớn hơn)','ngày'],rds_cpu_percent:['CPU RDS','%'],rds_connections:['Kết nối RDS','kết nối'],nat_mib_hour:['Lưu lượng NAT','MiB/giờ'],alb_requests_hour:['Request ALB','request/giờ'],nlb_new_flows_hour:['Flow mới NLB','flow mới/giờ']};
 
-function node(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
-function status(text,error=false){$('status').hidden=!text;$('status').textContent=text;$('status').className=error?'error':'';}
-function badge(s){return node('span',stateLabels[s]||s,'badge '+(s==='REVIEW'?'review':s==='FAILED'||s==='PARTIAL'||s==='TIMED_OUT'?'error':s==='SUCCEEDED'?'good':'observing'));}
+function node(tag,text,cls){
+ const e=document.createElement(tag);
+ if(text!==undefined&&text!==null){
+  if(text instanceof Node)e.append(text);
+  else e.textContent=text;
+ }
+ if(cls)e.className=cls;
+ return e;
+}
+
+let statusTimer=null;
+function status(text,error=false){
+ if(statusTimer){clearTimeout(statusTimer);statusTimer=null;}
+ const el=$('status');if(!el)return;
+ el.hidden=!text;el.textContent=text;el.className=error?'error':'';
+ if(text&&!error){
+  // Auto-clear transient status message after 4.5 seconds to prevent permanent stale banner (BUG-06)
+  statusTimer=setTimeout(()=>{if($('status'))$('status').hidden=true;},4500);
+ }
+}
+
+function badge(s){
+ const label=stateLabels[s]||s||'Không xác định';
+ const cls=(s==='REVIEW'?'review':s==='FAILED'||s==='PARTIAL'||s==='TIMED_OUT'?'error':s==='SUCCEEDED'||s==='SUCCESS'||s==='KEPT'?'good':'observing');
+ return node('span',label,'badge '+cls);
+}
+
 function date(t){return t?new Date(t*1000).toLocaleString('vi-VN'):'Chưa có thời gian';}
 function b64(b){return btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function random(){const b=new Uint8Array(32);crypto.getRandomValues(b);return b64(b);}
@@ -415,10 +507,11 @@ async function run(fn,button){
 function showPage(page){
  if(!profile)return;
  closeFindingDetail();
+ status(''); // Clear lingering transient status banner on page navigation (BUG-06)
  if(!pages[page])page='overview';
- for(const key of Object.keys(pages))$('page-'+key).hidden=key!==page;
+ for(const key of Object.keys(pages))$('page-'+key).hidden=(key!==page);
  document.querySelectorAll('#nav-auth button[data-page]').forEach(b=>{
-  const match=b.dataset.page===page;
+  const match=(b.dataset.page===page);
   b.classList.toggle('active',match);
   if(match)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');
  });
@@ -477,12 +570,12 @@ function openFindingDetail(f,history=false,opener=document.activeElement){
  content.replaceChildren();
  $('finding-detail-context').textContent=history?'Snapshot lịch sử đã lưu.':'Bằng chứng đã lưu của finding tại lần đánh giá này.';
  detailSection(content,'Thông tin finding',[
-  ['type','Loại tài nguyên',f.type],['resource_id','Resource ID',f.resource_id],['account_id','AWS account',f.account_id??v.account_id],['region','Region',f.region??v.region],['finding_id','Finding ID',f.finding_id],['rule_id','Rule',f.rule_id],['level','Mức cảnh báo',stateLabels[f.level]||f.level],['reason','Lý do',reasons[f.reason]||f.reason],['recommendation','Khuyến nghị',f.recommendation]
+  ['type','Loại tài nguyên',f.type],['resource_id','Resource ID',f.resource_id],['account_id','AWS account',f.account_id??v.account_id??'Không xác định'],['region','Region',f.region??v.region],['finding_id','Finding ID',f.finding_id],['rule_id','Rule ID',f.rule_id],['level','Mức cảnh báo',stateLabels[f.level]||f.level],['reason','Lý do',friendlyReason(f)],['recommendation','Khuyến nghị',f.recommendation]
  ]);
  const times=detailSection(content,'Mốc quan sát finding',[
   ['first_seen_at','Quan sát lần đầu',f.first_seen_at,'time'],['last_seen_at','Quan sát gần nhất',f.last_seen_at,'time'],['evaluated_at','Thời điểm đánh giá',f.evaluated_at??v.evaluated_at,'time']
  ]);
- detailSection(content,'Evidence '+(f.type||''),(evidenceFields[f.type]||[]).map(([key,label,unit])=>[key,label,v[key],unit]));
+ detailSection(content,'Bằng chứng kỹ thuật ('+(f.type||'')+')',(evidenceFields[f.type]||[]).map(([key,label,unit])=>[key,label,v[key],unit]));
  const thresholds=thresholdFields[f.type]||Object.keys(v.thresholds||{}),legacy={orphan_hours:v.threshold_hours,snapshot_days:v.snapshot_days,multipart_days:v.threshold_days};
  detailSection(content,'Ngưỡng tại lần đánh giá',thresholds.map(key=>['thresholds.'+key,thresholdLabels[key]?.[0]||key,v.thresholds?.[key]??legacy[key],thresholdLabels[key]?.[1]]));
  if(['EC2','RDS','NAT_GATEWAY','ALB','NLB'].includes(f.type)){
@@ -574,6 +667,7 @@ async function loadFeedback(more=false){
   if(generation===scopeGeneration&&request===feedbackRequest){feedbackLoading=false;renderFeedback();}
  }
 }
+
 function renderFeedback(){
  const list=$('feedback-list'),previous=feedbackFocus(list),pageControl=document.activeElement,active=feedbackRows.filter(feedbackHidden);list.replaceChildren();
  $('feedback-summary').textContent=feedbackError||(feedbackLoading?'Đang tải phản hồi…':active.length+' finding đang giữ hoặc bỏ qua trong '+feedbackRows.length+' phản hồi đã tải.'+(feedbackCursor?' Còn phản hồi ở trang sau.':''));
@@ -585,7 +679,7 @@ function renderFeedback(){
   const key=feedbackKey(record),generation=scopeGeneration,state=feedbackState.get(key),article=node('article',undefined,'feedback-record'),info=node('div'),actions=node('div',undefined,'finding-feedback feedback-manager-actions');article.dataset.feedbackKey=key;actions.dataset.feedbackKey=key;
   info.append(node('h3',record.type||'Finding cũ'),node('code',record.resource_id||record.finding_id),node('p','Region: '+record.region,'muted'));
   if(record.resource_id)info.append(node('small','Finding ID: '+record.finding_id,'muted'));else info.append(node('p','Feedback cũ thiếu metadata; quản lý bằng Finding ID và region.','footnote'));
-  info.append(node('p','Account: '+(record.account_id||'Chưa có dữ liệu')+' · Rule: '+(record.rule_id||'Chưa có dữ liệu'),'muted'));
+  info.append(node('p','Account: '+(record.account_id||profile?.account_id||'Không xác định')+' · Rule: '+(record.rule_id||'Chưa có dữ liệu'),'muted'));
   if(record.kept)info.append(badge('KEPT'));
   if(record.ignore_until>Date.now()/1000)info.append(node('p','Bỏ qua đến: '+date(record.ignore_until),'muted'));
   if(record.acknowledged)info.append(node('p','Đã xem','acknowledged-state'));
@@ -599,6 +693,7 @@ function renderFeedback(){
  }
  restoreFeedbackFocus(list,previous);
 }
+
 function findingFeedback(f){
  const key=feedbackKey(f),generation=scopeGeneration,state=feedbackState.get(key),group=node('div',undefined,'finding-feedback');group.dataset.feedbackKey=key;
  const valid=typeof f.finding_id==='string'&&/^[a-f0-9]{64}$/.test(f.finding_id)&&(profile.regions||[]).includes(f.region);
@@ -626,9 +721,9 @@ function renderTable(container,items,allowIgnore=true){
  const body=node('tbody');
  for(const f of items){
   const row=node('tr'),resource=node('td');
-  resource.append(node('div',f.type,'resource-type'),node('code',f.resource_id),node('small',f.region));
+  resource.append(node('div',f.type,'resource-type'),node('code',f.resource_id),node('small',f.region+(f.account_id?' · '+f.account_id:'')));
   const detail=node('td');
-  detail.append(badge(f.level),node('p',reasons[f.reason]||f.reason));
+  detail.append(badge(f.level),node('p',friendlyReason(f)));
   if(allowIgnore)detail.append(node('small',f.acknowledged?'Đã xem':'Chưa xem','acknowledged-state'));
   const proof=node('td',undefined,'evidence'),open=node('button','Xem chi tiết','text-button finding-open');
   open.type='button';open.dataset.findingId=f.finding_id??'';open.dataset.region=f.region??'';open.dataset.resourceId=f.resource_id??'';
@@ -648,7 +743,7 @@ function renderTable(container,items,allowIgnore=true){
 
 function renderFindings(){
  const q=$('search').value.trim().toLowerCase(),type=$('filter-type').value,level=$('filter-level').value,group=$('filter-group').value,region=$('filter-region').value,ack=$('filter-acknowledged').value;
- const all=findings(),filtered=all.filter(f=>(!type||f.type===type)&&(!level||f.level===level)&&(!group||resourceGroups[f.type]===group)&&(!region||f.region===region)&&(!ack||(ack==='acknowledged'?f.acknowledged===true:f.acknowledged!==true))&&[f.resource_id,f.reason,reasons[f.reason]||''].some(s=>String(s||'').toLowerCase().includes(q)));
+ const all=findings(),filtered=all.filter(f=>(!type||f.type===type)&&(!level||f.level===level)&&(!group||resourceGroups[f.type]===group)&&(!region||f.region===region)&&(!ack||(ack==='acknowledged'?f.acknowledged===true:f.acknowledged!==true))&&[f.resource_id,f.reason,reasons[f.reason]||'',friendlyReason(f)].some(s=>String(s||'').toLowerCase().includes(q)));
  const active=Boolean(q||type||level||group||region||ack),incomplete=loadingResults||resultsError||results.some(r=>['QUEUED','RUNNING','PARTIAL','FAILED','TIMED_OUT'].includes(r.status));
  $('findings-scope').textContent=filtered.length+' / '+all.length+' tài nguyên trong kết quả.'+(incomplete?' '+resultMessage():'');
  renderTable($('findings-list'),filtered);
@@ -656,8 +751,13 @@ function renderFindings(){
 }
 
 function render(){
- const fs=findings(),measured=results.some(r=>Object.keys(r.counts||{}).length>0&&['SUCCEEDED','PARTIAL'].includes(r.status));
+ const fs=findings();
+ const measured=results.some(r=>Object.keys(r.counts||{}).length>0&&['SUCCEEDED','PARTIAL'].includes(r.status));
  const busy=scanPending||results.some(r=>['QUEUED','RUNNING'].includes(r.status));
+ 
+ // Latest scan identification
+ const latest=results[0]||null;
+ 
  $('total').textContent=measured?results.reduce((sum,r)=>sum+Object.values(r.counts||{}).reduce((a,b)=>a+b,0),0):'—';
  for(const [id,level] of [['review','REVIEW'],['observing','OBSERVING'],['insufficient','INSUFFICIENT_DATA']])$(id).textContent=measured?fs.filter(f=>f.level===level).length:'—';
  $('nav-count').textContent=measured?fs.filter(f=>f.level==='REVIEW').length:'—';
@@ -674,16 +774,25 @@ function render(){
  if(bad||resultsError)panel.classList.add('error');else if(partial)panel.classList.add('warning');
  panel.append(node('h2',title),node('p',resultMessage()));
  if(!profile.role_arn){const b=node('button','Kết nối AWS','button primary');b.onclick=()=>navigate('connection');panel.append(b);}
+ 
  $('scan-summary').replaceChildren();
- if(!results.length)$('scan-summary').append(node('p',resultMessage(),'muted'));
- for(const r of results){
-  const div=node('div',undefined,'scan-row');div.append(node('span',r.region),badge(r.status));
-  $('scan-summary').append(div,node('small',date(r.completed_at||r.started_at),'muted'));
-  appendResultNotes($('scan-summary'),r);
+ if(!results.length){
+  $('scan-summary').append(node('p',resultMessage(),'muted'));
+ } else {
+  for(const r of results){
+   const div=node('div',undefined,'scan-row');
+   div.append(node('span',r.region+' · '+(r.account_id||profile.account_id||'')),badge(r.status));
+   $('scan-summary').append(div,node('small',date(r.completed_at||r.started_at),'muted'));
+   appendResultNotes($('scan-summary'),r);
+  }
  }
+ 
+ // Attention section: top review findings of the latest scan
  renderTable($('priority-list'),fs.filter(f=>f.level==='REVIEW').slice(0,5));
- if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Không có tài nguyên cần kiểm tra',resultMessage());
- renderFindings();renderFeedback();
+ if(!fs.some(f=>f.level==='REVIEW'))emptyState($('priority-list'),'Không có tài nguyên cần kiểm tra trong lượt quét gần nhất',resultMessage());
+ 
+ renderFindings();
+ renderFeedback();
 }
 
 async function refresh(){
@@ -711,19 +820,37 @@ function renderHistory(){
  $('refresh-history').disabled=historyLoading;$('history-load-more').hidden=!historyCursor;$('history-load-more').disabled=historyLoading;
  $('history-load-more').textContent=historyLoading?'Đang tải…':'Tải thêm';
  const summary=$('history-summary');summary.className=historyError?'error':'muted';
- summary.textContent=historyError?historyError:historyLoading?'Đang tải lịch sử…':historyRows.length+' kết quả đã tải.';
+ summary.textContent=historyError?historyError:historyLoading?'Đang tải lịch sử…':historyRows.length+' lượt quét đã tải.';
  if(!historyRows.length){
-  emptyState(c,historyError?'Không tải được lịch sử':historyLoading?'Đang tải lịch sử…':'Chưa có lịch sử quét','Lịch sử lưu kết quả tối đa 30 ngày cho kết nối hiện tại.');
+  emptyState(c,historyError?'Không tải được lịch sử':historyLoading?'Đang tải lịch sử…':'Chưa có lịch sử quét','Lịch sử lưu tối đa 30 ngày cho kết nối hiện tại.');
   return;
  }
  const wrap=node('div',undefined,'table-wrap'),table=node('table',undefined,'history-table'),thead=node('thead'),tr=node('tr');
- for(const h of ['Thời gian','Region','Trạng thái','Chi tiết']){const th=node('th',h);th.scope='col';tr.append(th);}
+ for(const h of ['Bắt đầu','AWS account','Region','Kích hoạt','Trạng thái','Đã kiểm tra','Cần kiểm tra','Đang quan sát','Thiếu dữ liệu','Thao tác']){
+  const th=node('th',h);th.scope='col';tr.append(th);
+ }
  thead.append(tr);table.append(thead);
  const body=node('tbody');
  for(const row of historyRows){
   const tr=node('tr');
-  tr.append(node('td',date(row.completed_at||row.started_at)),node('td',row.region),node('td',badge(row.status)));
-  const action=node('td'),btn=node('button','Xem','button secondary history-open');
+  const scanAccount=row.account_id||row.findings?.[0]?.account_id||profile?.account_id||'Không xác định';
+  const totalScanned=Object.values(row.counts||{}).reduce((a,b)=>a+b,0);
+  const reviewCount=(row.findings||[]).filter(f=>f.level==='REVIEW').length;
+  const obsCount=(row.findings||[]).filter(f=>f.level==='OBSERVING').length;
+  const insuffCount=(row.findings||[]).filter(f=>f.level==='INSUFFICIENT_DATA').length;
+
+  tr.append(
+   node('td',date(row.started_at||row.completed_at)),
+   node('td',scanAccount),
+   node('td',row.region),
+   node('td',historyTrigger(row.trigger)),
+   node('td',badge(row.status)),
+   node('td',totalScanned>0?String(totalScanned):'—'),
+   node('td',String(reviewCount)),
+   node('td',String(obsCount)),
+   node('td',String(insuffCount))
+  );
+  const action=node('td'),btn=node('button','Xem kết quả','button secondary history-open');
   btn.type='button';btn.onclick=()=>openHistoryScan(row);action.append(btn);tr.append(action);body.append(tr);
  }
  table.append(body);wrap.append(table);c.append(wrap);
@@ -750,22 +877,83 @@ async function loadHistory(more=false){
 function renderHistoryDetail(){
  const detail=$('history-detail');detail.replaceChildren();
  if(!historySelection)return;
- detail.append(node('h3','Chi tiết lượt quét'),node('p','Scan ID: '+detailValue(historySelection.scan_id),'muted'));
- if(historyDetailLoading)detail.append(node('p','Đang tải…','muted'));
- if(historyDetailError){
-  const msg=node('p',historyDetailError,'error'),retry=node('button','Thử lại','button secondary');
-  retry.onclick=()=>loadHistoryScan();detail.append(msg,retry);
- }
+ 
  for(const r of historyDetailRows){
-  const section=node('section',undefined,'history-region');
-  section.append(node('h3',r.region),badge(r.status));
-  detailSection(section,'Thông tin',[
-   ['scan_id','Scan ID',r.scan_id],['trigger','Kích hoạt',historyTrigger(r.trigger)],['region','Region',r.region],['account_id','AWS account',r.account_id],
-   ['started_at','Bắt đầu',r.started_at==null?undefined:date(r.started_at)],['completed_at','Kết thúc',r.completed_at==null?undefined:date(r.completed_at)]
-  ]);
-  const content=node('div');renderTable(content,(r.findings||[]).map(f=>({...f,region:r.region})),false);
-  section.append(content);detail.append(section);
+  const card=node('article',undefined,'scan-detail-card');
+  const scanAccount=r.account_id||r.findings?.[0]?.account_id||profile?.account_id||'Không xác định';
+  const totalScanned=Object.values(r.counts||{}).reduce((a,b)=>a+b,0);
+  const findingsList=r.findings||[];
+  const reviewCount=findingsList.filter(f=>f.level==='REVIEW').length;
+  const obsCount=findingsList.filter(f=>f.level==='OBSERVING').length;
+  const insuffCount=findingsList.filter(f=>f.level==='INSUFFICIENT_DATA').length;
+  const errorCount=(r.errors||[]).length;
+
+  // Header & Meta
+  const header=node('div',undefined,'scan-detail-header');
+  const titleDiv=node('div');
+  titleDiv.append(node('h3','Chi tiết lượt quét '+r.region),node('p','Scan ID: '+detailValue(r.scan_id),'muted'));
+  header.append(titleDiv,badge(r.status));
+  card.append(header);
+
+  // Meta Grid
+  const metaDl=node('dl',undefined,'scan-meta-grid');
+  for(const [label,val] of [
+   ['AWS Account',scanAccount],
+   ['Region',r.region],
+   ['Kiểu kích hoạt',historyTrigger(r.trigger)],
+   ['Thời gian bắt đầu',r.started_at?date(r.started_at):'Chưa có'],
+   ['Thời gian hoàn tất',r.completed_at?date(r.completed_at):'Đang xử lý']
+  ]){
+   const div=node('div');div.append(node('dt',label),node('dd',val));metaDl.append(div);
+  }
+  card.append(metaDl);
+
+  // Stat Tiles
+  const tiles=node('div',undefined,'stat-tiles');
+  tiles.append(
+   createStatTile('Đã kiểm tra',totalScanned>0?totalScanned:'—'),
+   createStatTile('Cần kiểm tra',reviewCount,'tile-review'),
+   createStatTile('Đang quan sát',obsCount,'tile-observing'),
+   createStatTile('Thiếu dữ liệu',insuffCount,'tile-insufficient'),
+   createStatTile('Dịch vụ lỗi',errorCount,errorCount>0?'tile-error':'')
+  );
+  card.append(tiles);
+
+  // Errors alert if any
+  if(errorCount>0){
+   const errBox=node('div',undefined,'scan-errors-alert');
+   errBox.append(node('h4','Có '+errorCount+' dịch vụ gặp lỗi trong lượt quét:'));
+   const ul=node('ul');
+   for(const e of r.errors){
+    ul.append(node('li',e.type+': '+e.code+(errorDescriptions[e.code]?' ('+errorDescriptions[e.code]+')':'')));
+   }
+   errBox.append(ul);
+   card.append(errBox);
+  }
+
+  if(historyDetailLoading)card.append(node('p','Đang tải đầy đủ chi tiết lượt quét…','muted history-detail-loading'));
+  if(historyDetailError){
+   const msg=node('p',historyDetailError,'error'),retry=node('button','Thử lại chi tiết','button secondary history-detail-retry');
+   retry.onclick=()=>loadHistoryScan();card.append(msg,retry);
+  }
+
+  // Findings list for this specific scan
+  const findingsHeading=node('div',undefined,'card-head');
+  findingsHeading.append(node('h3','Danh sách phát hiện trong lượt quét'));
+  card.append(findingsHeading);
+
+  const findingsContainer=node('div');
+  renderTable(findingsContainer,findingsList,false);
+  card.append(findingsContainer);
+
+  detail.append(card);
  }
+}
+
+function createStatTile(label,value,cls){
+ const d=node('div',undefined,'stat-tile '+(cls||''));
+ d.append(node('span',label),node('strong',String(value)));
+ return d;
 }
 
 function openHistoryScan(row){
@@ -794,10 +982,18 @@ function createFieldElement(key,meta,currentValue){
  const fMeta=friendlyFieldMeta[key]||{};
  const labelText=fMeta.label||meta.label||key;
  const unitText=fMeta.unit||meta.unit||'';
- const rangeText='Trong khoảng '+meta.min+'–'+meta.max+(unitText?' '+unitText:'');
+ const rangeText=`Hợp lệ: ${meta.min} – ${meta.max}${unitText?' '+unitText:''} · Mặc định: ${meta.default}${unitText?' '+unitText:''}`;
+ const helpText=fMeta.help||`Cảnh báo kích hoạt khi giá trị vượt ngưỡng ${meta.default} ${unitText}.`;
+
  const wrap=node('div',undefined,'field-wrap');
  const label=node('label',undefined,'field-label');
- label.htmlFor=key;label.append(node('span',labelText));wrap.append(label);
+ label.htmlFor=key;
+ label.append(node('span',labelText));
+ wrap.append(label);
+
+ const desc=node('p',helpText,'field-desc');
+ wrap.append(desc);
+
  const inputWrap=node('div',undefined,'field-input-wrap');
  const input=node('input',undefined,'field-input');
  input.id=key;input.type='number';input.required=true;input.min=meta.min;input.max=meta.max;
@@ -809,11 +1005,15 @@ function createFieldElement(key,meta,currentValue){
  };
  input.oninvalid=()=>{
   let err=wrap.querySelector('.field-help-error');
-  if(!err){err=node('small',rangeText,'field-help-error');wrap.append(err);}
+  if(!err){err=node('small',`Giá trị phải trong khoảng ${meta.min} – ${meta.max}${unitText?' '+unitText:''}`,'field-help-error');wrap.append(err);}
  };
  inputWrap.append(input);
  if(unitText)inputWrap.append(node('span',unitText,'field-unit-badge'));
  wrap.append(inputWrap);
+
+ const rangeHint=node('small',rangeText,'field-limits');
+ wrap.append(rangeHint);
+
  return wrap;
 }
 
@@ -833,12 +1033,16 @@ function renderSettingsUI(){
    details.append(summary);
    const body=node('div',undefined,'settings-group-body');
    hierarchyGroup.services.forEach(service=>{
+    if(!service.name)return;
+    const validFields=service.fields.filter(k=>!!activeThresholds[k]);
+    if(validFields.length===0)return;
     const card=node('div',undefined,'service-card');
     card.append(node('h4',service.name,'service-card-title'));
+    if(service.desc)card.append(node('p',service.desc,'service-card-desc'));
     const grid=node('div',undefined,'service-grid');
-    service.fields.forEach(fieldKey=>{
+    validFields.forEach(fieldKey=>{
      const meta=activeThresholds[fieldKey];
-     if(meta)grid.append(createFieldElement(fieldKey,meta,profile.settings[fieldKey]));
+     grid.append(createFieldElement(fieldKey,meta,profile.settings[fieldKey]));
     });
     card.append(grid);
     body.append(card);
@@ -972,18 +1176,18 @@ $('register-form').onsubmit=e=>{
  if(!isValidEmail(email)){
   feedback.className='inline-feedback error';
   feedback.textContent='Định dạng email không hợp lệ.';
-  return;
+  return false;
  }
  const pwErr=validatePassword(password);
  if(pwErr){
   feedback.className='inline-feedback error';
   feedback.textContent=pwErr;
-  return;
+  return false;
  }
  if(password!==confirm){
   feedback.className='inline-feedback error';
   feedback.textContent='Mật khẩu xác nhận không khớp.';
-  return;
+  return false;
  }
  run(async()=>{
   $('reg-password').value='';$('reg-confirm').value='';
@@ -1004,6 +1208,7 @@ $('register-form').onsubmit=e=>{
   $('verify-email').value=email;
   $('verify-info').textContent='Mã xác minh đã được gửi tới email '+email+'.';
   showGuestView('verify');
+  status('Đăng ký thành công! Mã xác minh đã được gửi tới email của bạn.');
  },$('reg-submit'));
  return false;
 };
@@ -1017,7 +1222,7 @@ $('verify-form').onsubmit=e=>{
  if(!code){
   feedback.className='inline-feedback error';
   feedback.textContent='Vui lòng nhập mã xác minh.';
-  return;
+  return false;
  }
  run(async()=>{
   if(cfg?.demo){
@@ -1066,7 +1271,7 @@ $('forgot-form').onsubmit=e=>{
  if(!isValidEmail(email)){
   feedback.className='inline-feedback error';
   feedback.textContent='Định dạng email không hợp lệ.';
-  return;
+  return false;
  }
  run(async()=>{
   if(cfg?.demo){
@@ -1098,23 +1303,23 @@ $('reset-form').onsubmit=e=>{
  if(!isValidEmail(email)){
   feedback.className='inline-feedback error';
   feedback.textContent='Định dạng email không hợp lệ.';
-  return;
+  return false;
  }
  if(!code){
   feedback.className='inline-feedback error';
   feedback.textContent='Vui lòng nhập mã xác minh.';
-  return;
+  return false;
  }
  const pwErr=validatePassword(password);
  if(pwErr){
   feedback.className='inline-feedback error';
   feedback.textContent=pwErr;
-  return;
+  return false;
  }
  if(password!==confirm){
   feedback.className='inline-feedback error';
   feedback.textContent='Mật khẩu xác nhận không khớp.';
-  return;
+  return false;
  }
  run(async()=>{
   $('reset-password').value='';$('reset-confirm').value='';
@@ -1194,9 +1399,11 @@ function resultMessage(){
 
 function appendResultNotes(container,r){
  if(r.error)container.append(node('p',friendlyError(r.error),'footnote'));
- if(r.status==='PARTIAL')container.append(node('p','Kết quả chưa đầy đủ.','footnote'));
- const errorDescriptions={SubscriptionRequiredException:'Chưa kích hoạt subscription',AccessDenied:'Thiếu quyền IAM',AccessDeniedException:'Thiếu quyền IAM',UnauthorizedOperation:'Thiếu quyền IAM',RequestLimitExceeded:'Vượt giới hạn gọi API (Throttling)',TIME_BUDGET:'Hết thời gian xử lý'};
- for(const e of r.errors||[]){const desc=errorDescriptions[e.code]?' ('+errorDescriptions[e.code]+')':'';container.append(node('p',e.type+': '+e.code+desc,'footnote'));}
+ if(r.status==='PARTIAL')container.append(node('p','Kết quả chưa đầy đủ. Giới hạn 100 tài nguyên/loại và 50 cảnh báo/region.','footnote'));
+ for(const e of r.errors||[]){
+  const desc=errorDescriptions[e.code]?' ('+errorDescriptions[e.code]+')':'';
+  container.append(node('p',e.type+': '+e.code+desc,'footnote'));
+ }
  const notices={
   FAILED:'Gửi email thất bại.',
   UNKNOWN:'Chưa xác định trạng thái email.',
@@ -1225,6 +1432,7 @@ function renderPrincipals(){
   if(!r.ok)throw Error('Không tải được cấu hình ứng dụng.');
   cfg=await r.json();
   window.cfg=cfg;
+  $('demo-banner').hidden=!cfg.demo;
   $('login').onclick=()=>token?logout():showGuestView('login');
   if(cfg.demo)$('start').textContent='Đăng nhập demo';
   const q=new URLSearchParams(location.search);
