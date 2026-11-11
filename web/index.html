@@ -241,17 +241,53 @@
 </article>
 
 <div class="filters-bar">
-<label for="search">Tìm tài nguyên<input id="search" type="search" placeholder="Resource ID, tên hoặc lý do"></label>
+<div class="filters-primary">
+<label class="filter-search" for="search">Tìm kiếm
+<input id="search" type="search" placeholder="Resource ID, tên, dịch vụ, loại, Rule ID, Finding ID, lý do, region"></label>
+<label for="filter-service">Dịch vụ AWS<select id="filter-service"><option value="">Tất cả dịch vụ</option></select></label>
+<label for="filter-type">Loại tài nguyên<select id="filter-type"><option value="">Tất cả loại</option></select></label>
+<label for="filter-level">Trạng thái đánh giá<select id="filter-level"><option value="">Tất cả trạng thái</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label>
+<label for="search-scope">Phạm vi
+<select id="search-scope">
+<option value="current">Lượt quét đang xem</option>
+<option value="history">Lịch sử nhiều lượt quét</option>
+</select></label>
+</div>
+<div class="filters-secondary">
+<label for="date-from">Từ ngày <span class="field-hint" id="date-from-hint">(giờ Việt Nam)</span>
+<input id="date-from" type="date"></label>
+<label for="date-to">Đến ngày <span class="field-hint">(hết ngày, giờ Việt Nam)</span>
+<input id="date-to" type="date"></label>
+<label for="sort-order">Sắp xếp
+<select id="sort-order">
+<option value="default">Dịch vụ nhiều cảnh báo trước</option>
+<option value="newest">Mới nhất</option>
+<option value="oldest">Cũ nhất</option>
+<option value="service-asc">Tên dịch vụ A → Z</option>
+<option value="service-desc">Tên dịch vụ Z → A</option>
+<option value="resource-asc">Resource ID A → Z</option>
+<option value="resource-desc">Resource ID Z → A</option>
+<option value="unused-desc">Thời gian không sử dụng giảm dần</option>
+<option value="unused-asc">Thời gian không sử dụng tăng dần</option>
+<option value="observed-desc">Quan sát gần nhất</option>
+<option value="observed-asc">Quan sát lâu nhất</option>
+</select></label>
+<button id="reset-filters" class="button secondary" type="button">Xóa tất cả bộ lọc</button>
+</div>
+<p id="date-error" class="inline-feedback error" role="alert" hidden></p>
 <details id="advanced-filters" class="advanced-filters" open>
 <summary>Bộ lọc nâng cao</summary>
 <div class="filters">
-<label for="filter-group">Nhóm dịch vụ<select id="filter-group"><option value="">Tất cả</option></select></label>
-<label for="filter-type">Loại tài nguyên<select id="filter-type"><option value="">Tất cả</option></select></label>
-<label for="filter-region">Region<select id="filter-region"><option value="">Tất cả</option></select></label>
-<label for="filter-level">Trạng thái<select id="filter-level"><option value="">Tất cả</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label>
+<label for="filter-group">Nhóm tài nguyên<select id="filter-group"><option value="">Tất cả nhóm</option></select></label>
+<label for="filter-region">AWS Region<select id="filter-region"><option value="">Tất cả region</option></select></label>
+<label for="filter-rule">Detection Rule<select id="filter-rule"><option value="">Tất cả rule</option></select></label>
 <label for="filter-acknowledged">Trạng thái xem<select id="filter-acknowledged"><option value="">Tất cả</option><option value="acknowledged">Đã xem</option><option value="unacknowledged">Chưa xem</option></select></label>
+<label for="filter-diff">Thay đổi so với lượt trước<select id="filter-diff"><option value="">Tất cả</option><option value="new">Finding mới xuất hiện</option><option value="existing">Finding còn tồn tại</option><option value="changed">Finding thay đổi trạng thái</option></select></label>
+<label for="filter-scan-status">Trạng thái lượt quét<select id="filter-scan-status"><option value="">Tất cả</option><option value="SUCCEEDED">Hoàn tất</option><option value="PARTIAL">Chưa đầy đủ</option><option value="FAILED">Thất bại</option><option value="TIMED_OUT">Quá hạn</option><option value="RUNNING">Đang quét</option><option value="QUEUED">Đang chờ</option></select></label>
 </div>
+<p class="field-hint" id="diff-note" hidden></p>
 </details>
+<p class="field-hint" id="history-status" hidden></p>
 </div>
 
 <p id="findings-scope" class="muted" aria-live="polite"></p>

@@ -368,7 +368,7 @@ def main():
                     page.wait_for_timeout(100)
                 page.locator(selector).first.focus()
                 focused = set()
-                for _ in range(len(expected_keys) * 2):
+                for _ in range(len(expected_keys) * 4):
                     focused.add(page.evaluate('document.activeElement.id || document.activeElement.value'))
                     if expected_keys <= focused:
                         break

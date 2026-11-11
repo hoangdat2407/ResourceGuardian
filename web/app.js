@@ -24,6 +24,25 @@ let groupsUserToggled=false;
 let chartExpanded=false;
 const SERVICE_GROUP_PAGE=10;
 const CHART_SERVICE_LIMIT=6;
+const VN_OFFSET_SECONDS=7*3600;
+const HISTORY_PAGE_LIMIT=100;
+const HISTORY_MAX_PAGES=30;
+const SERVICE_FAMILIES={
+ EBS:{key:'EBS',label:'Amazon EBS'},
+ SNAPSHOT:{key:'EBS',label:'Amazon EBS'},
+ RDS:{key:'RDS',label:'Amazon RDS'},
+ RDS_SNAPSHOT:{key:'RDS',label:'Amazon RDS'},
+ S3_MULTIPART:{key:'S3',label:'Amazon S3'}
+};
+let searchMode='current';
+let searchDebounceTimer=null;
+let appliedQuery='';
+let historySearchRows=[];
+let historySearchToken=0;
+let historySearchState={loading:false,done:false,error:'',capped:false,loaded:0};
+let diffRows=[];
+let diffScanId=null;
+let diffState='idle';
 let openFeedbackMenu=null;
 
 let historyRows=[],historyCursor=null,historyLoading=false,historyError='',historyRequest=0,historyAttempted=false;
@@ -715,7 +734,10 @@ function scanFindings(rows){
   ...f,
   region:f.region||row.region,
   scan_account_id:f.account_id||row.account_id||profile?.account_id,
-  scan_id:f.scan_id||row.scan_id
+  scan_id:f.scan_id||row.scan_id,
+  scan_status:row.status||'',
+  scan_completed_at:row.completed_at||0,
+  scan_started_at:row.started_at||0
  })));
 }
 
@@ -748,6 +770,7 @@ function populateScanSelect(){
 }
 
 async function selectScan(scanId,options={}){
+ if(scanId&&selectedScanId&&scanId!==selectedScanId)resetFilterControls();
  selectedScanId=scanId||null;
  if(!selectedScanId){renderFindings();return;}
  if(!options.force&&scanRowsCache.has(selectedScanId)){renderFindings();if(scanLoadError){scanLoadError='';renderFindings();}return;}
@@ -919,7 +942,9 @@ function findingRow(f,allowFeedback){
  if(threshold)main.append(node('p',threshold,'finding-threshold'));
  const evidenceText=evidenceLine(f);
  if(evidenceText.length)main.append(node('p',evidenceText.join(' · '),'evidence'));
- main.append(node('p','Region: '+(f.region||'Không xác định')+' · Account: '+(f.account_id||f.scan_account_id||'Không xác định'),'muted finding-meta'));
+ const meta=['Region: '+(f.region||'Không xác định'),'Account: '+(f.account_id||f.scan_account_id||'Không xác định')];
+ if(f.scan_completed_at)meta.push('Lượt quét: '+(f.scan_id||'Không xác định')+' · '+date(f.scan_completed_at));
+ main.append(node('p',meta.join(' · '),'muted finding-meta'));
  const actions=node('td',undefined,'finding-actions');
  const open=node('button','Xem chi tiết','button secondary finding-open');
  open.type='button';
@@ -947,6 +972,10 @@ function findingTable(items,allowFeedback){
  return wrap;
 }
 
+function serviceFamily(type){
+ return SERVICE_FAMILIES[type]||{key:type,label:typeLabels[type]||type||'Dịch vụ AWS'};
+}
+
 function uniqueResourceKey(f){
  return [f.type||'',f.resource_id||'',f.region||''].join('|');
 }
@@ -964,31 +993,222 @@ function scanMetrics(rows){
  return {total,review:levels.REVIEW.size,observing:levels.OBSERVING.size,insufficient:levels.INSUFFICIENT_DATA.size,alerts};
 }
 
-function groupByService(items){
+function compareText(a,b){
+ return String(a||'').localeCompare(String(b||''),'vi',{numeric:true,sensitivity:'base'});
+}
+
+function findingMoment(finding){
+ const value=finding.evaluated_at||finding.last_seen_at||'';
+ const parsed=Date.parse(value);
+ return Number.isFinite(parsed)?parsed/1000:null;
+}
+
+function nullsLast(a,b,direction){
+ if(a===null&&b===null)return 0;
+ if(a===null)return 1;
+ if(b===null)return -1;
+ return direction*(a-b);
+}
+
+function sortGroupItems(items,mode){
+ const sorted=[...items];
+ const fallback=(a,b)=>compareText(a.resource_id,b.resource_id)||compareText(a.rule_id,b.rule_id);
+ if(mode==='resource-desc'){
+  sorted.sort((a,b)=>compareText(b.resource_id,a.resource_id)||compareText(a.rule_id,b.rule_id));
+ }else if(mode==='observed-desc'||mode==='newest'||mode==='observed-asc'||mode==='oldest'){
+  const direction=(mode==='oldest'||mode==='observed-asc')?1:-1;
+  sorted.sort((a,b)=>nullsLast(findingMoment(a),findingMoment(b),direction)||fallback(a,b));
+ }else if(mode==='unused-desc'||mode==='unused-asc'){
+  const value=finding=>{
+   const evidence=finding.evidence&&typeof finding.evidence==='object'?finding.evidence:{};
+   const number=Number(evidence.observed_hours);
+   return Number.isFinite(number)?number:null;
+  };
+  const direction=(mode==='unused-asc')?1:-1;
+  sorted.sort((a,b)=>nullsLast(value(a),value(b),direction)||fallback(a,b));
+ }else{
+  sorted.sort(fallback);
+ }
+ return sorted;
+}
+
+function groupByService(items,sortMode='default'){
  const map=new Map();
  for(const finding of items){
-  const type=finding.type||'UNKNOWN';
-  const entry=map.get(type)||{type,label:typeLabels[type]||type,alerts:0,resources:new Set(),items:[]};
+  const family=serviceFamily(finding.type||'UNKNOWN');
+  const entry=map.get(family.key)||{type:family.key,label:family.label,alerts:0,resources:new Set(),items:[]};
   entry.alerts++;
   entry.resources.add(uniqueResourceKey(finding));
   entry.items.push(finding);
-  map.set(type,entry);
+  map.set(family.key,entry);
  }
- for(const entry of map.values()){
-  entry.items.sort((a,b)=>String(a.resource_id||'').localeCompare(String(b.resource_id||''),'vi')||String(a.rule_id||'').localeCompare(String(b.rule_id||'')));
+ for(const entry of map.values())entry.items=sortGroupItems(entry.items,sortMode);
+ const groups=[...map.values()];
+ if(sortMode==='service-asc')groups.sort((a,b)=>compareText(a.label,b.label));
+ else if(sortMode==='service-desc')groups.sort((a,b)=>compareText(b.label,a.label));
+ else groups.sort((a,b)=>b.alerts-a.alerts||compareText(a.label,b.label));
+ return groups;
+}
+
+const RESOURCE_NAME_KEYS=['function_name','cluster_name','table_name','queue_name','topic_name','rule_name','state_machine_name','endpoint_name','domain_name','vault_name','repository_name','group_name','api_name','file_system_id','distribution_id','bucket','key','name'];
+
+function findingSearchText(finding){
+ const evidence=finding.evidence&&typeof finding.evidence==='object'?finding.evidence:{};
+ const names=RESOURCE_NAME_KEYS.map(key=>evidence[key]).filter(value=>value!==undefined&&value!==null&&typeof value!=='object');
+ const family=serviceFamily(finding.type);
+ return [
+  finding.resource_id,
+  finding.finding_id,
+  finding.region,
+  finding.type,
+  typeLabels[finding.type]||'',
+  family.label,
+  finding.rule_id,
+  finding.reason,
+  reasons[finding.reason]||'',
+  translateReason(finding.reason),
+  friendlyReason(finding),
+  finding.scan_id,
+  ...names
+ ].map(value=>String(value||'').toLowerCase()).join(' ');
+}
+
+function normalizedQuery(value){
+ return String(value||'').trim().replace(/\s+/g,' ').toLowerCase();
+}
+
+function matchesQuery(finding,query){
+ if(!query)return true;
+ const text=findingSearchText(finding);
+ return query.split(' ').every(token=>text.includes(token));
+}
+
+function parseTimestamp(value){
+ if(!value)return null;
+ const parsed=Date.parse(value);
+ return Number.isFinite(parsed)?parsed/1000:null;
+}
+
+function vnDayStart(value){
+ const parts=String(value||'').split('-').map(Number);
+ if(parts.length!==3||parts.some(part=>!Number.isFinite(part)))return null;
+ return Date.UTC(parts[0],parts[1]-1,parts[2])/1000-VN_OFFSET_SECONDS;
+}
+
+function vnDayEnd(value){
+ const start=vnDayStart(value);
+ return start===null?null:start+86399.999;
+}
+
+function historyItems(){
+ return historySearchRows.flatMap(row=>(row.findings||[]).map(finding=>({
+  ...finding,
+  region:finding.region||row.region,
+  scan_id:row.scan_id,
+  scan_status:row.status||'',
+  scan_completed_at:row.completed_at||0,
+  scan_started_at:row.started_at||0,
+  account_id:finding.account_id||row.account_id
+ })));
+}
+
+async function loadHistorySearch(){
+ if(historySearchState.loading||historySearchState.done)return;
+ const generation=scopeGeneration,token=++historySearchToken;
+ historySearchState={loading:true,done:false,error:'',capped:false,loaded:historySearchRows.length};
+ renderHistoryStatus();
+ let rows=[...historySearchRows],cursor=null,pages=0;
+ try{
+  do{
+   const params=new URLSearchParams({limit:String(HISTORY_PAGE_LIMIT)});
+   if(cursor)params.set('next_token',cursor);
+   const reply=await api('/history?'+params);
+   if(generation!==scopeGeneration||token!==historySearchToken)return;
+   if(!Array.isArray(reply.results))throw Error('Máy chủ trả lịch sử không hợp lệ.');
+   rows=mergeHistoryRows(rows,validRows(reply.results));
+   historySearchState.loaded=rows.length;
+   renderHistoryStatus();
+   cursor=reply.next_token||null;
+   pages++;
+   if(pages>=HISTORY_MAX_PAGES){historySearchState.capped=!!cursor;cursor=null;}
+  }while(cursor);
+  historySearchRows=rows;
+  historyRows=mergeHistoryRows(historyRows,rows);
+  historySearchState.done=true;
+ }catch(error){
+  if(generation!==scopeGeneration||token!==historySearchToken)return;
+  historySearchState.error='Không tải được toàn bộ lịch sử. '+friendlyError(error.message);
+ }finally{
+  if(generation===scopeGeneration&&token===historySearchToken){
+   historySearchState.loading=false;
+   renderHistoryStatus();
+   renderFindings();
+  }
  }
- return [...map.values()].sort((a,b)=>b.alerts-a.alerts||a.label.localeCompare(b.label,'vi'));
+}
+
+function renderHistoryStatus(){
+ const el=$('history-status');
+ if(!el)return;
+ if(searchMode!=='history'){el.hidden=true;el.textContent='';return;}
+ el.hidden=false;
+ if(historySearchState.error)el.textContent=historySearchState.error;
+ else if(historySearchState.loading)el.textContent='Đang tải toàn bộ lịch sử… đã tải '+historySearchState.loaded+' bản ghi lượt quét.';
+ else{
+  let text='Đã tải '+historySearchRows.length+' bản ghi lượt quét trong 30 ngày gần nhất; tìm kiếm trên toàn bộ dữ liệu đã tải.';
+  if(historySearchState.capped)text+=' Đã đạt giới hạn '+HISTORY_MAX_PAGES+' trang nên kết quả có thể chưa đầy đủ.';
+  el.textContent=text;
+ }
+}
+
+async function ensureDiffRows(){
+ if(diffState==='loading')return;
+ const summaries=scanSummaries();
+ const index=summaries.findIndex(item=>item.scan_id===selectedScanId);
+ const previous=index>=0?summaries[index+1]:null;
+ if(!previous){diffRows=[];diffScanId=null;diffState='unavailable';return;}
+ if(diffScanId===previous.scan_id&&diffRows.length){diffState='ready';return;}
+ const cached=scanRowsCache.get(previous.scan_id);
+ if(cached&&cached.size){diffRows=[...cached.values()];diffScanId=previous.scan_id;diffState='ready';return;}
+ diffState='loading';
+ const generation=scopeGeneration;
+ try{
+  const reply=await api('/scans/'+encodeURIComponent(previous.scan_id));
+  if(generation!==scopeGeneration)return;
+  const map=new Map();
+  for(const row of validRows(reply.results))if(row.scan_id===previous.scan_id)map.set(row.region,row);
+  scanRowsCache.set(previous.scan_id,map);
+  diffRows=[...map.values()];
+  diffScanId=previous.scan_id;
+  diffState='ready';
+ }catch{
+  diffRows=[];
+  diffState='unavailable';
+ }
+}
+
+function diffKey(finding){return [finding.type,finding.resource_id,finding.rule_id,finding.region].join('|');}
+
+function diffFlags(current,previousRows){
+ const previous=new Map();
+ for(const row of previousRows)for(const finding of row.findings||[])previous.set(diffKey(finding),finding.level);
+ return finding=>{
+  const old=previous.get(diffKey(finding));
+  if(old===undefined)return 'new';
+  if(old!==finding.level)return 'changed';
+  return 'existing';
+ };
 }
 
 function serviceResourceData(items){
  const map=new Map();
  for(const finding of items){
   if(finding.level!=='REVIEW')continue;
-  const type=finding.type||'UNKNOWN';
-  const entry=map.get(type)||{type,label:typeLabels[type]||type,resources:new Set(),alerts:0};
+  const family=serviceFamily(finding.type||'UNKNOWN');
+  const entry=map.get(family.key)||{type:family.key,label:family.label,resources:new Set(),alerts:0};
   entry.resources.add(uniqueResourceKey(finding));
   entry.alerts++;
-  map.set(type,entry);
+  map.set(family.key,entry);
  }
  return [...map.values()].sort((a,b)=>b.resources.size-a.resources.size||b.alerts-a.alerts||a.label.localeCompare(b.label,'vi'));
 }
@@ -1067,6 +1287,61 @@ function renderServiceChart(items,rows,baseFiltered){
  }
 }
 
+function resetFilterControls(){
+ for(const id of ['search','filter-type','filter-service','filter-level','filter-group','filter-region','filter-rule','filter-acknowledged','filter-diff','filter-scan-status','date-from','date-to']){
+  const el=$(id);
+  if(el)el.value='';
+ }
+ const scope=$('search-scope');
+ if(scope)scope.value='current';
+ appliedQuery='';
+ searchMode='current';
+ const scanSelect=$('scan-select');
+ if(scanSelect)scanSelect.disabled=false;
+ const sort=$('sort-order');
+ if(sort)sort.value='default';
+ const error=$('date-error');
+ if(error){error.hidden=true;error.textContent='';}
+ const diffNote=$('diff-note');
+ if(diffNote){diffNote.hidden=true;diffNote.textContent='';}
+ renderHistoryStatus();
+ groupsUserToggled=false;
+ openGroups.clear();
+ groupLimits.clear();
+ chartExpanded=false;
+}
+
+function resetFilters(){
+ resetFilterControls();
+ renderFindings();
+ const search=$('search');
+ if(search)search.focus();
+}
+
+function updateSortOptions(items){
+ const select=$('sort-order');
+ if(!select)return;
+ const hasTime=items.some(finding=>finding.last_seen_at||finding.evaluated_at);
+ const hasUnused=items.some(finding=>{
+  const evidence=finding.evidence&&typeof finding.evidence==='object'?finding.evidence:{};
+  return Number.isFinite(Number(evidence.observed_hours));
+ });
+ for(const value of ['observed-desc','observed-asc','newest','oldest']){
+  const option=select.querySelector('option[value="'+value+'"]');
+  if(!option)continue;
+  option.disabled=!hasTime;
+  option.title=hasTime?'':'Không có dữ liệu thời gian cho phạm vi đang xem';
+ }
+ for(const value of ['unused-desc','unused-asc']){
+  const option=select.querySelector('option[value="'+value+'"]');
+  if(!option)continue;
+  option.disabled=!hasUnused;
+  option.title=hasUnused?'':'Không có dữ liệu thời gian không sử dụng';
+ }
+ const disabled=/^(observed|newest|oldest|unused)-/.test(select.value);
+ if(disabled&&select.selectedOptions[0]?.disabled)select.value='default';
+}
+
 function renderChartPlaceholder(title,text){
  const chart=$('service-chart');
  if(chart){
@@ -1082,22 +1357,19 @@ function renderChartPlaceholder(title,text){
 }
 
 function focusServiceGroup(type){
- const levelSelect=$('filter-level');
- if(levelSelect&&levelSelect.value&&levelSelect.value!=='REVIEW')levelSelect.value='';
- openGroups.add(serviceKey('REVIEW',type));
- renderFindings();
- const find=()=>Array.from(document.querySelectorAll('#findings-list section.service-group')).find(section=>section.dataset.level==='REVIEW'&&section.dataset.service===type);
- let section=find();
- if(!section){
-  for(const id of ['search','filter-type','filter-group','filter-region','filter-acknowledged']){
-   const el=$(id);
-   if(el)el.value='';
-  }
-  if(levelSelect)levelSelect.value='';
-  openGroups.add(serviceKey('REVIEW',type));
-  renderFindings();
-  section=find();
+ const family=serviceFamily(type);
+ const serviceSelect=$('filter-service');
+ if(serviceSelect)serviceSelect.value=family.key;
+ for(const id of ['search','filter-type','filter-group','filter-region','filter-rule','filter-level','filter-acknowledged','filter-diff','filter-scan-status','date-from','date-to']){
+  const el=$(id);
+  if(el)el.value='';
  }
+ groupsUserToggled=true;
+ openGroups.clear();
+ openGroups.add(serviceKey('REVIEW',family.key));
+ groupLimits.clear();
+ renderFindings();
+ const section=Array.from(document.querySelectorAll('#findings-list section.service-group')).find(item=>item.dataset.level==='REVIEW'&&item.dataset.service===family.key);
  if(!section)return;
  section.scrollIntoView({behavior:'smooth',block:'start'});
  section.classList.add('service-focus');
@@ -1159,7 +1431,7 @@ function renderServiceGroup(entry,level,allowFeedback){
  return section;
 }
 
-function renderGroupedList(container,items,allowFeedback){
+function renderGroupedList(container,items,allowFeedback,sortMode='default'){
  const previous=feedbackFocus(container);
  container.replaceChildren();
  const statuses=['REVIEW','OBSERVING','INSUFFICIENT_DATA'];
@@ -1171,7 +1443,7 @@ function renderGroupedList(container,items,allowFeedback){
  for(const level of statuses){
   const levelItems=items.filter(finding=>finding.level===level);
   if(!levelItems.length)continue;
-  const groups=groupByService(levelItems);
+  const groups=groupByService(levelItems,sortMode);
   const statusSlug=level==='INSUFFICIENT_DATA'?'insufficient':level.toLowerCase();
   const heading=node('div',undefined,'status-heading status-'+statusSlug);
   const title=node('h3',undefined,'status-heading-title');
@@ -1185,31 +1457,56 @@ function renderGroupedList(container,items,allowFeedback){
   const heading=node('div',undefined,'status-heading');
   heading.append(node('h3','Khác','status-heading-title'));
   container.append(heading);
-  for(const group of groupByService(others))container.append(renderServiceGroup(group,'REVIEW',allowFeedback));
+  for(const group of groupByService(others,sortMode))container.append(renderServiceGroup(group,'REVIEW',allowFeedback));
  }
  restoreFeedbackFocus(container,previous);
+}
+
+function readDateFilters(){
+ const from=$('date-from')?.value||'';
+ const to=$('date-to')?.value||'';
+ const fromTs=from?vnDayStart(from):null;
+ const toTs=to?vnDayEnd(to):null;
+ const error=$('date-error');
+ if(from&&to&&fromTs!==null&&toTs!==null&&fromTs>toTs){
+  if(error){error.hidden=false;error.textContent='Từ ngày phải trước hoặc bằng Đến ngày. Bộ lọc ngày tạm không áp dụng.';}
+  return {from:null,to:null,invalid:true};
+ }
+ if(error){error.hidden=true;error.textContent='';}
+ return {from:fromTs,to:toTs,invalid:false};
+}
+
+function findingFilterTime(finding){
+ if(searchMode==='history')return Number(finding.scan_completed_at)||null;
+ const evaluated=parseTimestamp(finding.evaluated_at);
+ return evaluated!==null?evaluated:parseTimestamp(finding.last_seen_at);
 }
 
 function renderFindings(){
  if(!profile)return;
  populateScanSelect();
+ const scanSelect=$('scan-select');
+ if(scanSelect)scanSelect.disabled=searchMode==='history';
  let rows=selectedScanId?activeScanRows(selectedScanId):[];
  if(!rows.length&&!scanSummaries().length)rows=validRows(results);
- const items=scanFindings(rows);
+ const currentItems=scanFindings(rows);
  const metrics=scanMetrics(rows);
- renderScanBanner(rows);
- renderScanDiff(rows);
- renderScanErrors(rows);
+ const isHistory=searchMode==='history';
+ if(isHistory&&!historySearchState.done&&!historySearchState.loading)loadHistorySearch();
+ renderHistoryStatus();
+ const sourceItems=isHistory?historyItems():currentItems;
  const list=$('findings-list');
  const context=$('resource-overview-context');
- const setOverview=(text)=>{if(context)context.textContent=text;};
+ const setOverview=text=>{if(context)context.textContent=text;};
+ const banner=$('scan-snapshot-banner'),diffPanel=$('scan-diff-panel'),errorsCard=$('scan-errors-card');
+
  const clearCounts=()=>{
   setStat('findings-count-checked',null);
   setStat('findings-count-review',null);
   setStat('findings-count-observing',null);
   setStat('findings-count-insufficient',null);
  };
- if(!rows.length){
+ if(!rows.length&&!isHistory){
   clearCounts();
   if(scanLoading){
    setOverview('Đang tải dữ liệu lượt quét…');
@@ -1218,71 +1515,177 @@ function renderFindings(){
    setOverview('Chưa có lượt quét nào để hiển thị.');
    renderChartPlaceholder('Chưa có dữ liệu lượt quét','Chọn Quét ngay hoặc chọn một lượt quét đã lưu để xem tài nguyên.');
   }
+  if(banner){banner.hidden=true;banner.replaceChildren();}
+  if(diffPanel)diffPanel.hidden=true;
+  if(errorsCard)errorsCard.hidden=true;
   const previous=feedbackFocus(list);
   if(scanLoading)emptyState(list,'Đang tải kết quả lượt quét…','Dữ liệu của lượt quét đang xem sẽ hiển thị ngay khi tải xong.');
   else emptyState(list,'Chưa có dữ liệu lượt quét',scanLoadError||'Hãy kết nối AWS và chạy lần quét đầu tiên.');
   restoreFeedbackFocus(list,previous);
   $('findings-scope').textContent=scanLoadError||'';
-  renderFilterOptions(items);
+  renderFilterOptions(sourceItems);
+  renderHistoryStatus();
   return;
  }
+
  const haveCounts=metrics.total!==null;
  setStat('findings-count-checked',metrics.total);
  setStat('findings-count-review',haveCounts?metrics.review:null);
  setStat('findings-count-observing',haveCounts?metrics.observing:null);
  setStat('findings-count-insufficient',haveCounts?metrics.insufficient:null);
- const first=rows[0];
- const scanStatus=scanStatusLabels[first.status]||first.status||'Không xác định';
- const scanAccount=first.account_id||profile?.account_id||'Không xác định';
- const scanRegions=[...new Set(rows.map(row=>row.region))].join(', ');
- setOverview('Lượt quét '+date(first.started_at||first.completed_at)+' · '+scanAccount+' · '+scanRegions+' · '+scanStatus);
 
- renderFilterOptions(items);
- const q=$('search')?.value.trim().toLowerCase()||'';
+ if(isHistory){
+  if(banner){
+   banner.hidden=false;
+   banner.replaceChildren(node('p','Chế độ tìm kiếm lịch sử: tìm trên toàn bộ bản ghi lượt quét đã tải trong 30 ngày. Bộ chọn lượt quét bên trên không áp dụng.', 'scan-mode-note'));
+  }
+  if(diffPanel)diffPanel.hidden=true;
+  if(errorsCard)errorsCard.hidden=true;
+  setOverview('Chế độ lịch sử · '+historySearchRows.length+' bản ghi lượt quét đã tải · Bốn thẻ bên dưới phản ánh lượt quét đang chọn.');
+ }else if(rows.length){
+  renderScanBanner(rows);
+  renderScanDiff(rows);
+  renderScanErrors(rows);
+  const first=rows[0];
+  const scanStatus=scanStatusLabels[first.status]||first.status||'Không xác định';
+  const scanAccount=first.account_id||profile?.account_id||'Không xác định';
+  const scanRegions=[...new Set(rows.map(row=>row.region))].join(', ');
+  setOverview('Lượt quét '+date(first.started_at||first.completed_at)+' · '+scanAccount+' · '+scanRegions+' · '+scanStatus+' · Bốn thẻ phản ánh toàn bộ lượt quét.');
+ }
+
+ renderFilterOptions(sourceItems);
+ const q=normalizedQuery($('search')?.value);
+ appliedQuery=q;
  const type=$('filter-type')?.value||'';
+ const service=$('filter-service')?.value||'';
  const level=$('filter-level')?.value||'';
  const group=$('filter-group')?.value||'';
  const region=$('filter-region')?.value||'';
+ const rule=$('filter-rule')?.value||'';
  const ack=$('filter-acknowledged')?.value||'';
- const matches=(finding,ignoreLevel)=>(
-  (!type||finding.type===type)&&
-  (!group||resourceGroups[finding.type]===group)&&
-  (!region||finding.region===region)&&
-  (!ack||(ack==='acknowledged'?finding.acknowledged===true:finding.acknowledged!==true))&&
-  (ignoreLevel||!level||finding.level===level)&&
-  [finding.resource_id,finding.reason,reasons[finding.reason]||'',friendlyReason(finding),finding.rule_id].some(value=>String(value||'').toLowerCase().includes(q))
- );
- const baseFiltered=items.filter(finding=>matches(finding,true));
- const filtered=items.filter(finding=>matches(finding,false));
- const activeFilter=Boolean(q||type||level||group||region||ack);
- renderServiceChart(items,rows,baseFiltered);
+ const diffFilter=$('filter-diff')?.value||'';
+ const scanStatusFilter=$('filter-scan-status')?.value||'';
+ const dates=readDateFilters();
+ updateSortOptions(sourceItems);
+ const sortMode=$('sort-order')?.value||'default';
 
- const failed=rows.some(row=>['FAILED','TIMED_OUT'].includes(row.status));
- const partial=rows.some(row=>row.status==='PARTIAL');
+ const currentRegions=[...new Set(rows.map(row=>row.region))].sort().join(',');
+ const previousRegions=[...new Set(diffRows.map(row=>row.region))].sort().join(',');
+ const comparableDiff=!isHistory&&diffFilter&&diffState==='ready'&&diffRows.length>0
+  &&currentRegions===previousRegions
+  &&rows.every(row=>row.status==='SUCCEEDED')
+  &&diffRows.every(row=>row.status==='SUCCEEDED');
+ const flags=comparableDiff?diffFlags(currentItems,diffRows):null;
+
+ const matches=(finding,ignoreLevel)=>{
+  if(q&&!matchesQuery(finding,q))return false;
+  if(type&&finding.type!==type)return false;
+  if(service&&serviceFamily(finding.type).key!==service)return false;
+  if(group&&resourceGroups[finding.type]!==group)return false;
+  if(region&&finding.region!==region)return false;
+  if(rule&&finding.rule_id!==rule)return false;
+  if(ack&&!(ack==='acknowledged'?finding.acknowledged===true:finding.acknowledged!==true))return false;
+  if(scanStatusFilter&&finding.scan_status!==scanStatusFilter)return false;
+  if(!ignoreLevel&&level&&finding.level!==level)return false;
+  if(dates.from!==null||dates.to!==null){
+   const moment=findingFilterTime(finding);
+   if(moment===null)return false;
+   if(dates.from!==null&&moment<dates.from)return false;
+   if(dates.to!==null&&moment>dates.to)return false;
+  }
+  if(diffFilter){
+   if(!flags)return false;
+   if(flags(finding)!==diffFilter)return false;
+  }
+  return true;
+ };
+
+ const baseFiltered=sourceItems.filter(finding=>matches(finding,true));
+ const filtered=sourceItems.filter(finding=>matches(finding,false));
+ const activeFilter=Boolean(q||type||service||level||group||region||rule||ack||diffFilter||scanStatusFilter||dates.from!==null||dates.to!==null);
+ const subjectRows=isHistory?historySearchRows:rows;
+ renderServiceChart(sourceItems,subjectRows,baseFiltered);
+
  const notes=[];
- if(resultsError)notes.push('Danh sách chưa được cập nhật do lỗi tải kết quả.');
- if(failed)notes.push('Lượt quét gần nhất chưa quét thành công; danh sách này không dùng kết quả của lần quét lỗi.');
- if(partial)notes.push('Lượt quét chưa đầy đủ; không kết luận tài nguyên đã được giải quyết.');
- const scopeLine='Hiển thị '+filtered.length+' / '+items.length+' cảnh báo'+(activeFilter?' (đang áp dụng bộ lọc)':'')+' · '+metrics.review+' tài nguyên cần kiểm tra trong lượt quét.';
+ if(!isHistory){
+  if(resultsError)notes.push('Danh sách chưa được cập nhật do lỗi tải kết quả.');
+  if(rows.some(row=>['FAILED','TIMED_OUT'].includes(row.status)))notes.push('Lượt quét gần nhất chưa quét thành công; danh sách này không dùng kết quả của lần quét lỗi.');
+  if(rows.some(row=>row.status==='PARTIAL'))notes.push('Lượt quét chưa đầy đủ; không kết luận tài nguyên đã được giải quyết.');
+  const limited=rows.some(row=>{
+   const flagged=(row.errors||[]).some(error=>error&&error.code==='RESOURCE_LIMIT');
+   const recorded=Number(row.finding_count);
+   return flagged||(Number.isFinite(recorded)&&recorded>(row.findings||[]).length);
+  });
+  if(limited)notes.push('Chỉ tìm kiếm trên '+currentItems.length+' cảnh báo đã tải; lượt quét có thể còn cảnh báo chưa được trả về.');
+ }else{
+  if(historySearchState.error)notes.push(historySearchState.error);
+  if(historySearchState.capped)notes.push('Đã đạt giới hạn tải lịch sử nên kết quả có thể chưa đầy đủ.');
+ }
+ if(diffFilter&&!comparableDiff){
+  notes.push(diffState==='loading'?'Đang tải lượt quét trước để phân loại thay đổi.':'Không đủ dữ liệu lượt quét trước để phân loại mới/tồn tại/thay đổi; không kết luận tài nguyên đã được giải quyết.');
+ }
+ const diffNote=$('diff-note');
+ if(diffNote){
+  const summaries=scanSummaries();
+  const index=summaries.findIndex(item=>item.scan_id===selectedScanId);
+  const previous=!isHistory&&index>=0?summaries[index+1]:null;
+  let text='';
+  if(isHistory)text='Phân loại thay đổi chỉ áp dụng cho lượt quét đang xem.';
+  else if(diffState==='loading')text='Đang tải lượt quét trước…';
+  else if(diffFilter&&!comparableDiff)text='Không đủ dữ liệu hoặc lượt quét chưa hoàn tất; không kết luận tài nguyên đã được giải quyết.';
+  else if(previous)text='So sánh với lượt quét trước: '+date(previous.started_at||previous.completed_at)+'.';
+  diffNote.textContent=text;
+  diffNote.hidden=!text;
+ }
+ const diffSelect=$('filter-diff');
+ if(diffSelect){
+  diffSelect.disabled=isHistory;
+  diffSelect.title=isHistory?'Không áp dụng khi tìm kiếm lịch sử':(comparableDiff||!diffFilter?'':'Không đủ dữ liệu lượt quét trước');
+ }
+
+ const resourceCount=items=>new Set(items.map(uniqueResourceKey)).size;
+ let scopeLine='Đang hiển thị '+resourceCount(filtered)+'/'+resourceCount(sourceItems)+' tài nguyên — '+filtered.length+' cảnh báo';
+ if(isHistory)scopeLine+=' · '+filtered.length+' lần xuất hiện';
+ if(activeFilter)scopeLine+=' (đang áp dụng bộ lọc)';
+ scopeLine+='.';
  $('findings-scope').textContent=[...notes,scopeLine].join(' ');
 
  if(!filtered.length){
   const previous=feedbackFocus(list);
-  emptyState(list,activeFilter?'Không khớp bộ lọc':'Không có cảnh báo trong lượt quét này',activeFilter?'Thử xóa từ khóa tìm kiếm hoặc chọn lại bộ lọc.':'Toàn bộ tài nguyên đã kiểm tra đều hoạt động bình thường theo quy tắc hiện tại.');
+  let title=activeFilter?'Không khớp bộ lọc':'Không có cảnh báo trong lượt quét này';
+  let description=activeFilter?'Không có tài nguyên nào khớp từ khóa và bộ lọc hiện tại. Xóa tất cả bộ lọc để xem toàn bộ dữ liệu.':'Toàn bộ tài nguyên đã kiểm tra đều hoạt động bình thường theo quy tắc hiện tại.';
+  if(diffFilter&&!comparableDiff){
+   title='Không đủ dữ liệu để phân loại thay đổi';
+   description='Cần một lượt quét trước hoàn tất và lượt quét hiện tại cũng hoàn tất để so sánh. Không kết luận tài nguyên đã được giải quyết.';
+  }else if(isHistory&&!historySearchState.done){
+   title='Đang tải lịch sử';
+   description='Kết quả tìm kiếm sẽ hiển thị khi tải xong toàn bộ lịch sử trong 30 ngày.';
+  }
+  emptyState(list,title,description);
+  if(activeFilter){
+   const box=list.querySelector('.empty');
+   if(box){
+    const reset=node('button','Xóa tất cả bộ lọc','button secondary empty-reset');
+    reset.type='button';
+    reset.onclick=()=>resetFilters();
+    box.append(reset);
+   }
+  }
   restoreFeedbackFocus(list,previous);
   return;
  }
 
- if(groupDefaultsScan!==selectedScanId){
+ const defaultKey=isHistory?'history':selectedScanId;
+ if(groupDefaultsScan!==defaultKey){
   openGroups.clear();
   groupsUserToggled=false;
   groupLimits.clear();
-  groupDefaultsScan=selectedScanId;
+  groupDefaultsScan=defaultKey;
   chartExpanded=false;
  }
  const visibleGroups=[];
  for(const statusLevel of ['REVIEW','OBSERVING','INSUFFICIENT_DATA']){
-  for(const entry of groupByService(filtered.filter(finding=>finding.level===statusLevel)))visibleGroups.push(serviceKey(statusLevel,entry.type));
+  for(const entry of groupByService(filtered.filter(finding=>finding.level===statusLevel),sortMode))visibleGroups.push(serviceKey(statusLevel,entry.type));
  }
  if(!groupsUserToggled){
   openGroups.clear();
@@ -1292,11 +1695,11 @@ function renderFindings(){
  }else if(visibleGroups.length&&!visibleGroups.some(key=>openGroups.has(key))){
   openGroups.add(visibleGroups[0]);
  }
- renderGroupedList(list,filtered,true);
+ renderGroupedList(list,filtered,true,sortMode);
 }
 
 function renderFilterOptions(items){
- const typeSelect=$('filter-type'),groupSelect=$('filter-group');
+ const typeSelect=$('filter-type'),groupSelect=$('filter-group'),serviceSelect=$('filter-service'),ruleSelect=$('filter-rule');
  if(typeSelect){
   const current=typeSelect.value;
   const types=[...new Set(items.map(f=>f.type).filter(Boolean))].sort();
@@ -1308,6 +1711,18 @@ function renderFilterOptions(items){
    if(types.includes(current))typeSelect.value=current;
   }
  }
+ if(serviceSelect){
+  const current=serviceSelect.value;
+  const families=[...new Map(items.map(f=>{const family=serviceFamily(f.type);return [family.key,family.label];})).entries()]
+   .sort((a,b)=>compareText(a[1],b[1]));
+  if(current&&!families.some(([key])=>key===current))families.push([current,current]);
+  const signature='service:'+families.map(([key,label])=>key+':'+label).join(',');
+  if(serviceSelect.dataset.signature!==signature){
+   serviceSelect.replaceChildren(new Option('Tất cả',''),...families.map(([key,label])=>new Option(label,key)));
+   serviceSelect.dataset.signature=signature;
+   if(families.some(([key])=>key===current))serviceSelect.value=current;
+  }
+ }
  if(groupSelect){
   const current=groupSelect.value;
   const groups=[...new Set(items.map(f=>resourceGroups[f.type]).filter(Boolean))];
@@ -1317,6 +1732,17 @@ function renderFilterOptions(items){
    groupSelect.replaceChildren(new Option('Tất cả',''),...groups.map(group=>new Option(serviceGroups[group]?.label||group,group)));
    groupSelect.dataset.signature=signature;
    if(groups.includes(current))groupSelect.value=current;
+  }
+ }
+ if(ruleSelect){
+  const current=ruleSelect.value;
+  const rules=[...new Set(items.map(f=>f.rule_id).filter(Boolean))].sort();
+  if(current&&!rules.includes(current))rules.push(current);
+  const signature='rule:'+rules.join(',');
+  if(ruleSelect.dataset.signature!==signature){
+   ruleSelect.replaceChildren(new Option('Tất cả',''),...rules.map(rule=>new Option(rule,rule)));
+   ruleSelect.dataset.signature=signature;
+   if(rules.includes(current))ruleSelect.value=current;
   }
  }
  const regionSelect=$('filter-region');
@@ -2176,6 +2602,7 @@ function resetScopeState(){
  findingsRevision=0;
  selectedScanId=null;scanPinned=false;scanRowsCache.clear();scanRequest++;scanLoading=false;scanLoadError='';
  openGroups.clear();groupLimits.clear();groupDefaultsScan=undefined;groupsUserToggled=false;chartExpanded=false;
+ searchMode='current';searchDebounceTimer=null;appliedQuery='';historySearchRows=[];historySearchToken++;historySearchState={loading:false,done:false,error:'',capped:false,loaded:0};diffRows=[];diffScanId=null;diffState='idle';
  const sel=$('scan-select');if(sel){sel.replaceChildren();delete sel.dataset.signature;}
  const list=$('findings-list');if(list)list.replaceChildren();
  const priority=$('priority-list');if(priority)priority.replaceChildren();
@@ -2231,6 +2658,7 @@ async function init(){
  delete $('filter-region').dataset.signature;
  for(const id of ['search','filter-level','filter-acknowledged'])$(id).value='';
  renderSettingsUI();
+ resetFilterControls();
  $('email-enabled').checked=!!profile.notifications?.enabled;
  $('email-enabled').disabled=!profile.email_available;
  $('save-email').disabled=!profile.email_available;
@@ -2274,10 +2702,34 @@ if($('scan-select'))$('scan-select').onchange=()=>{
  if(id){scanPinned=true;selectScan(id,{force:true});}
 };
 
-for(const id of ['search','filter-type','filter-level','filter-group','filter-region','filter-acknowledged']){
+if($('search'))$('search').addEventListener('input',()=>{
+ clearTimeout(searchDebounceTimer);
+ searchDebounceTimer=setTimeout(()=>{
+  if(normalizedQuery($('search')?.value)!==appliedQuery)renderFindings();
+ },250);
+});
+for(const id of ['filter-type','filter-service','filter-level','filter-group','filter-region','filter-rule','filter-acknowledged','filter-scan-status']){
  const el=$(id);
- if(el)el.addEventListener('input',()=>renderFindings());
+ if(el)el.addEventListener('change',()=>renderFindings());
 }
+for(const id of ['date-from','date-to']){
+ const el=$(id);
+ if(el)el.addEventListener('change',()=>renderFindings());
+}
+if($('search-scope'))$('search-scope').addEventListener('change',()=>{
+ searchMode=$('search-scope').value==='history'?'history':'current';
+ const scanSelect=$('scan-select');
+ if(scanSelect)scanSelect.disabled=searchMode==='history';
+ if(searchMode==='history')loadHistorySearch();
+ renderFindings();
+});
+if($('filter-diff'))$('filter-diff').addEventListener('change',()=>{
+ const value=$('filter-diff').value;
+ if(value&&value!==''){ensureDiffRows().then(()=>renderFindings());}
+ else renderFindings();
+});
+if($('sort-order'))$('sort-order').onchange=()=>renderFindings();
+if($('reset-filters'))$('reset-filters').onclick=()=>resetFilters();
 
 document.addEventListener('pointerdown',event=>{
  const target=event.target;

@@ -204,8 +204,8 @@ def main():
             box_track = first.locator('.service-bar-track').bounding_box()
             assert abs(box_label['y'] - box_count['y']) < 6, (box_label, box_count)
             assert box_track['y'] > box_count['y'] + box_count['height'] - 1, (box_track, box_count)
-            expected_order = ['Amazon EBS', 'Amazon EC2', 'Amazon RDS', 'Application Load Balancer', 'Elastic IP',
-                              'NAT Gateway']
+            expected_order = ['Amazon EBS', 'Amazon EC2', 'Amazon RDS', 'Amazon S3', 'Application Load Balancer',
+                              'Elastic IP']
             labels = page.locator('.service-bar-label').all_text_contents()
             assert labels == expected_order, labels
             widths = [page.locator('.service-bar-fill').nth(i).evaluate('(el)=>parseFloat(el.style.width)') for i in range(3)]
@@ -270,7 +270,9 @@ def main():
             # Clicking a chart service expands and focuses that accordion group.
             page.locator('.service-bar[data-service="EC2"]').click()
             expect(page.locator('#findings-list section[data-service="EC2"][data-level="REVIEW"] .group-toggle')).to_have_attribute('aria-expanded', 'true')
-            checks.append('chart bar opens the matching service accordion')
+            expect(page.locator('#filter-service')).to_have_value('EC2')
+            page.locator('#reset-filters').click()
+            checks.append('chart bar applies the matching service filter and opens its accordion')
 
             # 8: keep still works and removes the finding; feedback manager shows it.
             target = expand('#findings-list', 'vol-b')

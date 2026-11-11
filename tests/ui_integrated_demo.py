@@ -169,6 +169,7 @@ def main():
             for name in ['group', 'type', 'region', 'level', 'acknowledged']:
                 page.locator('#filter-' + name).select_option('')
             page.locator('#search').fill('')
+            page.wait_for_timeout(350)
             checks.append('Six filters combine with AND against real demo results, including a contradictory empty combination')
 
             target = nine['EC2']
