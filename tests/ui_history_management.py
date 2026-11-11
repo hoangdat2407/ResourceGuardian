@@ -79,6 +79,7 @@ def main():
         'profile': copy.deepcopy(PROFILE), 'history': copy.deepcopy(original), 'requests': [],
         'page_error': False, 'detail_error': False, 'first_error': False,
         'hold_history': False, 'held_history': None, 'hold_scan': False, 'held_scan': None,
+        'kept_id': None,
         'unauthorized': False, 'kept': False, 'fixture_errors': [],
     }
     checks, errors = [], []
@@ -99,7 +100,8 @@ def main():
             elif path == '/findings':
                 current = copy.deepcopy(original[0])
                 if state['kept']:
-                    current['findings'] = current['findings'][1:]
+                    current['findings'] = [item for item in current['findings']
+                                           if item['finding_id'] != state['kept_id']]
                 reply = {'results': [current]}
             elif path == '/history':
                 assert query.get('limit') == ['20'], query
@@ -133,6 +135,7 @@ def main():
                 assert set(body) == {'region', 'finding_id', 'kept'}, body
                 assert body['kept'] is True
                 state['kept'] = True
+                state['kept_id'] = body['finding_id']
                 reply = {**body, 'updated_at': 1793449000}
             else:
                 raise AssertionError('Unexpected fixture request: ' + request.method + ' ' + path)
@@ -317,8 +320,11 @@ def main():
             reset()
             before = copy.deepcopy(state['history'])
             page.locator('[data-page="findings"]').click()
+            page.wait_for_timeout(300)
+            before_keep = page.locator('#findings-list .feedback-keep').count()
+            page.locator('#findings-list .actions-summary').first.click()
             page.locator('#findings-list .feedback-keep').first.click()
-            expect(page.locator('#findings-list .feedback-keep')).to_have_count(8)
+            expect(page.locator('#findings-list .feedback-keep')).to_have_count(before_keep - 1)
             page.locator('[data-page="history"]').click()
             row_button(original[0]).click()
             expect(detail.locator('.history-region')).to_have_count(3)

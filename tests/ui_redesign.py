@@ -171,7 +171,7 @@ try:
         state['history_error']=False
         state['history']=[dict(ROW, status='PARTIAL', errors=[{'type':'EC2','code':'AccessDenied'}])]
         page.locator('#refresh-history').click()
-        page.locator('#history-list button').click()
+        page.locator('#history-list .history-open').click()
         expect(page.locator('#history-detail')).to_contain_text('EC2: AccessDenied')
         expect(page.locator('#history-detail')).to_contain_text('chưa hoàn tất đầy đủ')
         page.evaluate('window.scrollTo(0,0)'); page.screenshot(path=str(OUT/'history-desktop.png'), full_page=True)

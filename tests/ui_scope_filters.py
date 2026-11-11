@@ -216,7 +216,7 @@ def main():
             page.locator('#filter-region').select_option('ap-northeast-1')
             page.locator('#filter-type').select_option('RDS')
             navigate('connection')
-            expect(page.locator('#service-group-options input[type="checkbox"]')).to_have_count(4)
+            expect(page.locator('#service-group-options input[type="checkbox"]')).to_have_count(11)
             for checkbox in page.locator('#service-group-options input[type="checkbox"]').all():
                 checkbox.uncheck()
             before = len(requests_to('/connection'))
@@ -247,7 +247,10 @@ def main():
 
             navigate('settings')
             expect(page.locator('#settings-fields input[type="number"]')).to_have_count(len(LIMITS))
-            window_label = page.locator('#window_hours').locator('..').inner_text()
+            for group in page.locator('details.settings-group').all():
+                if not group.evaluate('(el)=>el.open'):
+                    group.locator('summary').click()
+            window_label = page.locator('#window_hours').locator('../..').inner_text()
             assert 'EC2' not in window_label and 'metric' in window_label.lower(), window_label
             for key, (minimum, maximum, integer) in LIMITS.items():
                 control = page.locator('#' + key)
@@ -296,7 +299,7 @@ def main():
                 if path == '/history':
                     navigate('history')
                     expect(page.locator('#history-list tbody tr')).to_have_count(3)
-                    page.locator('#history-list button').first.click()
+                    page.locator('#history-list .history-open').first.click()
                     expect(page.locator('#history-detail table')).to_be_visible()
                 state['hold_path'] = path
                 operation = 'refresh' if path == '/findings' else 'loadHistory'
@@ -358,6 +361,11 @@ def main():
                     ('connection', '#service-group-options input', set(GROUPS)),
                     ('settings', '#cpu_percent', set(LIMITS))]:
                 navigate(section)
+                if section == 'settings':
+                    for group in page.locator('details.settings-group').all():
+                        if not group.evaluate('(el)=>el.open'):
+                            group.locator('summary').click()
+                    page.wait_for_timeout(100)
                 page.locator(selector).first.focus()
                 focused = set()
                 for _ in range(len(expected_keys) * 2):

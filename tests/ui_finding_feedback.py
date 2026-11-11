@@ -190,6 +190,20 @@ def main():
             def action(item, cls, container='#findings-list'):
                 return row(item, container).locator('.' + cls)
 
+            def expand(item, container='#findings-list'):
+                target = row(item, container)
+                group = target.locator('xpath=ancestor::section[contains(@class,"finding-group")]')
+                toggle = group.locator('.group-toggle')
+                if toggle.count() and toggle.first.get_attribute('aria-expanded') == 'false':
+                    toggle.first.click()
+                menu = target.locator('details.actions-menu')
+                if menu.count() and not menu.first.evaluate('(el)=>el.open'):
+                    target.locator('.actions-summary').first.click()
+                return target
+
+            def click_action(item, cls, container='#findings-list'):
+                expand(item, container).locator('.' + cls).click()
+
             def reset():
                 assert state['held'] is None and state['held_findings'] is None
                 state.update(profile=copy.deepcopy(PROFILE), rows=[fixture_row(original)], history=[fixture_row(original)], records={},
@@ -210,17 +224,17 @@ def main():
 
             expect(page.locator('#findings-list tbody tr')).to_have_count(9)
             for item in original:
-                action(item, 'feedback-ack').click()
+                click_action(item, 'feedback-ack')
                 expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
                 assert puts()[-1] == {'region': REGION, 'finding_id': item['finding_id'], 'acknowledged': True}
                 expect(row(item)).to_have_count(1)
-                action(item, 'feedback-ack').click()
+                click_action(item, 'feedback-ack')
                 expect(action(item, 'feedback-ack')).to_have_text('Đánh dấu đã xem')
                 assert puts()[-1] == {'region': REGION, 'finding_id': item['finding_id'], 'acknowledged': False}
             checks.append('Acknowledged toggle for all nine types sends one exact flag, retains findings and uses no client metadata')
 
             item = original[0]
-            action(item, 'feedback-ack').click()
+            click_action(item, 'feedback-ack')
             expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
             page.locator('#filter-acknowledged').select_option('acknowledged')
             expect(page.locator('#findings-list tbody tr')).to_have_count(1)
@@ -229,7 +243,7 @@ def main():
             page.locator('[data-page="overview"]').click()
             expect(action(item, 'feedback-ack', '#priority-list')).to_have_text('Bỏ đã xem')
             page.locator('[data-page="findings"]').click()
-            action(item, 'feedback-keep').click()
+            click_action(item, 'feedback-keep')
             expect(row(item)).to_have_count(0)
             record = state['records'][(REGION, item['finding_id'])]
             assert record['acknowledged'] is True and record['kept'] is True
@@ -242,14 +256,14 @@ def main():
             checks.append('Acknowledged persists across reload and priority view; keep hides immediately, persists next scan, and preserves acknowledged')
 
             for item, days in [(original[1], 7), (original[2], 1), (original[3], 30)]:
-                control = action(item, 'feedback-days')
-                assert control.get_attribute('aria-label') == 'Thời hạn bỏ qua cho ' + item['resource_id']
-                assert control.locator('option').evaluate_all('(items)=>items.map(item=>item.value)') == [str(day) for day in range(1, 31)]
-                expect(control).to_have_value('7')
-                control.select_option(str(days))
-                expect(action(item, 'feedback-ignore')).to_have_text(f'Bỏ qua {days} ngày')
+                click_action(item, 'feedback-ignore')
+                expect(page.locator('#ignore-dialog')).to_be_visible()
+                expect(page.locator('#ignore-days')).to_have_value('7')
+                page.locator('#ignore-days').fill(str(days))
                 before = time.time()
-                action(item, 'feedback-ignore').click()
+                page.locator('#ignore-confirm').click()
+                expect(page.locator('#ignore-dialog')).not_to_be_visible()
+                page.wait_for_timeout(300)
                 expect(row(item)).to_have_count(0)
                 body = puts()[-1]
                 assert set(body) == {'region', 'finding_id', 'ignoreUntil'} and body['finding_id'] == item['finding_id']
@@ -262,7 +276,7 @@ def main():
             checks.append('Ignore defaults to seven days; selectable one-through-thirty days sends UTC expiry and hides only after success, persisting on reload')
 
             page.locator('[data-page="history"]').click()
-            page.locator('#history-list button').click()
+            page.locator('#history-list .history-open').click()
             expect(page.locator('#history-detail tbody tr')).to_have_count(9)
             assert page.locator('#history-detail .finding-feedback').count() == 0
             assert page.locator('#history-detail .feedback-ack, #history-detail .feedback-keep, #history-detail .feedback-ignore').count() == 0
@@ -273,11 +287,10 @@ def main():
             item, other = original[0], original[1]
             state['hold_put'] = True
             with page.expect_request('**/api/feedback'):
-                action(item, 'feedback-ack').click()
+                click_action(item, 'feedback-ack')
             expect(action(item, 'feedback-ack')).to_be_disabled()
             expect(action(item, 'feedback-keep')).to_be_disabled()
             expect(action(item, 'feedback-ignore')).to_be_disabled()
-            expect(action(item, 'feedback-days')).to_be_disabled()
             expect(action(item, 'feedback-status')).to_contain_text('Đang lưu')
             expect(action(other, 'feedback-ack')).to_be_enabled()
             assert not state['records']
@@ -294,7 +307,7 @@ def main():
             expect(action(item, 'feedback-status')).to_contain_text('Feedback service unavailable')
             expect(action(item, 'feedback-ack')).to_have_text('Đánh dấu đã xem')
             assert not state['records']
-            action(item, 'feedback-ack').click()
+            click_action(item, 'feedback-ack')
             expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
             assert state['records'][(REGION, item['finding_id'])]['acknowledged'] is True
             checks.append('Held request never updates optimistically; identity controls stay disabled through poll rerender; failed save stays retryable and retry succeeds')
@@ -306,7 +319,7 @@ def main():
                 with page.expect_request('**/api/findings'):
                     page.evaluate('''window.__oldFeedbackGetDone=false;
                         void refresh().catch(()=>{}).finally(()=>window.__oldFeedbackGetDone=true);''')
-                action(item, operation).click()
+                click_action(item, operation)
                 if operation == 'feedback-ack':
                     expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
                 else:
@@ -327,7 +340,7 @@ def main():
             item = original[0]
             state['findings_error'] = True
             count_before = len(puts())
-            action(item, 'feedback-ack').click()
+            click_action(item, 'feedback-ack')
             expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
             expect(action(item, 'feedback-ack')).to_be_enabled()
             assert len(puts()) == count_before + 1
@@ -347,10 +360,11 @@ def main():
             identity = (REGION, item['finding_id'])
             state['records'][identity] = {'ignore_until': int(time.time()) - 10, 'kept': False}
             expired = state['records'][identity]['ignore_until']
-            action(item, 'feedback-ack').click()
+            click_action(item, 'feedback-ack')
             expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')
             assert state['records'][identity]['ignore_until'] == expired
-            action(item, 'feedback-ignore').click()
+            click_action(item, 'feedback-ignore')
+            page.locator('#ignore-confirm').click()
             expect(row(item)).to_have_count(0)
             assert state['records'][identity]['acknowledged'] is True
             assert state['records'][identity]['kept'] is False
@@ -365,7 +379,7 @@ def main():
                         .finally(()=>window.__heldFeedbackDone=true);}''')
                 state['hold_put'] = True
                 with page.expect_request('**/api/feedback'):
-                    action(item, 'feedback-ack').click()
+                    click_action(item, 'feedback-ack')
                 page.evaluate("""async payload=>{await api('/connection','PUT',payload); await init();}""",
                               {'role_arn': ARN, 'regions': [REGION], 'service_groups': ['compute']})
                 expect(page.locator('#findings-list tbody tr')).to_have_count(0)
@@ -387,9 +401,9 @@ def main():
             for width in [320, 390, 768, 1440]:
                 page.set_viewport_size({'width': width, 'height': 900})
                 page.locator('[data-page="findings"]').click()
+                expand(long_item)
                 expect(action(long_item, 'feedback-ack')).to_be_visible()
                 expect(action(long_item, 'feedback-keep')).to_be_visible()
-                expect(action(long_item, 'feedback-days')).to_be_visible()
                 expect(action(long_item, 'feedback-ignore')).to_be_visible()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
                 page.screenshot(path=str(OUT / f'findings-{width}.png'), full_page=True)
@@ -397,18 +411,17 @@ def main():
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
                 page.screenshot(path=str(OUT / f'priority-{width}.png'), full_page=True)
             page.locator('[data-page="findings"]').click()
+            expand(long_item)
             action(long_item, 'feedback-ack').focus()
             expect(action(long_item, 'feedback-ack')).to_be_focused()
             page.keyboard.press('Tab')
             expect(action(long_item, 'feedback-keep')).to_be_focused()
             page.keyboard.press('Tab')
-            expect(action(long_item, 'feedback-days')).to_be_focused()
-            page.keyboard.press('Tab')
             expect(action(long_item, 'feedback-ignore')).to_be_focused()
             checks.append('Feedback controls and long resource IDs fit 320/390/768/1440 widths; eight screenshots and keyboard order')
 
             state['unauthorized'] = True
-            action(long_item, 'feedback-ack').click()
+            click_action(long_item, 'feedback-ack')
             expect(page.locator('#app')).to_be_hidden()
             expect(page.locator('#welcome')).to_be_visible()
             assert not errors, errors

@@ -19,6 +19,7 @@ import urllib.request
 import uuid
 
 from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -102,8 +103,30 @@ def main():
                 expect(page.locator('#page-' + name)).to_be_visible()
 
             def row(item):
-                return page.locator('#findings-list tbody tr').filter(
+                target = page.locator('#findings-list tbody tr').filter(
                     has=page.locator('.finding-open[data-finding-id="' + item['finding_id'] + '"]'))
+                if target.count() == 0:
+                    return target
+                try:
+                    group = target.locator('xpath=ancestor::section[contains(@class,"finding-group")]')
+                    toggle = group.locator('.group-toggle')
+                    if toggle.count() and toggle.first.get_attribute('aria-expanded') == 'false':
+                        toggle.first.click()
+                except PlaywrightError:
+                    pass
+                return target
+
+            def open_menu(item):
+                target = row(item)
+                if target.count() == 0:
+                    return target
+                try:
+                    menu = target.locator('details.actions-menu')
+                    if menu.count() and not menu.first.evaluate('(el)=>el.open'):
+                        target.locator('.actions-summary').first.click()
+                except PlaywrightError:
+                    pass
+                return target
 
             def manager(item):
                 identity = json.dumps([item['region'], item['finding_id']], separators=(',', ':'))
@@ -150,7 +173,7 @@ def main():
 
             target = nine['EC2']
             faults['hold_put'] = True
-            row(target).locator('.feedback-ack').focus()
+            open_menu(target).locator('.feedback-ack').focus()
             page.keyboard.press('Enter')
             expect(row(target).locator('.feedback-ack')).to_be_disabled()
             assert not api('/feedback')['results']
@@ -162,24 +185,27 @@ def main():
             expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
             expect(page.locator('#findings-list tbody tr')).to_have_count(10)
             faults['fail_put'] = True
-            row(target).locator('.feedback-ack').click()
+            open_menu(target).locator('.feedback-ack').click()
             expect(row(target).locator('.feedback-status')).to_contain_text('Chưa lưu được')
             assert api('/feedback')['results'][0]['acknowledged'] is True
-            row(target).locator('.feedback-ack').click()
+            open_menu(target).locator('.feedback-ack').click()
             expect(row(target).locator('.feedback-ack')).to_have_text('Đánh dấu đã xem')
             checks.append('Acknowledged persists across refresh and remains visible; pending has no optimistic write, a 503 leaves the stored flag intact and retry reaches the real handler')
 
-            row(target).locator('.feedback-ack').click()
+            open_menu(target).locator('.feedback-ack').click()
             expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
-            row(target).locator('.feedback-keep').click()
+            open_menu(target).locator('.feedback-keep').click()
             expect(row(target)).to_have_count(0)
             expect(manager(target)).to_be_visible()
             manager(target).locator('.feedback-unkeep').click()
             expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
-            for days in ['1', '30']:
-                row(target).locator('.feedback-days').select_option(days)
+            for days in [1, 30]:
+                open_menu(target).locator('.feedback-ignore').click()
+                expect(page.locator('#ignore-dialog')).to_be_visible()
+                page.locator('#ignore-days').fill(str(days))
                 before = time.time()
-                row(target).locator('.feedback-ignore').click()
+                page.locator('#ignore-confirm').click()
+                expect(page.locator('#ignore-dialog')).not_to_be_visible()
                 expect(row(target)).to_have_count(0)
                 expect(manager(target)).to_be_visible()
                 saved = next(item for item in api('/feedback')['results'] if item['finding_id'] == target['finding_id'])
@@ -203,7 +229,7 @@ def main():
             history = api('/scans/' + original_scan)['results'][0]
             assert history['findings'] == original
             navigate('history')
-            page.locator('#history-list .history-open').filter(has_text='Xem').last.click()
+            page.locator('#history-list .history-open').last.click()
             expect(page.locator('#history-detail .history-region')).to_have_count(1)
             historical_button = page.locator('#history-detail .finding-open[data-finding-id="' + target['finding_id'] + '"]')
             historical_button.click()
@@ -214,7 +240,7 @@ def main():
             checks.append('A real queued/running/completed scan advances last_seen while retaining first_seen; saved history stays unchanged after feedback and uses the same read-only evidence renderer')
 
             navigate('settings')
-            assert page.locator('#settings-fields input').count() == 11
+            assert page.locator('#settings-fields input').count() == 40
             page.locator('#window_hours').fill('168')
             page.locator('#save-settings').click()
             expect(page.locator('#status')).to_contain_text('Đã lưu ngưỡng')
@@ -320,7 +346,7 @@ def main():
                 expect(page.locator('#finding-dialog')).to_be_visible()
                 page.screenshot(path=str(OUT / ('integrated-evidence-' + str(width) + '.png')))
                 screenshots.append('integrated-evidence-' + str(width) + '.png')
-                page.get_by_role('heading', name='Evidence S3_MULTIPART', exact=True).scroll_into_view_if_needed()
+                page.get_by_role('heading', name='Bằng chứng chính (S3_MULTIPART)', exact=True).scroll_into_view_if_needed()
                 page.screenshot(path=str(OUT / ('integrated-evidence-scrolled-' + str(width) + '.png')))
                 screenshots.append('integrated-evidence-scrolled-' + str(width) + '.png')
                 page.keyboard.press('Escape')

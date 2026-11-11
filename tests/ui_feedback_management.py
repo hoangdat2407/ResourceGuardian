@@ -309,7 +309,7 @@ def main():
             assert record_for(item['finding_id'])['acknowledged'] is True
             assert state['history'] == original_candidates
             page.locator('[data-page="history"]').click()
-            page.locator('#history-list button').click()
+            page.locator('#history-list .history-open').click()
             expect(page.locator('#history-detail tbody tr')).to_have_count(len(original_candidates))
             assert page.locator('#history-detail .finding-feedback').count() == 0
             checks.append('Unkeep and cancel-ignore change only one flag; combined flags keep a finding hidden until both clear, then retained candidate returns with acknowledged and history intact')
@@ -457,8 +457,14 @@ def main():
             expect(group(item)).to_have_count(1)
             expect(current(original_candidates[0])).to_have_count(1)
             before_errors = len(errors)
-            current(original_candidates[0]).locator('.feedback-days').select_option('30')
-            expect(current(original_candidates[0]).locator('.feedback-ignore')).to_have_text('Bỏ qua 30 ngày')
+            current_row = current(original_candidates[0])
+            current_row.locator('.actions-summary').click()
+            current_row.locator('.feedback-ignore').click()
+            expect(page.locator('#ignore-dialog')).to_be_visible()
+            page.locator('#ignore-days').fill('30')
+            page.locator('#ignore-cancel').click()
+            expect(page.locator('#ignore-dialog')).not_to_be_visible()
+            assert not puts() or puts()[-1].get('finding_id') != item['finding_id'] or 'ignoreUntil' not in puts()[-1]
             expect(group(item).locator('.feedback-manage-days')).to_have_value('7')
             assert len(errors) == before_errors, errors[before_errors:]
             checks.append('Independent current and management snapshots of one identity keep their expiry selectors safe and separate')

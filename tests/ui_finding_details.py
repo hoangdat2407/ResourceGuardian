@@ -187,6 +187,12 @@ def main():
                     has=page.locator('code').filter(has_text=resource_id)).locator('.finding-open')
 
             def open_current(item):
+                row = page.locator('#findings-list tbody tr').filter(
+                    has=page.locator('code').filter(has_text=item['resource_id']))
+                group = row.locator('xpath=ancestor::section[contains(@class,"finding-group")]')
+                toggle = group.locator('.group-toggle')
+                if toggle.count() and toggle.first.get_attribute('aria-expanded') == 'false':
+                    toggle.first.click()
                 button = detail_button('#findings-list', item['resource_id'])
                 button.click()
                 expect(dialog).to_be_visible()
@@ -273,7 +279,7 @@ def main():
             state['rows'] = [row(newer, 'newer-scan')]
             page.evaluate('refresh()')
             page.locator('[data-page="history"]').click()
-            page.locator('#history-list button').click()
+            page.locator('#history-list .history-open').click()
             expect(page.locator('#history-detail tbody tr')).to_have_count(9)
             for item in original:
                 detail_button('#history-detail', item['resource_id']).click()
@@ -377,13 +383,17 @@ def main():
                 expect(detail_button('#findings-list', long_item['resource_id'])).to_be_focused()
             open_current(long_item)
             state['rows'] = []
-            page.evaluate('refresh()')
+            state['history'] = []
+            page.evaluate('historyRows=[]; scanRowsCache.clear(); refresh()')
+            expect(page.locator('#findings-list tbody tr')).to_have_count(0)
             close()
             assert page.evaluate('''()=>document.activeElement.matches('button,input,select,a') &&
                                         document.activeElement.getClientRects().length > 0 &&
                                         !document.activeElement.closest('#finding-dialog')'''), 'Disappeared opener needs a visible focus fallback'
             state['rows'] = [row([long_item])]
+            state['history'] = [row([long_item])]
             page.evaluate('refresh()')
+            page.evaluate('loadHistory()')
             checks.append('Polling replacement restores focus to the matching finding after Escape/close; removed finding receives a visible fallback')
 
             for width in [320, 390, 768, 1440]:
@@ -395,7 +405,7 @@ def main():
                 page.screenshot(path=str(OUT / f'current-{width}.png'))
                 close()
                 page.locator('[data-page="history"]').click()
-                page.locator('#history-list button').click()
+                page.locator('#history-list .history-open').first.click()
                 detail_button('#history-detail', long_item['resource_id']).click()
                 expect(dialog).to_be_visible()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
