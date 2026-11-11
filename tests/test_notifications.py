@@ -34,7 +34,7 @@ class Notifications(unittest.TestCase):
         self.ses.send_email.return_value = {"MessageId": "ses-message-1"}
         self.profile = {
             "pk": "TENANT#alice", "sk": "PROFILE", "connection_version": "v1",
-            "account_id": "123456789012", "settings": app.config({"interval_hours": 6}),
+            "account_id": "123456789012", "external_id": "EXTERNAL-ID-SECRET", "settings": app.config({"interval_hours": 6}),
             "notifications": {"enabled": True, "email": "verified@example.com"},
         }
         self.result = {
@@ -124,13 +124,24 @@ class Notifications(unittest.TestCase):
         self.assertEqual(record["cooldown_until"], self.now + 6 * 3600)
         request = self.ses.send_email.call_args.kwargs
         self.assertEqual(request["Destination"], {"ToAddresses": ["verified@example.com"]})
-        body = request["Message"]["Body"]["Text"]["Data"]
-        for expected in ("123456789012", "ap-southeast-1", "scan-1", "PARTIAL", "vol-demo",
-                         "validate retention", "size_gib", "AccessDenied", "https://guardian.example/",
-                         "Only selected regions", "không tự dừng hoặc xóa"):
-            self.assertIn(expected, body)
-        self.assertNotIn("vol-wait", body)
+        text = request["Message"]["Body"]["Text"]["Data"]
+        html = request["Message"]["Body"]["Html"]["Data"]
+        for expected in ("123456789012", "ap-southeast-1", "scan-1", "Chưa đầy đủ", "vol-demo",
+                         "48 giờ", "AccessDenied", "Amazon EC2", "https://guardian.example/",
+                         "Xem chi tiết trên Dashboard", "không tự dừng hoặc xóa"):
+            self.assertIn(expected, text)
+        self.assertNotIn("vol-wait", text)
+        self.assertNotIn("size_gib", text)
+        self.assertNotIn("size_gib", html)
+        self.assertIn("<!doctype html>", html)
+        self.assertIn("Xem chi tiết trên Dashboard", html)
+        self.assertIn("Lượt quét chưa đầy đủ", html)
+        self.assertNotIn("<script", html.lower())
+        self.assertNotIn("EXTERNAL-ID-SECRET", text + html)
         self.assertEqual(request["Message"]["Body"]["Text"]["Charset"], "UTF-8")
+        self.assertEqual(request["Message"]["Body"]["Html"]["Charset"], "UTF-8")
+        self.assertIn("tài nguyên cần kiểm tra", request["Message"]["Subject"]["Data"])
+        self.assertEqual(request["Message"]["Subject"]["Charset"], "UTF-8")
         self.assertEqual(self.client.call_args.kwargs["config"].retries["total_max_attempts"], 1)
 
     def test_same_findings_do_not_resend_when_metrics_or_order_change(self):

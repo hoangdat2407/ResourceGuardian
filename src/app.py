@@ -14,6 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config
 from rules import config, keep, THRESHOLD_METADATA
 from collectors import SDK_CONFIG, collect_region
+from email_report import build_email
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -1109,39 +1110,16 @@ def notify(profile, result):
     if not candidates:
         return "NO_NEW_FINDINGS"
 
-    lines = [
-        "Cloud Resource Guardian",
-        "Account: " + profile.get("account_id", "unknown"),
-        "Region: " + result["region"],
-        "Scan: " + result.get("scan_id", "unknown"),
-        "Scan status: " + result.get("status", "unknown"),
-        "Completed (UTC): " + datetime.fromtimestamp(result.get("completed_at", now), timezone.utc).isoformat(),
-        "Resource counts: " + json.dumps(result.get("counts", {}), sort_keys=True),
-        "Displayed REVIEW findings: " + str(len(candidates)),
-        "Total findings (all levels): " + str(result.get("finding_count", len(result["findings"]))),
-        "Các tài nguyên cần kiểm tra:",
-    ]
-    for finding in candidates:
-        lines.append(finding["type"] + " " + finding["resource_id"] + ": " + finding["reason"])
-        if finding.get("rule_id"):
-            lines.append("  Rule: " + finding["rule_id"])
-        if finding.get("evidence"):
-            lines.append("  Evidence: " + json.dumps(finding["evidence"], sort_keys=True, default=str))
-    if result.get("errors"):
-        lines.append("Scan warnings: " + json.dumps(result["errors"], sort_keys=True))
-    lines += [
-        result.get("note", "Only selected regions and displayed findings are included."),
-        "Mở dashboard: " + os.environ.get("WEB_URL", ""),
-        "Đây là ứng viên cần kiểm tra; hệ thống không tự dừng hoặc xóa.",
-    ]
+    content = build_email(profile, result, os.environ.get("WEB_URL", ""))
     status, message_id, error_code = "SENT", "", ""
     try:
         # SES has no idempotency key: SDK retries could duplicate an accepted send.
         ses_config = SDK_CONFIG.merge(Config(retries={"total_max_attempts": 1}))
         reply = boto3.client("ses", config=ses_config).send_email(
             Source=sender, Destination={"ToAddresses": [recipient]},
-            Message={"Subject": {"Data": "Cloud Resource Guardian: tài nguyên cần kiểm tra", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": "\n".join(lines), "Charset": "UTF-8"}}},
+            Message={"Subject": {"Data": content["subject"], "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": content["text"], "Charset": "UTF-8"},
+                              "Html": {"Data": content["html"], "Charset": "UTF-8"}}},
         )
         message_id = reply.get("MessageId", "")
         if not message_id:
