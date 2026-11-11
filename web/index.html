@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#193849">
 <title>Cloud Resource Guardian</title>
 <link rel="stylesheet" href="styles.css">
-<script src="app.js?v=6" defer></script>
+<script src="app.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Bỏ qua điều hướng</a>
@@ -42,6 +42,7 @@
 <div id="view-login" class="guest-view">
 <article class="card auth-card">
 <h2>Đăng nhập</h2>
+<p class="muted">Quản lý tài nguyên AWS theo lượt quét, ưu tiên tài nguyên cần kiểm tra.</p>
 <button id="start" class="button primary auth-btn">Đăng nhập với AWS Cognito</button>
 <div class="auth-links">
 <span>Chưa có tài khoản? <button type="button" class="text-button" data-switch="register">Đăng ký</button></span>
@@ -139,68 +140,143 @@
 <div class="page-heading">
 <div>
 <h1 id="page-title">Tổng quan</h1>
-<p id="page-subtitle" hidden></p>
+<p id="page-subtitle" class="page-subtitle" hidden></p>
 </div>
+<div class="page-heading-actions">
 <button id="scan" class="button primary">Quét ngay</button>
 </div>
+</div>
+
 <section id="page-overview" class="page">
 <div id="overview-state" class="state-panel" aria-live="polite"></div>
-<div class="metrics">
-<article><span>Tài nguyên đã quét</span><strong id="total">—</strong></article>
-<article class="metric-review"><span>Cần kiểm tra</span><strong id="review">—</strong></article>
-<article><span>Đang quan sát</span><strong id="observing">—</strong></article>
-<article><span>Thiếu dữ liệu</span><strong id="insufficient">—</strong></article>
-</div>
+
 <div class="overview-grid">
 <article class="card">
-<div class="card-head"><h2>Phạm vi theo dõi</h2><span id="account-badge" class="badge">Chưa kết nối</span></div>
-<p id="account-name" class="account-name">Chưa kết nối AWS</p>
-<p id="account-regions" class="muted"></p>
+<div class="card-head"><h2>Kết nối AWS</h2><span id="account-badge" class="badge">Chưa kết nối</span></div>
+<dl class="meta-grid">
+<div><dt>AWS account</dt><dd id="account-name">Chưa kết nối AWS</dd></div>
+<div><dt>Region</dt><dd id="account-regions">Chưa có dữ liệu</dd></div>
+<div><dt>Trạng thái kết nối</dt><dd id="account-status">Chưa kết nối</dd></div>
+<div><dt>Quét gần nhất</dt><dd id="last-scan-time">Chưa có lượt quét</dd></div>
+</dl>
 <p id="account-service-groups" class="muted"></p>
 <button class="button secondary" data-go="connection">Quản lý kết nối</button>
 </article>
+
 <article class="card">
-<h2>Lần quét gần nhất</h2>
+<div class="card-head"><h2>Lượt quét gần nhất</h2><span id="latest-scan-status" class="badge">Chưa có lượt quét</span></div>
 <div id="scan-summary"></div>
+<div class="card-actions">
 <button id="refresh" class="button secondary">Tải lại kết quả</button>
+<button id="goto-scan" class="button secondary" disabled>Xem toàn bộ kết quả lượt quét</button>
+</div>
 </article>
 </div>
+
+<div class="metrics">
+<article><span>Tài nguyên đã kiểm tra</span><strong id="total">—</strong></article>
+<article class="metric-review"><span>Cần kiểm tra</span><strong id="review">—</strong></article>
+<article class="metric-observing"><span>Đang quan sát</span><strong id="observing">—</strong></article>
+<article class="metric-insufficient"><span>Thiếu dữ liệu</span><strong id="insufficient">—</strong></article>
+<article class="metric-errors"><span>Dịch vụ quét lỗi</span><strong id="scan-errors">—</strong></article>
+</div>
+
 <article class="card">
-<div class="card-head"><h2>Cần chú ý</h2><button class="text-button" data-go="findings">Xem tất cả</button></div>
+<div class="card-head"><h2>Tài nguyên cần chú ý</h2><button class="text-button" data-go="findings">Xem toàn bộ kết quả lượt quét</button></div>
+<p id="priority-note" class="muted" hidden></p>
 <div id="priority-list"></div>
 </article>
 </section>
+
 <section id="page-findings" class="page" hidden>
-<article class="card">
-<div class="filters">
-<label>Tìm tài nguyên<input id="search" type="search" placeholder="Resource ID hoặc lý do"></label>
-<label>Nhóm dịch vụ<select id="filter-group"><option value="">Tất cả</option></select></label>
-<label>Loại tài nguyên<select id="filter-type"><option value="">Tất cả</option></select></label>
-<label>Region<select id="filter-region"><option value="">Tất cả</option></select></label>
-<label>Trạng thái<select id="filter-level"><option value="">Tất cả</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label>
-<label>Đã xem<select id="filter-acknowledged"><option value="">Tất cả</option><option value="acknowledged">Đã xem</option><option value="unacknowledged">Chưa xem</option></select></label>
+<article class="card scan-toolbar">
+<div class="scan-toolbar-head">
+<label class="scan-select-field" for="scan-select">Lượt quét đang xem
+<select id="scan-select"></select>
+</label>
 </div>
+<div id="scan-snapshot-banner" class="scan-snapshot-banner"></div>
+<div id="scan-diff-panel" class="scan-diff-panel" hidden></div>
+<div id="scan-errors-card" class="scan-errors-alert" hidden></div>
+</article>
+
+<section class="resource-overview" aria-labelledby="resource-overview-title">
+<div class="section-heading">
+<h2 id="resource-overview-title">Tình hình tài nguyên AWS</h2>
+<p id="resource-overview-context" class="muted"></p>
+</div>
+<div class="stat-cards">
+<article class="stat-card">
+<span class="stat-label">Đã kiểm tra</span>
+<strong id="findings-count-checked" class="stat-value">—</strong>
+<span class="stat-note">tài nguyên trong lượt quét</span>
+</article>
+<article class="stat-card stat-review">
+<span class="stat-label">Cần kiểm tra</span>
+<strong id="findings-count-review" class="stat-value">—</strong>
+<span class="stat-note">tài nguyên cần xem xét</span>
+</article>
+<article class="stat-card stat-observing">
+<span class="stat-label">Đang quan sát</span>
+<strong id="findings-count-observing" class="stat-value">—</strong>
+<span class="stat-note">tài nguyên cần theo dõi thêm</span>
+</article>
+<article class="stat-card stat-insufficient">
+<span class="stat-label">Thiếu dữ liệu</span>
+<strong id="findings-count-insufficient" class="stat-value">—</strong>
+<span class="stat-note">chưa đủ dữ liệu để kết luận</span>
+</article>
+</div>
+</section>
+
+<article class="card service-chart-card">
+<div class="card-head">
+<h2>Tài nguyên cần kiểm tra theo dịch vụ</h2>
+<span id="service-chart-total" class="muted"></span>
+</div>
+<p class="muted chart-subtitle">Số <strong>tài nguyên duy nhất</strong> cần kiểm tra theo từng dịch vụ AWS. Thanh dài nhất ứng với dịch vụ nhiều tài nguyên nhất; một tài nguyên có nhiều cảnh báo vẫn đếm một lần. Chọn dịch vụ để mở danh sách.</p>
+<p id="service-chart-note" class="muted chart-note" hidden></p>
+<div id="service-chart" class="service-chart"></div>
+<button id="service-chart-more" class="button secondary chart-more" type="button" hidden>Xem thêm dịch vụ</button>
+</article>
+
+<div class="filters-bar">
+<label for="search">Tìm tài nguyên<input id="search" type="search" placeholder="Resource ID, tên hoặc lý do"></label>
+<details id="advanced-filters" class="advanced-filters" open>
+<summary>Bộ lọc nâng cao</summary>
+<div class="filters">
+<label for="filter-group">Nhóm dịch vụ<select id="filter-group"><option value="">Tất cả</option></select></label>
+<label for="filter-type">Loại tài nguyên<select id="filter-type"><option value="">Tất cả</option></select></label>
+<label for="filter-region">Region<select id="filter-region"><option value="">Tất cả</option></select></label>
+<label for="filter-level">Trạng thái<select id="filter-level"><option value="">Tất cả</option><option value="REVIEW">Cần kiểm tra</option><option value="OBSERVING">Đang quan sát</option><option value="INSUFFICIENT_DATA">Thiếu dữ liệu</option></select></label>
+<label for="filter-acknowledged">Trạng thái xem<select id="filter-acknowledged"><option value="">Tất cả</option><option value="acknowledged">Đã xem</option><option value="unacknowledged">Chưa xem</option></select></label>
+</div>
+</details>
+</div>
+
 <p id="findings-scope" class="muted" aria-live="polite"></p>
 <div id="findings-list"></div>
-</article>
-<article id="feedback-management" class="card">
+
+<article class="card feedback-manager">
 <div class="card-head"><h2>Đang giữ và bỏ qua</h2><button id="refresh-feedback" type="button" class="button secondary">Tải lại phản hồi</button></div>
-<p class="muted">Quản lý phản hồi của kết nối hiện tại.</p>
+<p class="muted">Quản lý phản hồi của kết nối hiện tại. Phản hồi không thay đổi tài nguyên trên AWS.</p>
 <p id="feedback-summary" class="muted" role="status" aria-live="polite" tabindex="-1">Chưa tải phản hồi.</p>
 <div id="feedback-list"></div>
 <button id="feedback-load-more" type="button" class="button secondary" hidden>Tải thêm</button>
 </article>
 </section>
+
 <section id="page-history" class="page" hidden>
 <article class="card">
 <div class="card-head"><h2>Lịch sử quét</h2><button id="refresh-history" class="button secondary">Tải lại</button></div>
-<p class="muted">Lưu tối đa 30 ngày cho kết nối hiện tại.</p>
+<p class="muted">Lưu tối đa 30 ngày cho kết nối hiện tại. Mỗi dòng là một lượt quét của một region.</p>
 <p id="history-summary" class="muted" role="status" aria-live="polite" tabindex="-1"></p>
 <div id="history-list"></div>
 <button id="history-load-more" class="button secondary" hidden>Tải thêm</button>
 <div id="history-detail" tabindex="-1"></div>
 </article>
 </section>
+
 <section id="page-connection" class="page" hidden>
 <article class="connection-step">
 <div class="step-heading"><span class="step-number">1</span><h2>Tạo read role trong AWS</h2></div>
@@ -244,13 +320,17 @@
 <button class="button secondary" data-go="overview">Xem tổng quan</button>
 </article>
 </section>
+
 <section id="page-settings" class="page" hidden>
 <div class="card settings-header-card">
 <h2>Cấu hình</h2>
+<p class="muted">Ngưỡng phát hiện áp dụng cho các lượt quét tiếp theo. Giá trị tại lần đánh giá của finding được giữ nguyên trong lịch sử.</p>
 </div>
 <form id="settings-form">
 <div id="settings-general" hidden></div>
+<div id="settings-fields">
 <div id="settings-groups"></div>
+</div>
 <div class="settings-actions-bar">
 <div class="settings-actions-left">
 <button id="restore-defaults" class="button secondary" type="button">Khôi phục mặc định</button>
@@ -273,6 +353,7 @@
 </div>
 </main>
 </div>
+
 <dialog id="finding-dialog" aria-labelledby="finding-detail-title" aria-describedby="finding-detail-context">
 <div class="finding-dialog-heading">
 <h2 id="finding-detail-title">Chi tiết finding</h2>
@@ -280,6 +361,19 @@
 </div>
 <p id="finding-detail-context" class="muted"></p>
 <div id="finding-detail-content"></div>
+</dialog>
+
+<dialog id="ignore-dialog" aria-labelledby="ignore-dialog-title">
+<form id="ignore-form" method="dialog" novalidate>
+<h2 id="ignore-dialog-title">Bỏ qua cảnh báo</h2>
+<p id="ignore-context" class="muted"></p>
+<label for="ignore-days">Số ngày bỏ qua (1 đến 30)<input id="ignore-days" type="number" min="1" max="30" step="1" value="7" required></label>
+<p id="ignore-error" class="inline-feedback error" role="alert" hidden></p>
+<div class="dialog-actions">
+<button id="ignore-cancel" type="button" class="button secondary">Hủy</button>
+<button id="ignore-confirm" type="submit" class="button primary">Xác nhận bỏ qua</button>
+</div>
+</form>
 </dialog>
 </body>
 </html>
