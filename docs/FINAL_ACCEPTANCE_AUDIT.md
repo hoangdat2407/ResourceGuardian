@@ -1,10 +1,10 @@
 # Cloud Resource Guardian — Final Acceptance Audit
 
-Ngày chốt local/source: 2026-11-12. Release blocker đã được sửa trong source; chưa deploy, push, scan AWS, migrate data, đổi DNS/SES hoặc gửi email thật.
+Ngày release production: 2026-11-12. Revision `e53f46ce23bd4406525657f04f87a35791744713` đã deploy backend/IAM/frontend; không push GitHub, không migration dữ liệu, không chạy scan mới và không gửi email thật.
 
 ## Kết luận
 
-**Source release candidate đã qua local gate; production vẫn BLOCKED cho đến khi revision được review/commit, AWS CLI có credentials hợp lệ, change set được duyệt, deploy và AWS E2E hoàn tất.** Trạng thái dùng trong báo cáo: `IMPLEMENTED`, `VERIFIED`, `PARTIAL`, `MISSING`, `BUG`, `NOT_TESTED`, `BLOCKED`.
+**Production infrastructure release đã hoàn tất; route, JWT gate, Lambda artifact, CloudFront bytes, PKCE redirect và mobile surface đã smoke. Authenticated business E2E, tenant isolation thật, scan mới và SES delivery vẫn `BLOCKED/NOT_TESTED`, nên chưa tuyên bố production acceptance đầy đủ.** Trạng thái: `IMPLEMENTED`, `VERIFIED`, `PARTIAL`, `MISSING`, `BUG`, `NOT_TESTED`, `BLOCKED`.
 
 ## A. Architecture
 
@@ -22,7 +22,7 @@ CloudFront + private S3 → Cognito Authorization Code/PKCE → API Gateway JWT 
 - inventory API dùng DynamoDB Query trong tenant partition, không table Scan;
 - scheduler/reconciler vẫn dùng table Scan, chỉ phù hợp giả định tối đa 5 user nội bộ.
 
-`VERIFIED` local; AWS runtime/retry/DLQ tick thật `NOT_TESTED` trong phiên này.
+Source/local `VERIFIED`; năm Lambda production cùng CodeSha256 release và stack `UPDATE_COMPLETE`. Retry/DLQ tick thật, authenticated API và scan mới `NOT_TESTED`.
 
 ## B. Backend
 
@@ -64,7 +64,7 @@ Inventory và findings là hai tập riêng:
 
 API source tìm theo ID, name, type, service, region, account, scan ID và scan time; limit 1–500, cursor bound tenant/scan/filter.
 
-Trạng thái: `IMPLEMENTED`, local Moto `VERIFIED`; route `/inventory` đã có trong `template.yaml`, production vẫn `BLOCKED` vì chưa tạo/duyệt/executed change set.
+Trạng thái: `IMPLEMENTED`, local Moto `VERIFIED`; route production `/inventory` đã deploy với Cognito JWT và unauthenticated request trả 401. Authenticated inventory từ scan mới `NOT_TESTED`.
 
 ## D. Search & Filter
 
@@ -122,7 +122,7 @@ TC01–TC20 fixture `VERIFIED` local. Production data `NOT_TESTED`.
 
 Notification giữ verified Cognito recipient, tenant/connection/region/recipient dedup key, cooldown, conditional claim và các trạng thái `SENT`, `FAILED`, `UNKNOWN`, `STATE_FAILED`, `SENT_UNRECORDED`. SES và DynamoDB không atomic nên không hứa exactly-once.
 
-Template/logic `VERIFIED` local. SES identity, sandbox exit, DKIM, SPF, DMARC, custom MAIL FROM, delivery event, Gmail desktop/mobile `BLOCKED/NOT_TESTED`; không gửi email thật.
+Template/logic `VERIFIED` local. SES identity email `SUCCESS` và sending enabled, nhưng account còn sandbox, DKIM `NOT_STARTED`, không custom MAIL FROM và chưa đạt domain alignment; không gửi email thật. Delivery event/Gmail desktop/mobile `BLOCKED/NOT_TESTED`.
 
 ## G. Security
 
@@ -189,18 +189,17 @@ Suite bao phủ rule/collector, pagination, timeout, retry, PARTIAL, tenant isol
 8. Publish frontend cùng revision, upload target-role template và invalidate CloudFront.
 9. Run desktop/mobile/live console/network smoke. SES/DNS là gate riêng; chỉ test send sau approval.
 
-Frontend mới fallback aggregate với API 404/405, nên backward compatible; backend-first vẫn là thứ tự an toàn. Runbook [DEPLOYMENT.md](../DEPLOYMENT.md#release-production-có-kiểm-soát--chưa-được-tự-động-thực-thi) chứa lệnh backup, change set, deploy và rollback theo dependency. Artifact local đã pin có SHA-256 `e528865f82679199e47ca733e22e4c86e5bc446dd42a660ee26dc998adcf4aeb`, nhưng manifest ghi `source_dirty=true`; phải review/commit rồi đóng gói lại trước AWS acceptance.
+Frontend fallback aggregate với API 404/405 nên backward compatible. Release revision `e53f46ce23bd4406525657f04f87a35791744713` dùng artifact SHA-256 `8cc193fd376076c977fe1eca72e2dbd9aea4449f5d740423cd4f40dce270cb14`; cả năm Lambda production khớp CodeSha256. Target-role change set chỉ thêm `ecr:DescribeImages`; platform change set thêm route/permission và cập nhật code in-place. CloudFront invalidation `ICV0X7DG9HXWT8IR5BRXYTML6Y` hoàn tất; bốn release assets và target-role template khớp byte revision.
 
-Static diff chỉ thêm event route, Lambda source và allowlist đọc; không sửa property của `Data`, `UserPool`, `UserClient`, `UserDomain` hoặc `WebBucket`. Đây không thay thế change set thật. Rollback: publish web artifact trước; redeploy Lambda artifact trước; remove route bằng reviewed change set nếu cần. Inventory pages additive được code cũ bỏ qua và TTL dọn; không xóa/migrate data. Rollback target read-only actions sau khi collector cũ trở lại. Không rollback bằng stash/reset/purge.
+Không có Delete hoặc thay đổi stateful trong hai change set. Backup processed templates, Lambda cũ SHA-256 `944bca591d6456b4019a66660ce6754b7ff7d98b9dd827ed194d98f7f725f4f8` và năm web objects nằm tại `.preflight/releases/e53f46ce23bd4406525657f04f87a35791744713/rollback/`. Inventory pages additive được code cũ bỏ qua và TTL dọn; không xóa/migrate data.
 
 ## J. Remaining Issues
 
 ### BLOCKER
 
-1. Source backend/IAM/frontend chưa deploy; chưa có approved change set hoặc live smoke/AWS E2E.
-2. `aws login --profile guardian-lab --remote` đã được phê duyệt nhưng hết hạn chờ authorization code; profile chưa có credentials. Không thể xác nhận account/region/stack, backup deployment hiện hành, inspect change set hoặc SES identity.
-3. Artifact local đã pin nhưng source/template chưa commit; harness AWS acceptance chủ động từ chối revision dirty.
-4. SES sender authentication/delivery chưa nghiệm thu nếu email nằm trong demo.
+1. Không có access token production trong release environment; chưa kiểm tra login hoàn tất, `/me`, connection, scan, authenticated inventory, findings/history/feedback và tenant isolation với hai Cognito tenant thật.
+2. Chưa chạy scan production mới sau release; ECR/DocumentDB/Neptune và 38 loại chưa có evidence AWS của revision này.
+3. SES còn sandbox, DKIM chưa bật, không custom MAIL FROM/domain alignment và chưa được phê duyệt gửi test.
 
 ### HIGH
 
@@ -225,34 +224,34 @@ Static diff chỉ thêm event route, Lambda source và allowlist đọc; không 
 
 | Capability | Status |
 |---|---|
-| Serverless architecture/source contracts | VERIFIED local |
-| Auth/tenant/STS security logic | VERIFIED local; AWS NOT_TESTED |
+| Serverless architecture/source contracts | VERIFIED local; production stack UPDATE_COMPLETE |
+| Auth/tenant/STS security logic | VERIFIED local; JWT route/401 VERIFIED; authenticated AWS E2E NOT_TESTED |
 | 38-type collector registry | IMPLEMENTED; AWS PARTIAL/NOT_TESTED |
-| Inventory identity current scan | IMPLEMENTED; local VERIFIED; deployment BLOCKED |
-| Findings search/filter | VERIFIED local |
-| History findings search | VERIFIED local |
+| Inventory identity current scan | DEPLOYED; local VERIFIED; authenticated production NOT_TESTED |
+| Findings search/filter | VERIFIED local; production authenticated NOT_TESTED |
+| History findings search | VERIFIED local; production authenticated NOT_TESTED |
 | Full historical inventory search | MISSING |
-| UI/UX responsive/accessibility | VERIFIED local; production NOT_TESTED |
+| UI/UX responsive/accessibility | VERIFIED local; production login/mobile surface VERIFIED |
 | Email HTML/text + notification state | VERIFIED local |
-| SES/DNS/delivery | BLOCKED |
-| IAM/CloudFormation hardening | IMPLEMENTED local; deployment BLOCKED |
-| Production release | BLOCKED |
+| SES/DNS/delivery | Identity VERIFIED; delivery BLOCKED |
+| IAM/CloudFormation release | DEPLOYED; no stateful replacement |
+| Production release | PARTIAL — infrastructure/frontend deployed, business E2E pending |
 
 ### Production E2E
 
 | Scenario | Local evidence | Production |
 |---|---|---|
-| Cognito login/logout | PKCE/unit/UI fixture PASS | BLOCKED |
-| AWS connection | validation/unit/UI fixture PASS | BLOCKED |
-| Scan Now + progress | orchestration/unit/demo PASS | BLOCKED |
-| Resource inventory | API/Moto/UI PASS | BLOCKED — route chưa deploy |
+| Cognito login/logout | PKCE/unit/UI fixture PASS | PKCE S256 redirect PASS; completed login/logout BLOCKED |
+| AWS connection | validation/unit/UI fixture PASS | BLOCKED — no production access token |
+| Scan Now + progress | orchestration/unit/demo PASS | BLOCKED — no approved authenticated scan run |
+| Resource inventory | API/Moto/UI PASS | Route/JWT/401 PASS; authenticated data BLOCKED |
 | REVIEW/OBSERVING/INSUFFICIENT_DATA | collector/API/UI PASS | BLOCKED |
-| Search/filter | TC01–TC20 + UI PASS | BLOCKED |
+| Search/filter | TC01–TC20 + UI PASS | Frontend bytes deployed; authenticated data BLOCKED |
 | Scan history | pagination/unit/UI PASS | BLOCKED |
 | Keep/Ignore | API/UI PASS | BLOCKED |
 | Settings | validation/UI PASS | BLOCKED |
-| Tenant isolation | API/cursor tests PASS | BLOCKED — chưa có hai Cognito tenant thật |
-| Responsive mobile | 320/390/768/1440 fixture PASS | BLOCKED — chưa smoke CloudFront deployment |
-| SES/Gmail | render/state tests PASS | BLOCKED — chưa xác minh identity/DNS hoặc gửi thật |
+| Tenant isolation | API/cursor tests PASS | BLOCKED — chưa có hai access token production |
+| Responsive mobile | 320/390/768/1440 fixture PASS | 390 px production PASS, không overflow/console error |
+| SES/Gmail | render/state tests PASS | Identity PASS; sandbox/DKIM/delivery BLOCKED |
 
-Chấp nhận hiện tại: **đủ để review source release candidate và tạo change set sau khi đăng nhập AWS, review/commit revision và đóng gói lại; chưa đủ để tuyên bố production-ready, full coverage hoặc hoàn thành 100%.**
+Chấp nhận hiện tại: **release hạ tầng và frontend đã hoạt động ở bề mặt public; chưa đủ bằng chứng để chấp nhận toàn bộ nghiệp vụ production hoặc tuyên bố 38/38 AWS verified.**

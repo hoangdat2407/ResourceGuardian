@@ -118,7 +118,7 @@ Không dùng raw evidence JSON và không tuyên bố delivery chỉ từ trạn
 
 ## 09:30–10:00 — Kết luận
 
-> Local regression hiện pass 422 test, một AWS E2E được skip theo gate, và 13 UI scripts pass. Inventory identity current-scan đã implement trong source nhưng production chỉ được coi là hoạt động sau khi route, IAM, backend và frontend cùng được deploy/smoke. Full historical inventory search, AWS verification 38 loại và SES domain authentication vẫn là phần chưa nghiệm thu.
+> Local regression pass 422 test, một AWS E2E được skip theo gate, và 13 UI scripts pass. Production revision `e53f46ce23bd4406525657f04f87a35791744713` đã deploy route inventory, Lambda, target IAM và frontend; PKCE redirect và mobile login surface đã smoke. Authenticated scan/inventory/feedback/history, AWS verification 38 loại và SES domain authentication/delivery vẫn chưa nghiệm thu.
 
 ## Checklist evidence sau demo
 

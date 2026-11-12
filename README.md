@@ -144,7 +144,7 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 
 Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`; dashboard hỗ trợ đã xem, giữ lại và bỏ qua qua API `/feedback`.
 
-Chín loại lõi có hợp đồng metric/evidence và bằng chứng local sâu hơn. Source mở rộng lên 38 loại/39 rule/40 trường ngưỡng và 12 nhóm selectable. `ECR_IMAGE_OLD` nay đọc `DescribeImages.imagePushedAt`; DocumentDB và Neptune dùng client riêng; CloudFront chỉ được một region xác định thu thập. Target role cần thêm `ecr:DescribeImages`; DocumentDB và Neptune tiếp tục dùng quyền IAM `rds:DescribeDBClusters` đã có vì AWS management API của hai dịch vụ dùng prefix `rds:`. Route CloudFormation `/inventory` đã được khai báo trong source release nhưng chưa được deploy, và chưa có scan production mới cho phạm vi mở rộng. Không dùng các số 38/39/40 để tuyên bố đã nghiệm thu AWS.
+Chín loại lõi có hợp đồng metric/evidence và bằng chứng local sâu hơn. Source mở rộng lên 38 loại/39 rule/40 trường ngưỡng và 12 nhóm selectable. `ECR_IMAGE_OLD` đọc `DescribeImages.imagePushedAt`; DocumentDB và Neptune dùng client riêng; CloudFront chỉ được một region xác định thu thập. Production release `e53f46ce23bd4406525657f04f87a35791744713` đã deploy route `/inventory`, năm Lambda cùng artifact và target-role action `ecr:DescribeImages`; DocumentDB và Neptune tiếp tục dùng quyền IAM `rds:DescribeDBClusters`. Route, JWT authorizer, hash Lambda và frontend bytes đã smoke; scan/authenticated inventory và 38-type AWS coverage vẫn chưa được xác minh trong release này. Không dùng các số 38/39/40 để tuyên bố đã nghiệm thu AWS.
 
 ## 6. API contract
 
@@ -158,7 +158,7 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 | POST | /scans | Body rỗng; 202 + scan_id, 409 nếu đang chạy, 429 nếu chưa đủ 15 phút |
 | GET | /scans/{scanId} | Trạng thái/kết quả retained của scan thuộc tenant và kết nối hiện tại |
 | GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện; bỏ keep/ignore khôi phục ứng viên còn được lưu |
-| GET | /inventory | Source API cho inventory identity của một `scan_id`, limit 1–500, cursor tenant/filter-bound và filter type/service/region/q; trả `available`, `aggregate_only`, `complete`. `template.yaml` chưa xuất bản route này nên deployment hiện tại vẫn fallback aggregate cho đến khi change set được duyệt |
+| GET | /inventory | Inventory identity của một `scan_id`, limit 1–500, cursor tenant/filter-bound và filter type/service/region/q; trả `available`, `aggregate_only`, `complete`. Route production dùng Cognito JWT; scan legacy vẫn fallback aggregate |
 | GET | /history | Snapshot bất biến; `limit` 1–100, mặc định 20; `next_token` tenant-bound |
 | GET | /feedback | Feedback của kết nối hiện tại; `limit`/`next_token` như history |
 | PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; thời hạn UTC kết thúc bằng `Z`, null để xóa; clear cũng dùng PUT |
