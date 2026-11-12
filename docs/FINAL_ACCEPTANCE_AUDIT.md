@@ -1,10 +1,10 @@
 # Cloud Resource Guardian — Final Acceptance Audit
 
-Ngày release production: 2026-11-12. Revision `e53f46ce23bd4406525657f04f87a35791744713` đã deploy backend/IAM/frontend; không push GitHub, không migration dữ liệu, không chạy scan mới và không gửi email thật.
+Ngày release production: 2026-11-12. Revision `e53f46ce23bd4406525657f04f87a35791744713` đã deploy backend/IAM/frontend; không push GitHub, không migration dữ liệu, không chạy scan mới và không gửi email thật. Revision `764df511c696100796ed2082bfe41e0d7baa814b` là child chỉ cập nhật README/audit/demo; `src/`, templates và web assets giống hệt revision đã deploy.
 
 ## Kết luận
 
-**Production infrastructure release đã hoàn tất; route, JWT gate, Lambda artifact, CloudFront bytes, PKCE redirect và mobile surface đã smoke. Authenticated business E2E, tenant isolation thật, scan mới và SES delivery vẫn `BLOCKED/NOT_TESTED`, nên chưa tuyên bố production acceptance đầy đủ.** Trạng thái: `IMPLEMENTED`, `VERIFIED`, `PARTIAL`, `MISSING`, `BUG`, `NOT_TESTED`, `BLOCKED`.
+**Production infrastructure release đã hoàn tất; CloudFront/config trả 200, API JWT gate trả 401 khi không có token, stack `UPDATE_COMPLETE`, Lambda active/successful và không có ERROR/timeout/Traceback mới. Authenticated business E2E, tenant isolation thật, scan mới và SES delivery vẫn `BLOCKED/NOT_TESTED`, nên chưa tuyên bố production acceptance đầy đủ.** Trạng thái: `IMPLEMENTED`, `VERIFIED`, `PARTIAL`, `MISSING`, `BUG`, `NOT_TESTED`, `BLOCKED`.
 
 ## A. Architecture
 
@@ -22,7 +22,7 @@ CloudFront + private S3 → Cognito Authorization Code/PKCE → API Gateway JWT 
 - inventory API dùng DynamoDB Query trong tenant partition, không table Scan;
 - scheduler/reconciler vẫn dùng table Scan, chỉ phù hợp giả định tối đa 5 user nội bộ.
 
-Source/local `VERIFIED`; năm Lambda production cùng CodeSha256 release và stack `UPDATE_COMPLETE`. Retry/DLQ tick thật, authenticated API và scan mới `NOT_TESTED`.
+Source/local `VERIFIED`; năm Lambda production cùng CodeSha256 release và stack `UPDATE_COMPLETE`. Trong cửa sổ kiểm tra sau release, API Lambda có 1 invocation/0 error/0 throttle, reconciler có 3 invocation/0 error/0 throttle; ba Lambda còn lại không có datapoint nên không được diễn giải là đã chạy thành công. Authenticated API và scan mới `NOT_TESTED`.
 
 ## B. Backend
 
@@ -107,22 +107,26 @@ TC01–TC20 fixture `VERIFIED` local. Production data `NOT_TESTED`.
 - scan/scope request generation ngăn response cũ ghi đè;
 - local viewport 320/390/768/1440 không overflow trong suite tương ứng.
 
-`VERIFIED` local; deployed CloudFront bytes và browser production `NOT_TESTED`.
+`VERIFIED` local; deployed CloudFront bytes khớp release. Browser production public/login và viewport 390 px `VERIFIED`, không overflow hoặc console error; dashboard authenticated `NOT_TESTED`.
 
 ## F. Email
 
-`src/email_report.py` tạo multipart content:
+`src/email_report.py` đã được harden trong candidate `6b051697cfedd83eb96762f7079f242a101ad389`:
 
-- subject `[Cloud Resource Guardian] X tài nguyên cần kiểm tra`;
-- HTML responsive + text/plain;
-- scan time Việt Nam, account, region, status, summary, service counts, tối đa 5 resource, CTA;
-- không raw evidence JSON, không secret, escape toàn bộ dynamic HTML;
-- REVIEW là candidate cần xem, không severity giả;
-- PARTIAL/FAILED không tuyên bố an toàn.
+- subject động `[Cloud Resource Guardian] X tài nguyên cần kiểm tra` theo số resource REVIEW duy nhất;
+- phần đầu chỉ có tên hệ thống, kết quả quét, giờ Việt Nam và scan status;
+- tối đa ba KPI `Cần kiểm tra`, `Đang quan sát`, `Thiếu dữ liệu`;
+- tối đa năm resource với service, tên/ID rút gọn, lý do tiếng Việt và status;
+- không raw JSON/evidence, ARN dài, rule/finding ID, metrics, error code hoặc stack trace;
+- HTML inline responsive `max-width:600px` và text/plain tương đương;
+- CTA HTTPS bỏ query/fragment, không thể mang token;
+- PARTIAL ghi rõ `Lượt quét chưa đầy đủ`; FAILED/TIMED_OUT không dùng subject `0 tài nguyên`;
+- zero-findings dùng template ngắn, không render ba KPI bằng 0;
+- mọi dynamic HTML được escape.
 
-Notification giữ verified Cognito recipient, tenant/connection/region/recipient dedup key, cooldown, conditional claim và các trạng thái `SENT`, `FAILED`, `UNKNOWN`, `STATE_FAILED`, `SENT_UNRECORDED`. SES và DynamoDB không atomic nên không hứa exactly-once.
+Notification preferences, Cognito verified recipient, tenant/connection/region/recipient dedup key, REVIEW fingerprint, cooldown, conditional claim, retry policy và các trạng thái `SENT`, `FAILED`, `UNKNOWN`, `STATE_FAILED`, `SENT_UNRECORDED` không thay đổi. Thay đổi OBSERVING/INSUFFICIENT_DATA đơn lẻ không gửi lại email khi REVIEW fingerprint không đổi; test đã khóa contract này. SES và DynamoDB không atomic nên không hứa exactly-once.
 
-Template/logic `VERIFIED` local. SES identity email `SUCCESS` và sending enabled, nhưng account còn sandbox, DKIM `NOT_STARTED`, không custom MAIL FROM và chưa đạt domain alignment; không gửi email thật. Delivery event/Gmail desktop/mobile `BLOCKED/NOT_TESTED`.
+Candidate email `VERIFIED` local và visual smoke ở 390 px không overflow/console error. Production vẫn chạy renderer của revision `e53f46ce...`; change set email chưa execute. SES email identity `hoangdat2407@gmail.com` verified và sending enabled, nhưng account còn sandbox, DKIM `NOT_STARTED`, không custom MAIL FROM và không có domain alignment. Có một Cognito user CONFIRMED/email_verified trùng verified SES identity, nên có thể test app delivery tới chính địa chỉ này sau hai approval riêng: execute Lambda change set rồi cho phép một scan/email thật. Chưa gửi email.
 
 ## G. Security
 
@@ -151,11 +155,11 @@ Target role đã thêm `ecr:DescribeImages`. DocumentDB và Neptune dùng boto3 
 
 | Check | Kết quả |
 |---|---|
-| `CRG_AWS_E2E=0 .venv/bin/python -m unittest discover -s tests -v` | **422 PASS, 1 SKIP** |
+| `CRG_AWS_E2E=0 .venv/bin/python -m unittest discover -s tests -p 'test*.py'` | **423 PASS, 1 SKIP** |
 | AWS E2E | **1 SKIP có chủ đích**, cần manual release gate |
-| Local Playwright | **13/13 scripts PASS**; không chạy `ui_live_frontend.py` |
+| Local Playwright | **13/13 scripts PASS**; không chạy `ui_live_frontend.py` authenticated |
 | Resource filter TC01–TC20 | PASS |
-| Email render + notification state (`tests.test_email_report`, `tests.test_notifications`) | **30 PASS** |
+| Email render + notification state (`tests.test_email_report`, `tests.test_notifications`) | **31 PASS** |
 | `node --check web/app.js` | PASS |
 | Python compile source/tests mới | PASS |
 | `cfn-lint --regions ap-southeast-1 -t template.yaml target-role.yaml web/target-role.yaml` | PASS |
@@ -191,15 +195,17 @@ Suite bao phủ rule/collector, pagination, timeout, retry, PARTIAL, tenant isol
 
 Frontend fallback aggregate với API 404/405 nên backward compatible. Release revision `e53f46ce23bd4406525657f04f87a35791744713` dùng artifact SHA-256 `8cc193fd376076c977fe1eca72e2dbd9aea4449f5d740423cd4f40dce270cb14`; cả năm Lambda production khớp CodeSha256. Target-role change set chỉ thêm `ecr:DescribeImages`; platform change set thêm route/permission và cập nhật code in-place. CloudFront invalidation `ICV0X7DG9HXWT8IR5BRXYTML6Y` hoàn tất; bốn release assets và target-role template khớp byte revision.
 
-Không có Delete hoặc thay đổi stateful trong hai change set. Backup processed templates, Lambda cũ SHA-256 `944bca591d6456b4019a66660ce6754b7ff7d98b9dd827ed194d98f7f725f4f8` và năm web objects nằm tại `.preflight/releases/e53f46ce23bd4406525657f04f87a35791744713/rollback/`. Inventory pages additive được code cũ bỏ qua và TTL dọn; không xóa/migrate data.
+Không có Delete hoặc thay đổi stateful trong hai change set đã execute. Backup processed templates, Lambda cũ SHA-256 `944bca591d6456b4019a66660ce6754b7ff7d98b9dd827ed194d98f7f725f4f8` và năm web objects nằm tại `.preflight/releases/e53f46ce23bd4406525657f04f87a35791744713/rollback/`. Inventory pages additive được code cũ bỏ qua và TTL dọn; không xóa/migrate data.
+
+Email candidate `6b051697cfedd83eb96762f7079f242a101ad389` dùng artifact SHA-256 `967a5a5d6598de0128f359e9fb228e1e30aa5a7a9593befc69118a126d37968e`. Change set `guardian-1794501695455319309` đang `CREATE_COMPLETE/AVAILABLE`, **chưa execute**. So sánh processed templates cho thấy chỉ `Properties.Code.S3Key` của năm Lambda thay đổi; IAM/API/EventBridge/SQS entries CloudFormation liệt kê là dependency reevaluation, template thực không đổi. Không có stateful template diff, Add/Delete hoặc replacement Lambda. S3 artifact khớp SHA-256 local. Rollback nằm tại `.preflight/releases/6b051697cfedd83eb96762f7079f242a101ad389/rollback/` và phục hồi artifact production `8cc193fd...`; frontend không cần rollback.
 
 ## J. Remaining Issues
 
 ### BLOCKER
 
-1. Không có access token production trong release environment; chưa kiểm tra login hoàn tất, `/me`, connection, scan, authenticated inventory, findings/history/feedback và tenant isolation với hai Cognito tenant thật.
+1. Người dùng chưa hoàn tất Cognito login trong cửa sổ nghiệm thu; không có access token production trong release environment. `/me`, connection, scan, authenticated inventory, findings/history/feedback và tenant isolation với hai Cognito tenant thật vẫn BLOCKED.
 2. Chưa chạy scan production mới sau release; ECR/DocumentDB/Neptune và 38 loại chưa có evidence AWS của revision này.
-3. SES còn sandbox, DKIM chưa bật, không custom MAIL FROM/domain alignment và chưa được phê duyệt gửi test.
+3. Email candidate chưa deploy; SES còn sandbox, DKIM chưa bật, không custom MAIL FROM/domain alignment và chưa được phê duyệt execute change set hoặc gửi test.
 
 ### HIGH
 
@@ -218,7 +224,7 @@ Không có Delete hoặc thay đổi stateful trong hai change set. Backup proce
 ### LOW
 
 1. Cần đo chi phí Dynamo read/write và latency trên account inventory lớn sau deploy.
-2. Cần screenshot/live accessibility evidence trên browser production, không chỉ fixture.
+2. Public/login production đã có screenshot và mobile 390 px evidence; authenticated dashboard accessibility vẫn chưa có bằng chứng.
 
 ## K. Final Acceptance
 
@@ -232,8 +238,8 @@ Không có Delete hoặc thay đổi stateful trong hai change set. Backup proce
 | History findings search | VERIFIED local; production authenticated NOT_TESTED |
 | Full historical inventory search | MISSING |
 | UI/UX responsive/accessibility | VERIFIED local; production login/mobile surface VERIFIED |
-| Email HTML/text + notification state | VERIFIED local |
-| SES/DNS/delivery | Identity VERIFIED; delivery BLOCKED |
+| Email HTML/text + notification state | Candidate `6b051697...` VERIFIED local/visual; production update change set AVAILABLE, chưa execute |
+| SES/DNS/delivery | Email identity VERIFIED; sandbox/DKIM/domain alignment và Gmail delivery BLOCKED |
 | IAM/CloudFormation release | DEPLOYED; no stateful replacement |
 | Production release | PARTIAL — infrastructure/frontend deployed, business E2E pending |
 
@@ -241,17 +247,17 @@ Không có Delete hoặc thay đổi stateful trong hai change set. Backup proce
 
 | Scenario | Local evidence | Production |
 |---|---|---|
-| Cognito login/logout | PKCE/unit/UI fixture PASS | PKCE S256 redirect PASS; completed login/logout BLOCKED |
-| AWS connection | validation/unit/UI fixture PASS | BLOCKED — no production access token |
-| Scan Now + progress | orchestration/unit/demo PASS | BLOCKED — no approved authenticated scan run |
+| Cognito login/logout | PKCE/unit/UI fixture PASS | PKCE S256 redirect và Hosted UI credential screen PASS; completed login/logout BLOCKED do người dùng chưa nhập credentials |
+| AWS connection | validation/unit/UI fixture PASS | BLOCKED — chưa có phiên production authenticated |
+| Scan Now + progress | orchestration/unit/demo PASS | BLOCKED — chưa có approved authenticated scan run |
 | Resource inventory | API/Moto/UI PASS | Route/JWT/401 PASS; authenticated data BLOCKED |
 | REVIEW/OBSERVING/INSUFFICIENT_DATA | collector/API/UI PASS | BLOCKED |
 | Search/filter | TC01–TC20 + UI PASS | Frontend bytes deployed; authenticated data BLOCKED |
 | Scan history | pagination/unit/UI PASS | BLOCKED |
 | Keep/Ignore | API/UI PASS | BLOCKED |
 | Settings | validation/UI PASS | BLOCKED |
-| Tenant isolation | API/cursor tests PASS | BLOCKED — chưa có hai access token production |
-| Responsive mobile | 320/390/768/1440 fixture PASS | 390 px production PASS, không overflow/console error |
-| SES/Gmail | render/state tests PASS | Identity PASS; sandbox/DKIM/delivery BLOCKED |
+| Tenant isolation | API/cursor tests PASS | BLOCKED — chưa có hai phiên Cognito production |
+| Responsive mobile | 320/390/768/1440 fixture PASS | 390 px public production PASS, không overflow/console error |
+| SES/Gmail | 31 render/state tests + 390 px email preview PASS | Identity PASS; candidate chưa deploy, sandbox/DKIM/delivery BLOCKED |
 
-Chấp nhận hiện tại: **release hạ tầng và frontend đã hoạt động ở bề mặt public; chưa đủ bằng chứng để chấp nhận toàn bộ nghiệp vụ production hoặc tuyên bố 38/38 AWS verified.**
+Chấp nhận hiện tại: **release hạ tầng và frontend đã hoạt động ở bề mặt public; email hardening đã sẵn sàng dưới dạng change set chưa execute. Chưa đủ bằng chứng để chấp nhận toàn bộ nghiệp vụ production, Gmail delivery hoặc tuyên bố 38/38 AWS verified.**
