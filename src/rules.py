@@ -369,6 +369,34 @@ def _metric_finding(kind, resource_id, created, level, evidence, window_start, r
     return _finding(kind, resource_id, level, reason, evidence)
 
 
+def _missing_metric_finding(kind, resource_id, series, window_start, units):
+    """Return INSUFFICIENT_DATA when any required CloudWatch series has no valid sample."""
+    counts = {}
+    missing = []
+    for name, samples in series.items():
+        valid = [
+            value for value in samples
+            if not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value >= 0
+        ] if isinstance(samples, (list, tuple)) else []
+        counts[name] = len(valid)
+        if not valid:
+            missing.append(name)
+    if not missing:
+        return None
+    evidence = {
+        "sample_counts": counts,
+        "missing_metrics": missing,
+        "metric_units": units,
+        "data_issues": ["NO_CLOUDWATCH_METRICS"],
+        "observation_start": window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start),
+    }
+    return _finding(kind, resource_id, "INSUFFICIENT_DATA",
+                    "Missing CloudWatch metrics; not classified as idle", evidence)
+
+
 def evaluate_rds(instance, metric_values, cfg, window_start):
     if instance.get("DBInstanceStatus") != "available" or keep(instance.get("TagList", [])):
         return None
@@ -420,6 +448,12 @@ def evaluate_lambda(function_info, metric_values, cfg, window_start, event_sourc
         tags = [{"Key": k, "Value": v} for k, v in tags.items()]
     if keep(tags):
         return None
+    missing = _missing_metric_finding(
+        "LAMBDA_FUNCTION", function_info["FunctionName"], {"invocations": metric_values or []},
+        window_start, {"invocations": "Count"},
+    )
+    if missing:
+        return missing
     invocations = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0]
     total_invocations = sum(invocations) if invocations else 0
     max_invocations = cfg.get("lambda_max_invocations", 0) if cfg else 0
@@ -516,6 +550,13 @@ def evaluate_rds_snapshot(snapshot, cfg, now):
 def evaluate_dynamodb_table(table_info, metric_values, cfg, window_start):
     if keep(table_info.get("Tags", [])) or table_info.get("TableStatus") != "ACTIVE":
         return None
+    missing = _missing_metric_finding(
+        "DYNAMODB_TABLE", table_info["TableName"],
+        {"read": metric_values.get("read", []), "write": metric_values.get("write", [])},
+        window_start, {"read": "Count", "write": "Count"},
+    )
+    if missing:
+        return missing
     reads = [v for v in metric_values.get("read", []) if isinstance(v, (int, float)) and math.isfinite(v)]
     writes = [v for v in metric_values.get("write", []) if isinstance(v, (int, float)) and math.isfinite(v)]
     total_activity = sum(reads) + sum(writes)
@@ -567,10 +608,19 @@ def evaluate_sqs_queue(queue_url, attributes, metric_values, cfg, window_start):
     name = queue_url.split("/")[-1]
     if "dlq" in name.lower() or "deadletter" in name.lower():
         return None  # Dead letter queues are intentionally quiet
+    messages = int(attributes.get("ApproximateNumberOfMessages", 0))
+    if messages > 0:
+        return None
+    missing = _missing_metric_finding(
+        "SQS_QUEUE", name,
+        {"sent": metric_values.get("sent", []), "received": metric_values.get("received", [])},
+        window_start, {"sent": "Count", "received": "Count"},
+    )
+    if missing:
+        return missing
     sent = sum(v for v in metric_values.get("sent", []) if isinstance(v, (int, float)) and math.isfinite(v))
     received = sum(v for v in metric_values.get("received", []) if isinstance(v, (int, float)) and math.isfinite(v))
-    messages = int(attributes.get("ApproximateNumberOfMessages", 0))
-    if sent > 0 or received > 0 or messages > 0:
+    if sent > 0 or received > 0:
         return None
     evidence = {
         "queue_url": queue_url,
@@ -587,6 +637,12 @@ def evaluate_sqs_queue(queue_url, attributes, metric_values, cfg, window_start):
 def evaluate_elasticache_cluster(cluster, metric_values, cfg, window_start):
     if keep(cluster.get("Tags", [])) or cluster.get("CacheClusterStatus") != "available":
         return None
+    missing = _missing_metric_finding(
+        "ELASTICACHE_CLUSTER", cluster["CacheClusterId"], {"connections": metric_values or []},
+        window_start, {"connections": "Count"},
+    )
+    if missing:
+        return missing
     connections = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     total_conns = sum(connections) if connections else 0
     if total_conns > 0:
@@ -684,6 +740,12 @@ def evaluate_auto_scaling_group(asg, cfg=None):
 def evaluate_api_gateway(api_info, metric_values, cfg, window_start):
     if keep(api_info.get("tags", [])):
         return None
+    missing = _missing_metric_finding(
+        "API_GATEWAY", api_info.get("id") or api_info.get("ApiId", "unknown"),
+        {"requests": metric_values or []}, window_start, {"requests": "Count"},
+    )
+    if missing:
+        return missing
     requests = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     total_reqs = sum(requests) if requests else 0
     if total_reqs > 0:
@@ -703,8 +765,16 @@ def evaluate_api_gateway(api_info, metric_values, cfg, window_start):
 def evaluate_sns_topic(topic_arn, attributes, metric_values, cfg, window_start):
     name = topic_arn.split(":")[-1]
     subs = int(attributes.get("SubscriptionsConfirmed", 0))
+    if subs > 0:
+        return None
+    missing = _missing_metric_finding(
+        "SNS_TOPIC", name, {"published": metric_values or []},
+        window_start, {"published": "Count"},
+    )
+    if missing:
+        return missing
     published = sum(v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v))
-    if subs > 0 or published > 0:
+    if published > 0:
         return None
     evidence = {
         "topic_arn": topic_arn,
@@ -739,6 +809,12 @@ def evaluate_eventbridge_rule(rule_info, targets, cfg=None):
 
 def evaluate_step_function(sm_info, metric_values, cfg, window_start):
     name = sm_info["name"]
+    missing = _missing_metric_finding(
+        "STEP_FUNCTION", sm_info["name"], {"executions": metric_values or []},
+        window_start, {"executions": "Count"},
+    )
+    if missing:
+        return missing
     execs = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     total_execs = sum(execs) if execs else 0
     if total_execs > 0:
@@ -761,6 +837,14 @@ def evaluate_vpc_endpoint(vpce_info, metric_values, cfg, window_start):
     if endpoint_type == "Gateway":
         return None
     eid = vpce_info["VpcEndpointId"]
+    metric_series = metric_values if isinstance(metric_values, dict) else {"activity": metric_values or []}
+    missing = _missing_metric_finding(
+        "VPC_ENDPOINT", eid, metric_series, window_start,
+        {name: "Bytes" if name == "bytes" else "Count" for name in metric_series},
+    )
+    if missing:
+        return missing
+    metric_values = [value for samples in metric_series.values() for value in samples]
     traffic = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     total_traffic = sum(traffic) if traffic else 0
     if total_traffic > 0:
@@ -782,6 +866,12 @@ def evaluate_vpc_endpoint(vpce_info, metric_values, cfg, window_start):
 def evaluate_sagemaker_endpoint(endpoint_info, metric_values, cfg, window_start):
     if keep(endpoint_info.get("Tags", [])) or endpoint_info.get("EndpointStatus") != "InService":
         return None
+    missing = _missing_metric_finding(
+        "SAGEMAKER_ENDPOINT", endpoint_info["EndpointName"], {"invocations": metric_values or []},
+        window_start, {"invocations": "Count"},
+    )
+    if missing:
+        return missing
     invocations = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(invocations) > 0:
         return None
@@ -802,7 +892,15 @@ def evaluate_sagemaker_endpoint(endpoint_info, metric_values, cfg, window_start)
 def evaluate_opensearch_domain(domain_info, metric_values, cfg, window_start):
     if domain_info.get("Processing") is True or keep(domain_info.get("Tags", [])):
         return None
-    requests = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
+    metric_series = metric_values if isinstance(metric_values, dict) else {"requests": metric_values or []}
+    missing = _missing_metric_finding(
+        "OPENSEARCH_DOMAIN", domain_info["DomainName"], metric_series,
+        window_start, {name: "Count" for name in metric_series},
+    )
+    if missing:
+        return missing
+    metric_values = [value for samples in metric_series.values() for value in samples]
+    requests = [v for v in metric_values if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(requests) > 0:
         return None
     name = domain_info["DomainName"]
@@ -822,6 +920,12 @@ def evaluate_opensearch_domain(domain_info, metric_values, cfg, window_start):
 def evaluate_redshift_cluster(cluster_info, metric_values, cfg, window_start):
     if keep(cluster_info.get("Tags", [])) or cluster_info.get("ClusterStatus") != "available":
         return None
+    missing = _missing_metric_finding(
+        "REDSHIFT_CLUSTER", cluster_info["ClusterIdentifier"], {"connections": metric_values or []},
+        window_start, {"connections": "Count"},
+    )
+    if missing:
+        return missing
     conns = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(conns) > 0:
         return None
@@ -842,7 +946,15 @@ def evaluate_redshift_cluster(cluster_info, metric_values, cfg, window_start):
 def evaluate_msk_cluster(cluster_info, metric_values, cfg, window_start):
     if cluster_info.get("State") != "ACTIVE":
         return None
-    traffic = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
+    metric_series = metric_values if isinstance(metric_values, dict) else {"traffic": metric_values or []}
+    missing = _missing_metric_finding(
+        "MSK_CLUSTER", cluster_info["ClusterName"], metric_series,
+        window_start, {name: "Bytes" for name in metric_series},
+    )
+    if missing:
+        return missing
+    metric_values = [value for samples in metric_series.values() for value in samples]
+    traffic = [v for v in metric_values if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(traffic) > 0:
         return None
     name = cluster_info["ClusterName"]
@@ -862,6 +974,12 @@ def evaluate_msk_cluster(cluster_info, metric_values, cfg, window_start):
 def evaluate_kinesis_stream(stream_info, metric_values, cfg, window_start):
     if stream_info.get("StreamStatus") != "ACTIVE":
         return None
+    missing = _missing_metric_finding(
+        "KINESIS_STREAM", stream_info["StreamName"], {"records": metric_values or []},
+        window_start, {"records": "Count"},
+    )
+    if missing:
+        return missing
     records = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(records) > 0:
         return None
@@ -944,7 +1062,15 @@ def evaluate_eks_cluster(cluster_info, nodegroups_count, fargate_count, cfg=None
 def evaluate_fsx_filesystem(fs_info, metric_values, cfg, window_start):
     if keep(fs_info.get("Tags", [])) or fs_info.get("Lifecycle") != "AVAILABLE":
         return None
-    bytes_io = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
+    metric_series = metric_values if isinstance(metric_values, dict) else {"io": metric_values or []}
+    missing = _missing_metric_finding(
+        "FSX_FILE_SYSTEM", fs_info["FileSystemId"], metric_series,
+        window_start, {name: "Bytes" for name in metric_series},
+    )
+    if missing:
+        return missing
+    metric_values = [value for samples in metric_series.values() for value in samples]
+    bytes_io = [v for v in metric_values if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(bytes_io) > 0:
         return None
     fid = fs_info["FileSystemId"]
@@ -964,6 +1090,12 @@ def evaluate_fsx_filesystem(fs_info, metric_values, cfg, window_start):
 def evaluate_memorydb_cluster(cluster_info, metric_values, cfg, window_start):
     if cluster_info.get("Status") != "available":
         return None
+    missing = _missing_metric_finding(
+        "MEMORYDB_CLUSTER", cluster_info["Name"], {"connections": metric_values or []},
+        window_start, {"connections": "Count"},
+    )
+    if missing:
+        return missing
     conns = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(conns) > 0:
         return None
@@ -984,6 +1116,12 @@ def evaluate_memorydb_cluster(cluster_info, metric_values, cfg, window_start):
 def evaluate_documentdb_cluster(cluster_info, metric_values, cfg, window_start):
     if cluster_info.get("Status") != "available" or cluster_info.get("Engine") != "docdb":
         return None
+    missing = _missing_metric_finding(
+        "DOCUMENTDB_CLUSTER", cluster_info["DBClusterIdentifier"], {"connections": metric_values or []},
+        window_start, {"connections": "Count"},
+    )
+    if missing:
+        return missing
     conns = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(conns) > 0:
         return None
@@ -1004,6 +1142,12 @@ def evaluate_documentdb_cluster(cluster_info, metric_values, cfg, window_start):
 def evaluate_neptune_cluster(cluster_info, metric_values, cfg, window_start):
     if cluster_info.get("Status") != "available" or cluster_info.get("Engine") != "neptune":
         return None
+    missing = _missing_metric_finding(
+        "NEPTUNE_CLUSTER", cluster_info["DBClusterIdentifier"], {"connections": metric_values or []},
+        window_start, {"connections": "Count"},
+    )
+    if missing:
+        return missing
     conns = [v for v in (metric_values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
     if sum(conns) > 0:
         return None

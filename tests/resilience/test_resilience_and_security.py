@@ -80,6 +80,62 @@ class FaultToleranceTests(unittest.TestCase):
         self.assertTrue(result["partial"])
         self.assertEqual(result["errors"][0]["code"], "AccessDenied")
 
+    def test_security_group_reference_prevents_false_unused_finding(self):
+        """A group referenced by another security group is not treated as unattached."""
+        security_groups = [
+            {
+                "GroupId": "sg-source",
+                "GroupName": "source",
+                "IpPermissions": [{
+                    "UserIdGroupPairs": [{"GroupId": "sg-target"}],
+                }],
+                "IpPermissionsEgress": [],
+            },
+            {
+                "GroupId": "sg-target",
+                "GroupName": "target",
+                "IpPermissions": [],
+                "IpPermissionsEgress": [],
+            },
+        ]
+
+        class Paginator:
+            def __init__(self, operation):
+                self.operation = operation
+
+            def paginate(self, **_kwargs):
+                values = {
+                    "describe_security_groups": {"SecurityGroups": security_groups},
+                    "describe_network_interfaces": {"NetworkInterfaces": []},
+                    "describe_vpc_endpoints": {"VpcEndpoints": []},
+                }
+                return iter([values[self.operation]])
+
+        ec2 = MagicMock()
+        ec2.get_paginator.side_effect = lambda operation: Paginator(operation)
+        cloudfront = MagicMock()
+        cloudfront.list_distributions.return_value = {"DistributionList": {"Items": []}}
+        session = MagicMock()
+        session.client.side_effect = lambda service, **_kwargs: (
+            cloudfront if service == "cloudfront" else ec2
+        )
+
+        with patch("collectors.evaluate_security_group", return_value=None) as evaluate:
+            result = collectors.collect_region(
+                session=session,
+                region="ap-southeast-1",
+                account_id="123456789012",
+                cfg=self.cfg,
+                service_groups=["security"],
+                now=self.now,
+                time_check=lambda: None,
+                observed=lambda _kind, _resource_id, _bucket: 0,
+            )
+
+        self.assertFalse(result["partial"])
+        calls = {call.args[0]["GroupId"]: call.args for call in evaluate.call_args_list}
+        self.assertIn("sg-target", calls["sg-target"][2])
+
     def test_missing_metrics_yields_insufficient_data_not_idle(self):
         """When CloudWatch metrics are missing (< 80% coverage), system returns INSUFFICIENT_DATA rather than guessing idle."""
         hours = 24

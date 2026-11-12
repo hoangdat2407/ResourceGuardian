@@ -135,7 +135,7 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = 'http://127.0.0.1:' + str(server.server_address[1])
     state = {'latest': S_NOW, 'requests': []}
-    checks, errors = [], []
+    checks, errors, console_messages = [], [], []
 
     def api(route):
         request = route.request
@@ -187,10 +187,15 @@ def main():
             context.add_init_script("sessionStorage.setItem('crg-token','demo-local-only')")
             page = context.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
+            page.on('console', lambda message: console_messages.append(message.text))
             page.route('**/config.json', lambda route: route.fulfill(json={'api': '/api', 'demo': True}))
             page.route('**/api/**', api)
             page.goto(base + '/#findings')
             expect(rows()).to_have_count(len(ALL_NOW))
+            expect(page.locator('#history-date-fields')).to_be_hidden()
+            expect(page.locator('#filter-type')).to_be_visible()
+            expect(page.locator('#advanced-filters')).not_to_have_attribute('open', '')
+            checks.append('Default search surface shows search, service, resource type and evaluation status')
 
             # TC01/TC02: resource ID and resource name (evidence) search.
             page.locator('#search').fill('vol-shared')
@@ -209,11 +214,18 @@ def main():
             page.locator('#search').fill('')
             checks.append('TC01/TC02 search covers resource ID, resource name, finding/rule ID and region')
 
+            page.locator('#advanced-filters summary').click()
+            expect(page.locator('#filter-type')).to_be_visible()
+
             # TC03: combine service family, type, level, region, rule and ack.
             page.locator('#filter-service').select_option('EBS')
             page.locator('#filter-level').select_option('REVIEW')
             page.locator('#filter-region').select_option(R1)
             expect(rows()).to_have_count(2)
+            expect(page.locator('#active-filter-bar')).to_be_visible()
+            expect(page.locator('#active-filters')).to_contain_text('Amazon EBS')
+            expect(page.locator('#active-filters')).to_contain_text('Cần kiểm tra')
+            expect(page.locator('#active-filters')).to_contain_text(R1)
             page.locator('#filter-type').select_option('RDS')
             expect(rows()).to_have_count(0)
             page.locator('#filter-type').select_option('')
@@ -225,24 +237,15 @@ def main():
             expect(rows()).to_have_count(len(ALL_NOW))
             checks.append('TC03 combined service/type/level/region/rule/ack filters')
 
-            # TC04/TC05: VN date boundaries and invalid range.
-            set_date('from', '2026-10-31')
-            expect(rows()).to_have_count(1)
-            expect(rows().first).to_contain_text('vol-shared')
-            set_date('from', '')
-            set_date('to', '2026-10-30')
-            expect(rows()).to_have_count(len(ALL_NOW) - 1)
-            expect(page.locator('#findings-list')).not_to_contain_text('vol-shared')
-            set_date('from', '2026-11-05')
-            set_date('to', '2026-10-01')
-            expect(page.locator('#date-error')).to_be_visible()
-            expect(page.locator('#date-error')).to_contain_text('Từ ngày phải trước')
-            page.locator('#reset-filters').click()
-            checks.append('TC04/TC05 dates use Vietnam day boundaries and reject inverted ranges')
+            # Current-scan mode must not expose date fields.
+            expect(page.locator('#history-date-fields')).to_be_hidden()
+            expect(rows()).to_have_count(len(ALL_NOW))
+            checks.append('Current-scan mode hides date filters')
+            checks.append('Applied filters render removable chips and reset as one group')
 
             # TC09: two findings on one resource vs unique resource count.
             scope = page.locator('#findings-scope')
-            expect(scope).to_contain_text('7/7 tài nguyên')
+            expect(scope).to_contain_text('7 tài nguyên')
             expect(scope).to_contain_text('%d cảnh báo' % len(ALL_NOW))
             expect(page.locator('#findings-list')).to_contain_text('db-prod')
             checks.append('TC09 one resource with two findings is counted once')
@@ -260,11 +263,8 @@ def main():
 
             # TC11: no fake severity controls; scan status is a separate dimension.
             assert page.locator('#filter-severity').count() == 0
-            expect(page.locator('#filter-scan-status')).to_be_visible()
-            page.locator('#filter-scan-status').select_option('FAILED')
-            expect(rows()).to_have_count(0)
-            page.locator('#reset-filters').click()
-            checks.append('TC11 no severity model is invented; scan and finding status stay separate')
+            expect(page.locator('#filter-scan-status')).to_be_hidden()
+            checks.append('TC11 no severity model is invented; scan status appears only in history mode')
 
             # Diff filters require the previous scan and must not compare partial scans.
             page.locator('#filter-diff').select_option('new')
@@ -287,6 +287,11 @@ def main():
 
             # TC08: history scope loads every page before searching.
             page.locator('#search-scope').select_option('history')
+            expect(page.locator('#history-date-fields')).to_be_visible()
+            expect(page.locator('#filter-scan-status')).to_be_visible()
+            page.locator('#filter-scan-status').select_option('PARTIAL')
+            expect(rows()).to_have_count(len(PARTIAL_R1))
+            page.locator('#filter-scan-status').select_option('')
             expect(page.locator('#history-status')).to_contain_text('Đã tải')
             expect(page.locator('#history-status')).to_contain_text(str(len(HISTORY_ROWS)) + ' bản ghi')
             page.locator('#search').fill('vol-lastpage')
@@ -302,20 +307,29 @@ def main():
             set_date('from', '2026-10-03')
             set_date('to', '2026-10-03')
             expect(rows()).to_have_count(len(HIST1_R1))
+            set_date('from', '2026-11-05')
+            set_date('to', '2026-10-01')
+            expect(page.locator('#date-error')).to_be_visible()
+            expect(page.locator('#date-error')).to_contain_text('Từ ngày phải trước')
             page.locator('#reset-filters').click()
-            expect(page.locator('#search-scope')).to_have_value('current')
+            expect(page.locator('#search-scope')).to_have_value('findings')
             checks.append('TC08 history mode paginates to the end and dates use scan completion time')
 
             # TC12: partial scan (now available from the fully loaded history) keeps its warning.
             page.locator('#scan-select').select_option(S_PARTIAL)
             expect(page.locator('#scan-errors-card')).to_be_visible()
-            expect(page.locator('#scan-errors-card')).to_contain_text('AccessDenied')
+            expect(page.locator('#scan-errors-card')).to_contain_text('Lượt quét chưa đầy đủ')
+            page.locator('#scan-errors-card .scan-error-detail').click()
+            expect(page.locator('#scan-detail-dialog')).to_contain_text('AccessDenied')
+            page.locator('#close-scan-detail').click()
             expect(page.locator('#findings-scope')).to_contain_text('chưa đầy đủ')
             page.locator('#scan-select').select_option(S_NOW)
             expect(page.locator('#findings-list')).to_contain_text('vol-shared')
             checks.append('TC12 partial scan shows collection errors and no safe-account claim')
 
             # TC13: reset clears all filters and returns to current scan mode.
+            page.locator('#search-scope').select_option('history')
+            expect(page.locator('#history-date-fields')).to_be_visible()
             page.locator('#filter-service').select_option('RDS')
             page.locator('#filter-scan-status').select_option('SUCCEEDED')
             set_date('from', '2026-10-01')
@@ -332,13 +346,19 @@ def main():
             assert all(entry['auth'].startswith('Bearer ') for entry in state['requests'] if entry['path'] != ''), 'missing auth'
             page.locator('#search').fill('')
             text=page.locator('#findings-list').inner_text()
-            assert 'Account: 999999999999' not in text
-            assert 'Account: ' + PROFILE['account_id'] in text
-            checks.append('TC14 all requests are authenticated and only tenant account data is rendered')
+            assert '999999999999' not in text
+            assert PROFILE['account_id'] not in text
+            page.locator('#findings-list .finding-open').first.click()
+            expect(page.locator('#finding-detail-content [data-field="account_id"] dd')).to_have_text(PROFILE['account_id'])
+            page.locator('#close-finding-detail').click()
+            checks.append('TC14 all requests are authenticated; account metadata stays in the detail panel')
 
             # TC16: keyboard search and reset; PRM-friendly controls.
-            page.locator('#search').focus()
-            page.keyboard.type('vol-level')
+            expect(page.locator('.scan-loading-note')).to_have_count(0)
+            search=page.locator('#search')
+            search.focus()
+            page.keyboard.insert_text('vol-level')
+            expect(search).to_have_value('vol-level')
             expect(rows()).to_have_count(1)
             page.locator('#reset-filters').focus()
             page.keyboard.press('Enter')
@@ -353,11 +373,17 @@ def main():
             page.set_viewport_size({'width': 1440, 'height': 1000})
             page.screenshot(path=str(OUT / 'advanced-1440.png'), full_page=True)
             checks.append('TC15 no horizontal overflow at 390/320px')
+            assert page.locator('h1,h2,h3,h4,h5,h6').evaluate_all(
+                '(items)=>items.every(item=>item.textContent.trim().length>0)')
+            sensitive = [PROFILE['account_id'], PROFILE['external_id'], S_NOW, S_PARTIAL]
+            assert not any(value in message for message in console_messages for value in sensitive), console_messages
+            checks.append('no empty headings or sensitive account/scan identifiers in the console')
 
             assert not errors, errors
             checks.append('no JavaScript runtime errors')
             (OUT / 'acceptance-results.json').write_text(json.dumps(
-                {'environment': 'LOCAL FIXTURES — NOT AWS', 'checks': checks, 'page_errors': errors},
+                {'environment': 'LOCAL FIXTURES — NOT AWS', 'checks': checks, 'page_errors': errors,
+                 'console_messages': console_messages},
                 ensure_ascii=False, indent=2), encoding='utf-8')
             browser.close()
             print('Advanced search PASS:\n' + '\n'.join(checks))

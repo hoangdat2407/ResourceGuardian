@@ -31,6 +31,13 @@ def result(status="SUCCEEDED", findings=None, **extra):
 
 
 class EmailReport(unittest.TestCase):
+    def test_subject_uses_bracketed_product_name_and_unique_review_count(self):
+        content = build_email(PROFILE, result(findings=[
+            finding(resource_id="vol-same"),
+            finding(resource_id="vol-same", rule="EBS_SECOND_RULE"),
+        ]))
+        self.assertEqual(content["subject"], "[Cloud Resource Guardian] 1 tài nguyên cần kiểm tra")
+
     def test_zero_findings_has_clear_empty_state_and_no_button(self):
         content = build_email(PROFILE, result(findings=[], finding_count=0), web_url="")
         self.assertIn("Không có cảnh báo REVIEW", content["text"])
@@ -60,6 +67,8 @@ class EmailReport(unittest.TestCase):
             self.assertNotIn("vol-%d" % index, content["text"])
         self.assertIn("7 cảnh báo / 7 tài nguyên", content["text"])
         self.assertIn("7 tài nguyên cần kiểm tra", content["subject"])
+        self.assertIn("Còn 2 cảnh báo khác. Xem trên Dashboard.", content["text"])
+        self.assertIn("Còn 2 cảnh báo khác. Xem trên Dashboard.", content["html"])
 
     def test_multiple_findings_on_one_resource_count_as_one_resource(self):
         findings = [
@@ -159,6 +168,9 @@ class EmailReport(unittest.TestCase):
         self.assertIn("Scan ID: scan-fixture", text)
         self.assertIn("không tự dừng hoặc xóa", text)
         self.assertIn("không tự dừng hoặc xóa", html)
+        self.assertIn("Asia/Ho_Chi_Minh", text)
+        self.assertIn("Asia/Ho_Chi_Minh", html)
+        self.assertIn("<strong>AWS account:</strong> 123456789012", html)
 
     def test_values_are_utf8_safe(self):
         content = build_email(PROFILE, result(findings=[finding()]), web_url="")

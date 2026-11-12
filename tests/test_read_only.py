@@ -29,6 +29,7 @@ EXPECTED_ACTIONS = {
     "dynamodb:DescribeTable",
     "ecr:DescribeRepositories",
     "ecr:GetLifecyclePolicy",
+    "ecr:DescribeImages",
     "sqs:ListQueues",
     "sqs:GetQueueAttributes",
     "elasticache:DescribeCacheClusters",
@@ -71,6 +72,7 @@ EXPECTED_ROUTES = {
     ("GET", "/history"),
     ("PUT", "/notifications"),
     ("GET", "/findings"),
+    ("GET", "/inventory"),
     ("GET", "/feedback"),
     ("PUT", "/feedback"),
 }
@@ -127,6 +129,9 @@ class ReadOnlyContract(unittest.TestCase):
         events = template["Resources"]["ApiFunction"]["Properties"]["Events"].values()
         routes = {(event["Properties"]["Method"], event["Properties"]["Path"]) for event in events if event["Type"] == "HttpApi"}
         self.assertEqual(routes, EXPECTED_ROUTES)
+        http_api = template["Resources"]["HttpApi"]["Properties"]
+        self.assertEqual(http_api["Auth"]["DefaultAuthorizer"], "CognitoJwt")
+        self.assertEqual(http_api["Auth"]["Authorizers"]["CognitoJwt"]["IdentitySource"], "$request.header.Authorization")
         self.assertFalse(any(method == "DELETE" for method, _ in routes))
         user_pool = template["Resources"]["UserPool"]["Properties"]
         self.assertIs(user_pool["AdminCreateUserConfig"]["AllowAdminCreateUserOnly"], False)

@@ -44,6 +44,7 @@ from rules import (
     evaluate_vpc_endpoint,
     finding_id,
     keep,
+    RESOURCE_REGISTRY,
 )
 
 SDK_CONFIG = Config(
@@ -165,9 +166,9 @@ def _error_code(error):
     return "METRIC_DATA_ERROR"
 
 
-def collect_region(session, region, account_id, cfg, service_groups, now, time_check, observed):
+def collect_region(session, region, account_id, cfg, service_groups, now, time_check, observed, global_region=None):
     """Collect selected services in one region without performing AWS mutations."""
-    counts, findings, errors = {}, [], []
+    counts, findings, inventory, errors = {}, [], [], []
     partial = False
     end = now.replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(hours=cfg["window_hours"])
@@ -180,6 +181,29 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             except KeyError:
                 clients[name] = None
         return clients[name]
+
+    def tag_name(tags):
+        if isinstance(tags, dict):
+            return tags.get("Name")
+        for tag in tags or []:
+            if tag.get("Key") == "Name" and isinstance(tag.get("Value"), str):
+                return tag["Value"]
+        return None
+
+    def remember(kind, resource_id, resource_name=None):
+        if resource_id is None:
+            return
+        resource_id = str(resource_id)
+        if not resource_id:
+            return
+        item = {
+            "type": kind,
+            "service_id": RESOURCE_REGISTRY[kind]["service_id"],
+            "resource_id": resource_id,
+        }
+        if isinstance(resource_name, str) and resource_name:
+            item["resource_name"] = resource_name
+        inventory.append(item)
 
     def add(finding, stable_identity):
         if finding is None:
@@ -234,6 +258,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["EC2"] = len(resources)
         limited("EC2", truncated)
         for instance in resources:
+            remember("EC2", instance["InstanceId"], tag_name(instance.get("Tags")))
             time_check()
             if keep(instance.get("Tags", [])) or instance.get("State", {}).get("Name") != "running":
                 continue
@@ -254,6 +279,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["EBS"] = len(resources)
         limited("EBS", truncated)
         for volume in resources:
+            remember("EBS", volume["VolumeId"], tag_name(volume.get("Tags")))
             time_check()
             resource_id = volume["VolumeId"]
             bad = volume.get("State") == "available" and not volume.get("Attachments")
@@ -261,13 +287,28 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             add(evaluate_ebs(volume, hours, cfg), resource_id)
 
     def eip_addresses():
-        time_check()
-        addresses = client("ec2").describe_addresses().get("Addresses", [])
-        truncated = len(addresses) > RESOURCE_LIMIT
-        resources = addresses[:RESOURCE_LIMIT] if truncated else addresses
+        c = client("ec2")
+        if c is None:
+            return
+        resources = []
+        token = None
+        truncated = False
+        while True:
+            time_check()
+            args = {"NextToken": token} if token else {}
+            page = c.describe_addresses(**args)
+            resources.extend(page.get("Addresses", []))
+            if len(resources) > RESOURCE_LIMIT:
+                resources = resources[:RESOURCE_LIMIT]
+                truncated = True
+                break
+            token = page.get("NextToken")
+            if not token:
+                break
         counts["EIP"] = len(resources)
         limited("EIP", truncated)
         for address in resources:
+            remember("EIP", address.get("AllocationId"), tag_name(address.get("Tags")))
             time_check()
             resource_id = address.get("AllocationId")
             if not resource_id:
@@ -287,6 +328,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             return
         used = {mapping.get("Ebs", {}).get("SnapshotId") for image in images for mapping in image.get("BlockDeviceMappings", [])}
         for snapshot in resources:
+            remember("SNAPSHOT", snapshot["SnapshotId"], tag_name(snapshot.get("Tags")) or snapshot.get("Description"))
             time_check()
             resource_id = snapshot["SnapshotId"]
             add(evaluate_snapshot(snapshot, used, True, cfg, now), resource_id)
@@ -314,6 +356,11 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
                             truncated = True
                             break
                         count += 1
+                        remember(
+                            "S3_MULTIPART",
+                            "s3://" + bucket["Name"] + "/" + upload["Key"] + "#uploadId=" + upload["UploadId"],
+                            upload["Key"],
+                        )
                         counts["S3_MULTIPART"] = count
                         add(evaluate_s3_multipart(bucket["Name"], upload, now), [bucket["Name"], upload["Key"], upload["UploadId"]])
                     if truncated:
@@ -331,6 +378,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["RDS"] = len(resources)
         limited("RDS", truncated)
         for instance in resources:
+            remember("RDS", instance["DBInstanceIdentifier"], instance.get("DBName") or instance["DBInstanceIdentifier"])
             time_check()
             if instance.get("DBInstanceStatus") != "available" or keep(instance.get("TagList", [])):
                 continue
@@ -347,6 +395,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["NAT_GATEWAY"] = len(resources)
         limited("NAT_GATEWAY", truncated)
         for gateway in resources:
+            remember("NAT_GATEWAY", gateway["NatGatewayId"], tag_name(gateway.get("Tags")))
             time_check()
             if gateway.get("State") != "available" or keep(gateway.get("Tags", [])):
                 continue
@@ -373,6 +422,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             counts[kind] = len(items)
             limited(kind, truncated)
             for load_balancer in items:
+                remember(kind, load_balancer["LoadBalancerName"], load_balancer.get("LoadBalancerName"))
                 time_check()
                 if load_balancer.get("State", {}).get("Code") != "active":
                     continue
@@ -398,6 +448,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["LAMBDA_FUNCTION"] = len(resources)
         limited("LAMBDA_FUNCTION", truncated)
         for fn in resources:
+            remember("LAMBDA_FUNCTION", fn["FunctionName"], fn["FunctionName"])
             time_check()
             tags = fn.get("Tags") or []
             if isinstance(tags, dict):
@@ -405,18 +456,17 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             if keep(tags):
                 continue
             fn_name = fn["FunctionName"]
-            esm_count = 0
-            try:
-                esm_resp = client("lambda").list_event_source_mappings(FunctionName=fn_name)
-                esm_count = len(esm_resp.get("EventSourceMappings", []))
-            except (ClientError, BotoCoreError):
-                pass
+            esm_count = sum(
+                len(page.get("EventSourceMappings", []))
+                for page in _pages(client("lambda"), "list_event_source_mappings", time_check, FunctionName=fn_name)
+            )
             has_policy = False
             try:
                 client("lambda").get_policy(FunctionName=fn_name)
                 has_policy = True
-            except (ClientError, BotoCoreError):
-                pass
+            except ClientError as error:
+                if _error_code(error) != "ResourceNotFoundException":
+                    raise
             queries = _queries("AWS/Lambda", "FunctionName", fn_name, [("Invocations", "Sum", "invocations")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
             metric_values = series.get("invocations", [])
@@ -430,6 +480,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["LOG_GROUP"] = len(resources)
         limited("LOG_GROUP", truncated)
         for lg in resources:
+            remember("LOG_GROUP", lg["logGroupName"], lg["logGroupName"])
             time_check()
             add(evaluate_log_group(lg, cfg), lg["logGroupName"])
 
@@ -452,8 +503,15 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             for group in eni.get("Groups", [])
             if "GroupId" in group
         }
-        referenced_sg_ids = set()
+        referenced_sg_ids = {
+            pair["GroupId"]
+            for sg in resources
+            for permission in sg.get("IpPermissions", []) + sg.get("IpPermissionsEgress", [])
+            for pair in permission.get("UserIdGroupPairs", [])
+            if pair.get("GroupId")
+        }
         for sg in resources:
+            remember("SECURITY_GROUP", sg["GroupId"], tag_name(sg.get("Tags")) or sg.get("GroupName"))
             time_check()
             is_unused = (sg["GroupId"] not in attached_sg_ids) and (sg["GroupId"] not in referenced_sg_ids) and (sg.get("GroupName") != "default")
             hours = observed("SECURITY_GROUP", sg["GroupId"], is_unused)
@@ -471,6 +529,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["RDS_SNAPSHOT"] = len(resources)
         limited("RDS_SNAPSHOT", truncated)
         for snap in resources:
+            remember("RDS_SNAPSHOT", snap["DBSnapshotIdentifier"], snap["DBSnapshotIdentifier"])
             time_check()
             add(evaluate_rds_snapshot(snap, cfg, now), snap["DBSnapshotIdentifier"])
     def dynamodb_tables():
@@ -481,11 +540,9 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["DYNAMODB_TABLE"] = len(resources)
         limited("DYNAMODB_TABLE", truncated)
         for table_name in resources:
+            remember("DYNAMODB_TABLE", table_name, table_name)
             time_check()
-            try:
-                desc = c.describe_table(TableName=table_name).get("Table", {})
-            except (ClientError, BotoCoreError):
-                continue
+            desc = c.describe_table(TableName=table_name).get("Table", {})
             queries = [
                 {"Id": "read", "MetricStat": {"Metric": {"Namespace": "AWS/DynamoDB", "MetricName": "ConsumedReadCapacityUnits", "Dimensions": [{"Name": "TableName", "Value": table_name}]}, "Period": 3600, "Stat": "Sum"}},
                 {"Id": "write", "MetricStat": {"Metric": {"Namespace": "AWS/DynamoDB", "MetricName": "ConsumedWriteCapacityUnits", "Dimensions": [{"Name": "TableName", "Value": table_name}]}, "Period": 3600, "Stat": "Sum"}}
@@ -503,34 +560,40 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for repo in resources:
             time_check()
             repo_name = repo["repositoryName"]
+            remember("ECR_REPOSITORY", repo_name, repo_name)
             has_lifecycle = False
             try:
                 c.get_lifecycle_policy(repositoryName=repo_name)
                 has_lifecycle = True
-            except (ClientError, BotoCoreError):
-                pass
-            add(evaluate_ecr_repository(repo, has_lifecycle, 0, cfg), repo_name)
+            except ClientError as error:
+                if _error_code(error) != "LifecyclePolicyNotFoundException":
+                    raise
+            pushed_at = []
+            for page in _pages(c, "describe_images", time_check, repositoryName=repo_name, filter={"tagStatus": "ANY"}):
+                pushed_at.extend(
+                    image["imagePushedAt"]
+                    for image in page.get("imageDetails", [])
+                    if isinstance(image.get("imagePushedAt"), datetime)
+                    and image["imagePushedAt"].tzinfo is not None
+                    and image["imagePushedAt"].utcoffset() is not None
+                )
+            oldest_image_age_days = max(((now - pushed).total_seconds() / 86400 for pushed in pushed_at), default=None)
+            add(evaluate_ecr_repository(repo, has_lifecycle, oldest_image_age_days, cfg), repo_name)
 
     def sqs_queues():
         c = client("sqs")
         if c is None:
             return
-        try:
-            urls = c.list_queues().get("QueueUrls", [])
-        except (ClientError, BotoCoreError):
-            return
-        truncated = len(urls) > RESOURCE_LIMIT
-        urls = urls[:RESOURCE_LIMIT]
+        urls, truncated = collect_pages(c, "list_queues", "QueueUrls", time_check=time_check)
         counts["SQS_QUEUE"] = len(urls)
         limited("SQS_QUEUE", truncated)
         for url in urls:
             time_check()
             qname = url.split("/")[-1]
-            attrs = {}
-            try:
-                attrs = c.get_queue_attributes(QueueUrl=url, AttributeNames=["ApproximateNumberOfMessages"]).get("Attributes", {})
-            except (ClientError, BotoCoreError):
-                pass
+            remember("SQS_QUEUE", qname, qname)
+            attrs = c.get_queue_attributes(
+                QueueUrl=url, AttributeNames=["ApproximateNumberOfMessages"]
+            ).get("Attributes", {})
             queries = [
                 {"Id": "sent", "MetricStat": {"Metric": {"Namespace": "AWS/SQS", "MetricName": "NumberOfMessagesSent", "Dimensions": [{"Name": "QueueName", "Value": qname}]}, "Period": 3600, "Stat": "Sum"}},
                 {"Id": "received", "MetricStat": {"Metric": {"Namespace": "AWS/SQS", "MetricName": "NumberOfMessagesReceived", "Dimensions": [{"Name": "QueueName", "Value": qname}]}, "Period": 3600, "Stat": "Sum"}}
@@ -546,6 +609,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["ELASTICACHE_CLUSTER"] = len(resources)
         limited("ELASTICACHE_CLUSTER", truncated)
         for cluster in resources:
+            remember("ELASTICACHE_CLUSTER", cluster["CacheClusterId"], cluster["CacheClusterId"])
             time_check()
             cid = cluster["CacheClusterId"]
             queries = _queries("AWS/ElastiCache", "CacheClusterId", cid, [("CurrConnections", "Maximum", "conns")])
@@ -560,6 +624,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["EFS_FILE_SYSTEM"] = len(resources)
         limited("EFS_FILE_SYSTEM", truncated)
         for fs in resources:
+            remember("EFS_FILE_SYSTEM", fs["FileSystemId"], fs.get("Name") or fs["FileSystemId"])
             time_check()
             add(evaluate_efs_file_system(fs, cfg), fs["FileSystemId"])
 
@@ -567,28 +632,38 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         c = client("ecs")
         if c is None:
             return
-        try:
-            arns = c.list_clusters().get("clusterArns", [])
-        except (ClientError, BotoCoreError):
-            return
-        if not arns:
-            return
-        try:
-            clusters = c.describe_clusters(clusters=arns[:100]).get("clusters", [])
-        except (ClientError, BotoCoreError):
-            return
-        counts["ECS_CLUSTER"] = len(clusters)
-        for cluster in clusters:
-            time_check()
-            add(evaluate_ecs_cluster(cluster, cfg), cluster["clusterArn"])
-            try:
-                srv_arns = c.list_services(cluster=cluster["clusterArn"]).get("serviceArns", [])
-                if srv_arns:
-                    services = c.describe_services(cluster=cluster["clusterArn"], services=srv_arns[:10]).get("services", [])
+        arns, clusters_truncated = collect_pages(c, "list_clusters", "clusterArns", time_check=time_check)
+        counts["ECS_CLUSTER"] = len(arns)
+        limited("ECS_CLUSTER", clusters_truncated)
+        counts["ECS_SERVICE"] = 0
+        services_truncated = False
+        for offset in range(0, len(arns), 100):
+            clusters = c.describe_clusters(clusters=arns[offset:offset + 100]).get("clusters", [])
+            for cluster in clusters:
+                remember("ECS_CLUSTER", cluster["clusterName"], cluster["clusterName"])
+                time_check()
+                add(evaluate_ecs_cluster(cluster, cfg), cluster["clusterArn"])
+                remaining = RESOURCE_LIMIT - counts["ECS_SERVICE"]
+                if remaining <= 0:
+                    services_truncated = True
+                    break
+                srv_arns, truncated = collect_pages(
+                    c, "list_services", "serviceArns", max_items=remaining,
+                    cluster=cluster["clusterArn"], time_check=time_check,
+                )
+                services_truncated = services_truncated or truncated
+                counts["ECS_SERVICE"] += len(srv_arns)
+                for service_offset in range(0, len(srv_arns), 10):
+                    services = c.describe_services(
+                        cluster=cluster["clusterArn"],
+                        services=srv_arns[service_offset:service_offset + 10],
+                    ).get("services", [])
                     for srv in services:
+                        remember("ECS_SERVICE", srv["serviceName"], srv["serviceName"])
                         add(evaluate_ecs_service(srv, cfg), srv["serviceArn"])
-            except (ClientError, BotoCoreError):
-                pass
+            if services_truncated:
+                break
+        limited("ECS_SERVICE", services_truncated)
 
     def auto_scaling_groups():
         c = client("autoscaling")
@@ -598,6 +673,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["AUTO_SCALING_GROUP"] = len(resources)
         limited("AUTO_SCALING_GROUP", truncated)
         for asg in resources:
+            remember("AUTO_SCALING_GROUP", asg["AutoScalingGroupName"], asg["AutoScalingGroupName"])
             time_check()
             add(evaluate_auto_scaling_group(asg, cfg), asg.get("AutoScalingGroupARN", asg["AutoScalingGroupName"]))
 
@@ -605,20 +681,24 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         c = client("apigateway")
         c2 = client("apigatewayv2")
         apis = []
+        truncated = False
         if c is not None:
-            try:
-                apis.extend(c.get_rest_apis().get("items", []))
-            except (ClientError, BotoCoreError):
-                pass
+            rest, rest_truncated = collect_pages(c, "get_rest_apis", "items", time_check=time_check)
+            apis.extend(rest)
+            truncated = truncated or rest_truncated
         if c2 is not None:
-            try:
-                apis.extend(c2.get_apis().get("Items", []))
-            except (ClientError, BotoCoreError):
-                pass
+            http, http_truncated = collect_pages(c2, "get_apis", "Items", time_check=time_check)
+            apis.extend(http)
+            truncated = truncated or http_truncated
+        if len(apis) > RESOURCE_LIMIT:
+            truncated = True
+            apis = apis[:RESOURCE_LIMIT]
         counts["API_GATEWAY"] = len(apis)
-        for api_item in apis[:RESOURCE_LIMIT]:
+        limited("API_GATEWAY", truncated)
+        for api_item in apis:
             time_check()
             aid = api_item.get("id") or api_item.get("ApiId", "")
+            remember("API_GATEWAY", aid, api_item.get("name") or api_item.get("Name") or aid)
             queries = _queries("AWS/ApiGateway", "ApiId", aid, [("Count", "Sum", "requests")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
             add(evaluate_api_gateway(api_item, series.get("requests", []), cfg, start), aid)
@@ -634,11 +714,8 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             time_check()
             t_arn = topic["TopicArn"]
             t_name = t_arn.split(":")[-1]
-            attrs = {}
-            try:
-                attrs = c.get_topic_attributes(TopicArn=t_arn).get("Attributes", {})
-            except (ClientError, BotoCoreError):
-                pass
+            remember("SNS_TOPIC", t_name, t_name)
+            attrs = c.get_topic_attributes(TopicArn=t_arn).get("Attributes", {})
             queries = _queries("AWS/SNS", "TopicName", t_name, [("NumberOfMessagesPublished", "Sum", "published")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
             add(evaluate_sns_topic(t_arn, attrs, series.get("published", []), cfg, start), t_arn)
@@ -651,12 +728,9 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["EVENTBRIDGE_RULE"] = len(resources)
         limited("EVENTBRIDGE_RULE", truncated)
         for rule_item in resources:
+            remember("EVENTBRIDGE_RULE", rule_item["Name"], rule_item["Name"])
             time_check()
-            targets = []
-            try:
-                targets = c.list_targets_by_rule(Rule=rule_item["Name"]).get("Targets", [])
-            except (ClientError, BotoCoreError):
-                pass
+            targets = c.list_targets_by_rule(Rule=rule_item["Name"]).get("Targets", [])
             add(evaluate_eventbridge_rule(rule_item, targets, cfg), rule_item.get("Arn", rule_item["Name"]))
 
     def step_functions():
@@ -667,6 +741,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["STEP_FUNCTION"] = len(resources)
         limited("STEP_FUNCTION", truncated)
         for sm in resources:
+            remember("STEP_FUNCTION", sm["name"], sm["name"])
             time_check()
             sm_arn = sm["stateMachineArn"]
             queries = _queries("AWS/States", "StateMachineArn", sm_arn, [("ExecutionsStarted", "Sum", "execs")])
@@ -682,7 +757,17 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         limited("VPC_ENDPOINT", truncated)
         for vpce in resources:
             time_check()
-            add(evaluate_vpc_endpoint(vpce, [], cfg, start), vpce["VpcEndpointId"])
+            endpoint_id = vpce["VpcEndpointId"]
+            remember("VPC_ENDPOINT", endpoint_id, tag_name(vpce.get("Tags")))
+            queries = _queries("AWS/PrivateLinkEndpoints", "VpcEndpointId", endpoint_id, [
+                ("BytesProcessed", "Sum", "bytes"),
+                ("ActiveConnections", "Maximum", "connections"),
+            ])
+            cw = client("cloudwatch")
+            series = metric_series(cw, queries, start, end, time_check=time_check) if cw is not None else {"bytes": [], "connections": []}
+            add(evaluate_vpc_endpoint(
+                vpce, {"bytes": series.get("bytes", []), "connections": series.get("connections", [])}, cfg, start,
+            ), endpoint_id)
 
 
     def sagemaker_endpoints():
@@ -698,6 +783,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for ep in resources:
             time_check()
             name = ep["EndpointName"]
+            remember("SAGEMAKER_ENDPOINT", name, name)
             queries = _queries("AWS/SageMaker", "EndpointName", name, [("Invocations", "Sum", "invocations")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
             add(evaluate_sagemaker_endpoint(ep, series.get("invocations", []), cfg, start), ep.get("EndpointArn", name))
@@ -706,24 +792,23 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         c = client("opensearch")
         if c is None:
             return
-        try:
-            names = [item["DomainName"] for item in c.list_domain_names().get("DomainNames", [])]
-        except (KeyError, AttributeError):
-            return
-        if not names:
-            return
+        names = [item["DomainName"] for item in c.list_domain_names().get("DomainNames", [])]
+        truncated = len(names) > RESOURCE_LIMIT
+        names = names[:RESOURCE_LIMIT]
         counts["OPENSEARCH_DOMAIN"] = len(names)
-        try:
-            domains = c.describe_domains(DomainNames=names[:100]).get("DomainStatusList", [])
-        except (KeyError, AttributeError):
-            return
+        limited("OPENSEARCH_DOMAIN", truncated)
+        domains = []
+        for offset in range(0, len(names), 5):
+            domains.extend(c.describe_domains(DomainNames=names[offset:offset + 5]).get("DomainStatusList", []))
         for d in domains:
             time_check()
             name = d["DomainName"]
+            remember("OPENSEARCH_DOMAIN", name, name)
             queries = _queries("AWS/ES", "DomainName", name, [("SearchRate", "Sum", "search"), ("IndexingRate", "Sum", "index")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
-            requests = series.get("search", []) + series.get("index", [])
-            add(evaluate_opensearch_domain(d, requests, cfg, start), d.get("ARN", name))
+            add(evaluate_opensearch_domain(
+                d, {"search": series.get("search", []), "index": series.get("index", [])}, cfg, start,
+            ), d.get("ARN", name))
 
     def redshift_clusters():
         c = client("redshift")
@@ -738,6 +823,7 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for rc in resources:
             time_check()
             cid = rc["ClusterIdentifier"]
+            remember("REDSHIFT_CLUSTER", cid, cid)
             queries = _queries("AWS/Redshift", "ClusterIdentifier", cid, [("DatabaseConnections", "Sum", "conns")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
             add(evaluate_redshift_cluster(rc, series.get("conns", []), cfg, start), cid)
@@ -755,21 +841,22 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for cluster in resources:
             time_check()
             name = cluster["ClusterName"]
+            remember("MSK_CLUSTER", name, name)
             queries = _queries("AWS/Kafka", "Cluster Name", name, [("BytesInPerSec", "Sum", "bytes_in"), ("BytesOutPerSec", "Sum", "bytes_out")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
-            traffic = series.get("bytes_in", []) + series.get("bytes_out", [])
-            add(evaluate_msk_cluster(cluster, traffic, cfg, start), cluster.get("ClusterArn", name))
+            add(evaluate_msk_cluster(
+                cluster, {"bytes_in": series.get("bytes_in", []), "bytes_out": series.get("bytes_out", [])}, cfg, start,
+            ), cluster.get("ClusterArn", name))
 
     def kinesis_streams():
         c = client("kinesis")
         if c is None:
             return
-        try:
-            names = c.list_streams().get("StreamNames", [])
-        except (KeyError, AttributeError):
-            return
+        names, truncated = collect_pages(c, "list_streams", "StreamNames", time_check=time_check)
         counts["KINESIS_STREAM"] = len(names)
-        for name in names[:RESOURCE_LIMIT]:
+        limited("KINESIS_STREAM", truncated)
+        for name in names:
+            remember("KINESIS_STREAM", name, name)
             time_check()
             queries = _queries("AWS/Kinesis", "StreamName", name, [("IncomingRecords", "Sum", "records")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
@@ -780,16 +867,24 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         c = client("cloudfront")
         if c is None:
             return
-        try:
-            items = c.list_distributions().get("DistributionList", {}).get("Items", [])
-        except (KeyError, AttributeError):
-            return
+        items = []
+        truncated = False
+        for page in _pages(c, "list_distributions", time_check):
+            page_items = page.get("DistributionList", {}).get("Items", [])
+            remaining = RESOURCE_LIMIT + 1 - len(items)
+            items.extend(page_items[:remaining])
+            if len(items) > RESOURCE_LIMIT:
+                items = items[:RESOURCE_LIMIT]
+                truncated = True
+                break
         counts["CLOUDFRONT_DISTRIBUTION"] = len(items)
+        limited("CLOUDFRONT_DISTRIBUTION", truncated)
         try:
             cw_global = session.client("cloudwatch", region_name="us-east-1", config=SDK_CONFIG)
         except Exception:
             cw_global = client("cloudwatch")
-        for dist in items[:RESOURCE_LIMIT]:
+        for dist in items:
+            remember("CLOUDFRONT_DISTRIBUTION", dist["Id"], dist.get("Comment") or dist.get("DomainName") or dist["Id"])
             time_check()
             did = dist["Id"]
             queries = [{
@@ -822,35 +917,34 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         for vault in resources:
             time_check()
             vname = vault["BackupVaultName"]
+            remember("BACKUP_VAULT", vname, vname)
             expired_count = 0
             total_count = 0
-            try:
-                points = c.list_recovery_points_by_backup_vault(BackupVaultName=vname, MaxResults=100).get("RecoveryPoints", [])
-                total_count = len(points)
-                expired_count = sum(1 for p in points if p.get("Status") == "EXPIRED")
-            except (KeyError, AttributeError, ClientError, BotoCoreError):
-                pass
+            for page in _pages(c, "list_recovery_points_by_backup_vault", time_check, BackupVaultName=vname):
+                points = page.get("RecoveryPoints", [])
+                total_count += len(points)
+                expired_count += sum(1 for point in points if point.get("Status") == "EXPIRED")
             add(evaluate_backup_vault(vault, expired_count, total_count, cfg), vault.get("BackupVaultArn", vname))
 
     def eks_clusters():
         c = client("eks")
         if c is None:
             return
-        try:
-            names = c.list_clusters().get("clusters", [])
-        except (KeyError, AttributeError):
-            return
+        names, truncated = collect_pages(c, "list_clusters", "clusters", time_check=time_check)
         counts["EKS_CLUSTER"] = len(names)
-        for name in names[:RESOURCE_LIMIT]:
+        limited("EKS_CLUSTER", truncated)
+        for name in names:
+            remember("EKS_CLUSTER", name, name)
             time_check()
-            nodegroups = 0
-            fargate = 0
-            try:
-                cluster = c.describe_cluster(name=name).get("cluster", {})
-                nodegroups = len(c.list_nodegroups(clusterName=name).get("nodegroups", []))
-                fargate = len(c.list_fargate_profiles(clusterName=name).get("fargateProfileNames", []))
-            except (KeyError, AttributeError, ClientError, BotoCoreError):
-                continue
+            cluster = c.describe_cluster(name=name).get("cluster", {})
+            nodegroups = sum(
+                len(page.get("nodegroups", []))
+                for page in _pages(c, "list_nodegroups", time_check, clusterName=name)
+            )
+            fargate = sum(
+                len(page.get("fargateProfileNames", []))
+                for page in _pages(c, "list_fargate_profiles", time_check, clusterName=name)
+            )
             add(evaluate_eks_cluster(cluster, nodegroups, fargate, cfg), cluster.get("arn", name))
 
     def fsx_filesystems():
@@ -864,12 +958,14 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         counts["FSX_FILE_SYSTEM"] = len(resources)
         limited("FSX_FILE_SYSTEM", truncated)
         for fs in resources:
+            remember("FSX_FILE_SYSTEM", fs["FileSystemId"], tag_name(fs.get("Tags")) or fs.get("FileSystemId"))
             time_check()
             fid = fs["FileSystemId"]
             queries = _queries("AWS/FSx", "FileSystemId", fid, [("DataReadBytes", "Sum", "read"), ("DataWriteBytes", "Sum", "write")])
             series = metric_series(client("cloudwatch"), queries, start, end, time_check=time_check)
-            traffic = series.get("read", []) + series.get("write", [])
-            add(evaluate_fsx_filesystem(fs, traffic, cfg, start), fid)
+            add(evaluate_fsx_filesystem(
+                fs, {"read": series.get("read", []), "write": series.get("write", [])}, cfg, start,
+            ), fid)
 
     def memorydb_clusters():
         c = client("memorydb")
@@ -883,25 +979,44 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         limited("MEMORYDB_CLUSTER", truncated)
         for cluster in resources:
             time_check()
-            add(evaluate_memorydb_cluster(cluster, [], cfg, start), cluster.get("ARN", cluster["Name"]))
+            name = cluster["Name"]
+            remember("MEMORYDB_CLUSTER", name, name)
+            queries = _queries("AWS/MemoryDB", "ClusterName", name, [("CurrConnections", "Maximum", "connections")])
+            cw = client("cloudwatch")
+            series = metric_series(cw, queries, start, end, time_check=time_check) if cw is not None else {"connections": []}
+            add(evaluate_memorydb_cluster(cluster, series.get("connections", []), cfg, start), cluster.get("ARN", name))
 
-    def docdb_neptune_clusters():
-        c = client("rds")
+    def documentdb_clusters():
+        c = client("docdb")
         if c is None:
             return
-        try:
-            resources, truncated = collect_pages(c, "describe_db_clusters", "DBClusters", time_check=time_check)
-        except (KeyError, AttributeError):
-            return
+        resources, truncated = collect_pages(c, "describe_db_clusters", "DBClusters", time_check=time_check)
+        counts["DOCUMENTDB_CLUSTER"] = len(resources)
+        limited("DOCUMENTDB_CLUSTER", truncated)
         for cluster in resources:
             time_check()
-            engine = cluster.get("Engine", "")
-            if engine == "docdb":
-                counts["DOCUMENTDB_CLUSTER"] = counts.get("DOCUMENTDB_CLUSTER", 0) + 1
-                add(evaluate_documentdb_cluster(cluster, [], cfg, start), cluster["DBClusterIdentifier"])
-            elif engine == "neptune":
-                counts["NEPTUNE_CLUSTER"] = counts.get("NEPTUNE_CLUSTER", 0) + 1
-                add(evaluate_neptune_cluster(cluster, [], cfg, start), cluster["DBClusterIdentifier"])
+            cluster_id = cluster["DBClusterIdentifier"]
+            remember("DOCUMENTDB_CLUSTER", cluster_id, cluster_id)
+            queries = _queries("AWS/DocDB", "DBClusterIdentifier", cluster_id, [("DatabaseConnections", "Maximum", "connections")])
+            cw = client("cloudwatch")
+            series = metric_series(cw, queries, start, end, time_check=time_check) if cw is not None else {"connections": []}
+            add(evaluate_documentdb_cluster(cluster, series.get("connections", []), cfg, start), cluster_id)
+
+    def neptune_clusters():
+        c = client("neptune")
+        if c is None:
+            return
+        resources, truncated = collect_pages(c, "describe_db_clusters", "DBClusters", time_check=time_check)
+        counts["NEPTUNE_CLUSTER"] = len(resources)
+        limited("NEPTUNE_CLUSTER", truncated)
+        for cluster in resources:
+            time_check()
+            cluster_id = cluster["DBClusterIdentifier"]
+            remember("NEPTUNE_CLUSTER", cluster_id, cluster_id)
+            queries = _queries("AWS/Neptune", "DBClusterIdentifier", cluster_id, [("DatabaseConnections", "Maximum", "connections")])
+            cw = client("cloudwatch")
+            series = metric_series(cw, queries, start, end, time_check=time_check) if cw is not None else {"connections": []}
+            add(evaluate_neptune_cluster(cluster, series.get("connections", []), cfg, start), cluster_id)
 
 
     operations = []
@@ -917,12 +1032,14 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
         operations.extend((("RDS_SNAPSHOT", rds_snapshots), ("EFS", efs_filesystems), ("ECR", ecr_repositories), ("FSX", fsx_filesystems), ("BACKUP", backup_vaults)))
     if "database" in service_groups:
         operations.append(("RDS", rds_instances))
-    if "nosql" in service_groups or "cache" in service_groups:
-        operations.extend((("DYNAMODB_TABLE", dynamodb_tables), ("ELASTICACHE", elasticache_clusters), ("MEMORYDB", memorydb_clusters), ("DOCDB_NEPTUNE", docdb_neptune_clusters)))
+    if "nosql" in service_groups:
+        operations.extend((("DYNAMODB_TABLE", dynamodb_tables), ("ELASTICACHE", elasticache_clusters), ("MEMORYDB", memorydb_clusters), ("DOCUMENTDB_CLUSTER", documentdb_clusters), ("NEPTUNE_CLUSTER", neptune_clusters)))
     if "network" in service_groups:
         operations.extend((("EIP", eip_addresses), ("NAT_GATEWAY", nat_gateways), ("ELB", load_balancers)))
     if "security" in service_groups:
-        operations.extend((("SECURITY_GROUP", security_groups), ("VPC_ENDPOINT", vpc_endpoints), ("CLOUDFRONT", cloudfront_distributions)))
+        operations.extend((("SECURITY_GROUP", security_groups), ("VPC_ENDPOINT", vpc_endpoints)))
+        if global_region is None or region == global_region:
+            operations.append(("CLOUDFRONT", cloudfront_distributions))
     if "monitoring" in service_groups:
         operations.append(("LOG_GROUP", log_groups))
     if "integration" in service_groups:
@@ -954,4 +1071,4 @@ def collect_region(session, region, account_id, cfg, service_groups, now, time_c
             partial = True
             errors.append({"type": kind, "code": _error_code(error)})
 
-    return {"counts": counts, "findings": findings, "errors": errors, "partial": partial}
+    return {"counts": counts, "inventory": inventory, "findings": findings, "errors": errors, "partial": partial}

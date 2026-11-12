@@ -89,7 +89,7 @@ class FindingObservationWorkflow(unittest.TestCase):
             counts[finding["type"]] = counts.get(finding["type"], 0) + 1
         collected = {"findings": findings, "counts": counts, "errors": errors or [], "partial": partial}
 
-        def collect(*args):
+        def collect(*args, **kwargs):
             if remaining_after_collection is not None:
                 self.context.get_remaining_time_in_millis.return_value = remaining_after_collection
             return collected

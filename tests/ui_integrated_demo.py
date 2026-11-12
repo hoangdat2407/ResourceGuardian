@@ -4,7 +4,7 @@ Main API responses use demo.py over HTTP. The browser only intercepts deliberate
 503/pending faults; pagination fixtures are inserted into this process's RAM.
 """
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 from http.server import ThreadingHTTPServer
 import json
@@ -30,8 +30,9 @@ KINDS = {'EC2', 'EBS', 'EIP', 'SNAPSHOT', 'S3_MULTIPART', 'RDS', 'NAT_GATEWAY', 
 REGIONS = ['ap-southeast-1', 'ap-southeast-2', 'us-east-1']
 
 
-def utc_label(value):
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S UTC')
+def vn_time(value):
+    instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    return instant.astimezone(timezone(timedelta(hours=7))).strftime('%H:%M:%S')
 
 
 def main():
@@ -101,6 +102,11 @@ def main():
             def navigate(name):
                 page.locator('[data-page="' + name + '"]').click()
                 expect(page.locator('#page-' + name)).to_be_visible()
+            def open_advanced():
+                details = page.locator('#advanced-filters')
+                if not details.evaluate('(el)=>el.open'):
+                    details.locator('summary').click()
+
 
             def row(item):
                 target = page.locator('#findings-list tbody tr').filter(
@@ -137,6 +143,7 @@ def main():
 
             navigate('findings')
             expect(page.locator('#findings-list tbody tr')).to_have_count(10)
+            open_advanced()
             nine = {item['type']: item for item in reversed(original)}
             current_evidence = {}
             for kind, item in nine.items():
@@ -145,8 +152,8 @@ def main():
                 expect(value('type')).to_have_text(kind)
                 expect(value('account_id')).to_have_text(item['account_id'])
                 expect(value('rule_id')).to_have_text(item['rule_id'])
-                expect(value('first_seen_at')).to_have_text(utc_label(item['first_seen_at']))
-                expect(value('last_seen_at')).to_have_text(utc_label(item['last_seen_at']))
+                expect(value('first_seen_at')).to_contain_text(vn_time(item['first_seen_at']))
+                expect(value('last_seen_at')).to_contain_text(vn_time(item['last_seen_at']))
                 current_evidence[item['finding_id']] = page.locator('#finding-detail-content').inner_text()
                 page.keyboard.press('Escape')
                 expect(row(item).locator('.finding-open')).to_be_focused()
@@ -197,8 +204,10 @@ def main():
             expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
             open_menu(target).locator('.feedback-keep').click()
             expect(row(target)).to_have_count(0)
+            page.locator('#feedback-tab').click()
             expect(manager(target)).to_be_visible()
             manager(target).locator('.feedback-unkeep').click()
+            page.locator('#results-tab').click()
             expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
             for days in [1, 30]:
                 open_menu(target).locator('.feedback-ignore').click()
@@ -208,11 +217,13 @@ def main():
                 page.locator('#ignore-confirm').click()
                 expect(page.locator('#ignore-dialog')).not_to_be_visible()
                 expect(row(target)).to_have_count(0)
+                page.locator('#feedback-tab').click()
                 expect(manager(target)).to_be_visible()
                 saved = next(item for item in api('/feedback')['results'] if item['finding_id'] == target['finding_id'])
                 assert before + int(days) * 86400 - 2 <= saved['ignore_until'] <= time.time() + int(days) * 86400 + 2
                 assert saved['acknowledged'] is True and saved['kept'] is False
                 manager(target).locator('.feedback-unignore').click()
+                page.locator('#results-tab').click()
                 expect(row(target).locator('.feedback-ack')).to_have_text('Bỏ đã xem')
             checks.append('Keep/unkeep and one/thirty-day ignore/cancel work through real PUT and GET; clearing one flag preserves acknowledged and restores the retained candidate')
 
@@ -314,6 +325,7 @@ def main():
             checks.append('The real demo paginates forty-five history rows across three regions; detail includes a region beyond page one, page errors retain data/selection and keyboard retry/reset recovers')
 
             navigate('findings')
+            page.locator('#feedback-tab').click()
             page.locator('#refresh-feedback').click()
             expect(page.locator('#feedback-list .feedback-record')).to_have_count(20)
             page.locator('#feedback-load-more').click()
@@ -335,11 +347,15 @@ def main():
                 for section in ['overview', 'findings', 'history', 'connection', 'settings']:
                     navigate(section)
                     if section == 'findings':
+                        page.locator('#feedback-tab').click()
                         page.locator('#refresh-feedback').click()
                         expect(page.locator('#feedback-list .feedback-record')).to_have_count(3)
+                        page.locator('#results-tab').click()
+                        open_advanced()
                         page.locator('#filter-type').select_option('S3_MULTIPART')
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (width, section)
                 navigate('findings')
+                open_advanced()
                 page.locator('#filter-region').select_option(REGIONS[0])
                 expect(page.locator('#findings-list tbody tr')).to_have_count(1)
                 page.locator('#findings-list .finding-open').click()
@@ -347,7 +363,7 @@ def main():
                 expect(page.locator('#finding-dialog')).to_be_visible()
                 page.screenshot(path=str(OUT / ('integrated-evidence-' + str(width) + '.png')))
                 screenshots.append('integrated-evidence-' + str(width) + '.png')
-                page.get_by_role('heading', name='Bằng chứng chính (S3_MULTIPART)', exact=True).scroll_into_view_if_needed()
+                page.get_by_role('heading', name='Bằng chứng', exact=True).scroll_into_view_if_needed()
                 page.screenshot(path=str(OUT / ('integrated-evidence-scrolled-' + str(width) + '.png')))
                 screenshots.append('integrated-evidence-scrolled-' + str(width) + '.png')
                 page.keyboard.press('Escape')

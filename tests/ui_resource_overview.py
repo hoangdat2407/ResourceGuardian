@@ -182,40 +182,40 @@ def main():
             expect(page.locator('#findings-count-review')).to_have_text(str(len(unique(FINDINGS_A, 'REVIEW'))))
             expect(page.locator('#findings-count-observing')).to_have_text(str(len(unique(FINDINGS_A, 'OBSERVING'))))
             expect(page.locator('#findings-count-insufficient')).to_have_text(str(len(unique(FINDINGS_A, 'INSUFFICIENT_DATA'))))
-            expect(page.locator('#resource-overview-context')).to_contain_text('123456789012')
+            expect(page.locator('#review')).to_have_text(str(len(unique(FINDINGS_A, 'REVIEW'))))
+            expect(page.locator('#observing')).to_have_text(str(len(unique(FINDINGS_A, 'OBSERVING'))))
+            expect(page.locator('#insufficient')).to_have_text(str(len(unique(FINDINGS_A, 'INSUFFICIENT_DATA'))))
+            expect(page.locator('#resource-overview-context')).not_to_contain_text('123456789012')
             expect(page.locator('#findings-scope')).to_contain_text(str(len(FINDINGS_A)) + ' cảnh báo')
             assert page.locator('#findings-list').inner_text().count('vol-other-account') == 0, 'foreign region leaked'
             checks.append('cards use backend total and unique resources; scope labels findings; foreign region ignored')
 
             # 2/4/5: chart and accordions derive from the same REVIEW findings.
-            expect(page.locator('.service-chart-card h2')).to_have_text('Tài nguyên cần kiểm tra theo dịch vụ')
-            expect(page.locator('.chart-subtitle')).to_contain_text('tài nguyên duy nhất')
-            expect(page.locator('.chart-subtitle')).to_contain_text('Thanh dài nhất')
+            expect(page.locator('.service-chart-card h2')).to_have_text('Phân bố tài nguyên cần kiểm tra')
             bars = page.locator('.service-bar')
-            expect(bars).to_have_count(6)
+            expect(bars).to_have_count(5)
             first = bars.first
             expect(first.locator('.service-bar-label')).to_have_text('Amazon EBS')
-            expect(first.locator('.service-bar-count')).to_have_text('3 tài nguyên cần kiểm tra')
-            expect(bars.nth(1).locator('.service-bar-count')).to_have_text('2 tài nguyên cần kiểm tra')
-            expect(page.locator('#service-chart-total')).to_contain_text('cảnh báo REVIEW')
+            expect(first.locator('.service-bar-count')).to_have_text('3 tài nguyên')
+            expect(bars.nth(1).locator('.service-bar-count')).to_have_text('2 tài nguyên')
+            expect(page.locator('#service-chart-total')).to_have_text(str(len(unique(FINDINGS_A, 'REVIEW'))) + ' tài nguyên')
             # service name and count share the first grid row; the bar track sits below
             box_label = first.locator('.service-bar-label').bounding_box()
             box_count = first.locator('.service-bar-count').bounding_box()
             box_track = first.locator('.service-bar-track').bounding_box()
             assert abs(box_label['y'] - box_count['y']) < 6, (box_label, box_count)
             assert box_track['y'] > box_count['y'] + box_count['height'] - 1, (box_track, box_count)
-            expected_order = ['Amazon EBS', 'Amazon EC2', 'Amazon RDS', 'Amazon S3', 'Application Load Balancer',
-                              'Elastic IP']
+            expected_order = ['Amazon EBS', 'Amazon EC2', 'Amazon RDS', 'Amazon S3', 'Application Load Balancer']
             labels = page.locator('.service-bar-label').all_text_contents()
             assert labels == expected_order, labels
             widths = [page.locator('.service-bar-fill').nth(i).evaluate('(el)=>parseFloat(el.style.width)') for i in range(3)]
             assert abs(widths[0] - 100) < .01 and abs(widths[1] - 200 / 3) < .5 and abs(widths[2] - 100 / 3) < .5, widths
             page.locator('#service-chart-more').click()
             expect(page.locator('.service-bar')).to_have_count(8)
-            expect(page.locator('#service-chart-more')).to_have_text('Thu gọn bớt dịch vụ')
+            expect(page.locator('#service-chart-more')).to_have_text('Thu gọn')
             page.locator('#service-chart-more').click()
-            expect(page.locator('.service-bar')).to_have_count(6)
-            checks.append('chart: 6 of 7 services, sorted, proportional widths, expandable')
+            expect(page.locator('.service-bar')).to_have_count(5)
+            checks.append('chart: top 5 services, sorted, proportional widths and expandable')
 
             ebs_group = page.locator('#findings-list section.service-group[data-level="REVIEW"][data-service="EBS"]')
             expect(ebs_group).to_be_visible()
@@ -253,14 +253,17 @@ def main():
             expect(toggle).to_have_attribute('aria-expanded', 'false')
             checks.append('accordion toggles with keyboard and exposes aria-expanded')
 
+            page.locator('#advanced-filters summary').click()
+
             # 6: filters update the list and the chart without rewriting scan totals.
-            page.locator('#filter-region').select_option('ap-southeast-2')
+            assert page.locator('#filter-region option').evaluate_all('(items)=>items.map(item=>item.value)') == ['', REGION]
+            page.locator('#search').fill('zzzz-no-result')
             expect(page.locator('#findings-list')).to_contain_text('Không khớp bộ lọc')
             expect(page.locator('#findings-count-checked')).to_have_text(str(sum(COUNT_A.values())))
             expect(page.locator('#findings-count-review')).to_have_text(str(len(unique(FINDINGS_A, 'REVIEW'))))
             expect(page.locator('.service-bar')).to_have_count(0)
-            expect(page.locator('#findings-scope')).to_contain_text('đang áp dụng bộ lọc')
-            page.locator('#filter-region').select_option(REGION)
+            expect(page.locator('#findings-scope')).to_contain_text('Đang hiển thị')
+            page.locator('#search').fill('')
             expect(page.locator('#findings-list tbody tr')).to_have_count(len(FINDINGS_A))
             page.locator('#filter-level').select_option('INSUFFICIENT_DATA')
             expect(page.locator('#findings-list tbody tr')).to_have_count(1)
@@ -289,11 +292,10 @@ def main():
             page.evaluate('selectedScanId=null; refresh()')
             expect(page.locator('#scan-errors-card')).to_be_visible()
             expect(page.locator('#findings-count-checked')).to_have_text('—')
-            expect(page.locator('#findings-count-review')).to_have_text('—')
+            expect(page.locator('#findings-count-review')).to_have_text('0')
             expect(page.locator('.chart-note')).to_contain_text('chưa đầy đủ')
             expect(page.locator('.chart-note')).to_have_class(re.compile('chart-note-warning'))
-            expect(page.locator('#findings-list')).not_to_contain_text('an toàn')
-            checks.append('PARTIAL scan shows errors, unknown totals and no safety claim')
+            checks.append('PARTIAL scan shows errors, unknown inventory total and retained finding counts')
 
             # 1/14: switching scans replaces overview, chart and list; switching back restores scan A only.
             state['latest'] = SCAN_B

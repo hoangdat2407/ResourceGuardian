@@ -223,6 +223,7 @@ def main():
                 pending.fulfill(status=status, content_type='application/json', body=json.dumps(result))
 
             expect(page.locator('#findings-list tbody tr')).to_have_count(9)
+            page.locator('#advanced-filters summary').click()
             for item in original:
                 click_action(item, 'feedback-ack')
                 expect(action(item, 'feedback-ack')).to_have_text('Bỏ đã xem')

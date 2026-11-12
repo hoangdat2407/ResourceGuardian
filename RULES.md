@@ -2,11 +2,11 @@
 
 ## 1. Phạm vi nghiệm thu
 
-Phạm vi người dùng đã chốt: toàn bộ rule/evidence cho **chín loại tài nguyên có collector hiện tại**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Backend tạo finding và lưu kết quả; dashboard hiện có chi tiết evidence, phản hồi và lịch sử phân trang.
+Phạm vi có hợp đồng evidence/missing-data nghiêm ngặt đã chốt gồm **chín loại tài nguyên lõi**: EC2, EBS volume, Elastic IP, EBS snapshot, S3 multipart upload, RDS instance, NAT Gateway, ALB và NLB. Backend tạo finding và lưu kết quả; dashboard hiện có chi tiết evidence, phản hồi và lịch sử phân trang.
 
-Report 2 trang 10 và 20 xác nhận MVP chín loại; sáu nhóm/cost là hướng mở rộng. Registry first/last giữ mốc trong 30 ngày không quan sát; metadata feedback lấy từ candidate đã xác minh. Observation EBS/EIP là cơ chế riêng, hai mốc first/last chỉ bổ sung trên finding của kết quả quét mới.
+Source hiện có 38 resource type, 39 rule ID và 40 threshold field; cả 38 type reachable qua 12 service group API. `ECR_IMAGE_OLD` đọc tuổi image thật từ `DescribeImages.imagePushedAt`; DocumentDB/Neptune dùng client riêng; CloudFront có một owner region xác định. Target role cần thêm `ecr:DescribeImages`. Hai client DocumentDB/Neptune dùng quyền IAM management `rds:DescribeDBClusters` đã có; không dùng prefix IAM không tồn tại `docdb:` hoặc `neptune:`. Các rule mở rộng chưa được xác minh đồng đều trên AWS thật.
 
-Báo cáo PDF định hướng sáu nhóm dịch vụ và đối chiếu dữ liệu chi phí. Chín loại trên nằm trong bốn nhóm `compute`, `storage`, `database`, `network`; chưa bao phủ mọi dịch vụ trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, hoặc dữ liệu billing/cost. Các phần này cần collector/input của Task 6 và bộ rule được chốt tiếp; không được đánh dấu hoàn tất theo toàn bộ phạm vi PDF.
+Registry first/last giữ mốc trong 30 ngày không quan sát; metadata feedback lấy từ candidate đã xác minh. Observation EBS/EIP là cơ chế riêng, hai mốc first/last chỉ bổ sung trên finding của kết quả quét mới. Không dùng các số khai báo 38/39/40 để thay thế collector evidence, local behavior test hoặc AWS E2E.
 
 `src/rules.py` chứa helper/evaluator thuần, không gọi AWS, database hoặc đồng hồ hệ thống. `src/collectors.py` đọc inventory/metrics, gọi đúng evaluator và bổ sung ngữ cảnh. `src/app.py` quản lý observation, tenant/connection, ngoại lệ, giới hạn và persistence. Rule tạo ứng viên cần người dùng xác minh, không tự dừng/xóa/sửa tài nguyên AWS.
 
@@ -99,6 +99,10 @@ Khi collector dừng ở ngưỡng dự trữ 60 giây và trả PARTIAL, worker
 
 GET `/findings` overlay feedback hiện tại và giữ hai mốc từ candidate đã lưu; GET `/scans/{id}` và `/history` trả snapshot của scan, không truy vấn registry để sửa mốc cũ. Lịch sử thiếu timestamps vẫn trả được và không được backfill. Observation của mọi finding đã collect được ghi dù sau đó bị Keep/Ignore hoặc bị cắt khỏi pool; các API không công bố item OBSF hay private candidates.
 
+Inventory identity là tập riêng với findings. Worker ghi page item theo key `TENANT#sub` / `INVENTORY#connection_version#scan_id#region#run_token#type#page`, tối đa 25 identity/page, TTL 30 ngày. Mỗi identity có `resource_id`, optional `resource_name`; service/type/region/account/scan/time nằm ở page/API context. `run_token` ngăn page của retry cũ trộn vào result terminal. RESULT chỉ giữ counts, `inventory_count`, `inventory_persisted`, `inventory_run_token` và completeness/error metadata; không nhét toàn bộ danh tính vào item 300 KiB.
+
+Source handler GET `/inventory` dùng DynamoDB Query trong partition tenant, ràng buộc connection version/scan/run token và cursor tenant+filter, không dùng table Scan. Scan legacy không có pages trả `aggregate_only`; UI không tạo ID giả. Đây là additive logical item model trên bảng hiện tại, không cần table replacement hay rewrite dữ liệu cũ, nhưng route HTTP API và target IAM vẫn cần review change set riêng trước deploy.
+
 Chữ ký evaluator thuần:
 
 ```python
@@ -135,8 +139,8 @@ Key observation: `OBS#<connection_version>#<region>#<type>#<resource_id>`, trong
 
 ## 6. Giới hạn, tương thích và nghiệm thu
 
-- Tối đa 100 tài nguyên/loại/region, 50 finding hiển thị; tối đa 100 private candidates, ưu tiên 50 finding đang hiện. Toàn bộ result JSON UTF-8 trước persistence giới hạn 300 KiB. Khi cắt pool do số lượng/kích thước, trả `PARTIAL` + `FINDING/CANDIDATE_LIMIT`; không khẳng định quét đầy đủ.
-- `finding_count` đếm finding nhìn thấy trong pool còn lưu trước cap hiển thị 50; khi pool bị cắt đây là số đếm trong phần còn giữ, không phải tổng toàn account. `total_candidate_count` là tổng trước retention. Finding bị loại do retention cần scan mới để phục hồi.
-- Trường mới là bổ sung; finding lịch sử có thể thiếu chúng và không được tự tính lại. Reason cũ được giữ cho các trạng thái cũ. Contract helper insufficient đã đổi sang evidence dict; caller và test phải dùng hợp đồng mới.
+- Tối đa 100 tài nguyên/loại/region, 50 finding hiển thị; tối đa 100 private candidates, ưu tiên 50 finding đang hiện. Toàn bộ RESULT JSON UTF-8 trước persistence giới hạn 300 KiB. Khi cắt resource/finding/candidate/item, trả `PARTIAL` cùng error code; không khẳng định quét đầy đủ.
+- `finding_count` đếm finding nhìn thấy trong pool còn lưu trước cap hiển thị 50; khi pool bị cắt đây là số đếm trong phần còn giữ, không phải tổng toàn account. `inventory_count` đếm identity đã persist của region/run; count aggregate theo type vẫn là count sau cap và có error truncation. Finding bị loại do retention cần scan mới để phục hồi.
+- Trường mới là bổ sung; finding/history legacy có thể thiếu timestamps hoặc inventory pages và không được tự tính lại. Reason cũ được giữ cho trạng thái cũ. Contract helper insufficient trả evidence dict; caller và test phải dùng hợp đồng mới.
 - Test cần chứng minh mọi rule/state/boundary/quality/exception và evidence qua collector → worker → API/history, isolation, lỗi/truncation và giới hạn. Chạy các suite liên quan theo [hướng dẫn kiểm thử](README.md#7-kiểm-thử).
 - Local unit/mock/Moto chứng minh logic và hợp đồng trong phạm vi chín loại; UI smoke/fixture kiểm tra hiển thị và thao tác dashboard. AWS E2E cần credentials/fixtures/quan sát theo thời gian và bằng chứng riêng. Không coi thiếu collector hoặc cloud chưa chạy là PASS.

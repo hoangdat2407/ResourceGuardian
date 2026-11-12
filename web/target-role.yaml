@@ -1,5 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Read only role created in the AWS account being scanned
+Description: Read-only scan role — uses ExternalId trust and an explicit API allowlist to prevent destructive AWS access
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    ref: [README.md, DEPLOYMENT.md]
 Parameters:
   ApiPrincipal: {Type: String}
   ScanPrincipal: {Type: String}
@@ -47,6 +52,7 @@ Resources:
                   - dynamodb:DescribeTable
                   - ecr:DescribeRepositories
                   - ecr:GetLifecyclePolicy
+                  - ecr:DescribeImages
                   - sqs:ListQueues
                   - sqs:GetQueueAttributes
                   - elasticache:DescribeCacheClusters

@@ -102,14 +102,15 @@ def main():
             page.goto(base + '/#overview')
 
             # TC01: dashboard is built from the latest scan only.
-            expect(page.locator('#scan-summary')).to_contain_text(SCAN_B)
+            expect(page.locator('#scan-summary')).not_to_contain_text(SCAN_B)
+            expect(page.locator('#scan-summary')).to_contain_text('Hoàn tất')
             expect(page.locator('#review')).to_have_text('1')
             expect(page.locator('#total')).to_have_text('4')
-            checks.append('TC01 dashboard shows latest scan id, totals and REVIEW count')
+            checks.append('TC01 dashboard shows latest scan status and totals without exposing the scan ID')
 
             page.locator('[data-page="findings"]').click()
             expect(page.locator('#scan-select')).to_have_value(SCAN_B)
-            expect(page.locator('#scan-snapshot-banner')).to_contain_text(SCAN_B)
+            expect(page.locator('#scan-snapshot-banner')).not_to_contain_text(SCAN_B)
             expect(page.locator('#findings-list tbody tr')).to_have_count(1)
             expect(page.locator('#findings-list')).to_contain_text('vol-scan-b-1')
             expect(page.locator('#findings-count-review')).to_have_text('1')
@@ -119,7 +120,7 @@ def main():
 
             # TC02: selecting scan A refreshes the whole view.
             page.locator('#scan-select').select_option(SCAN_A)
-            expect(page.locator('#scan-snapshot-banner')).to_contain_text(SCAN_A)
+            expect(page.locator('#scan-snapshot-banner')).not_to_contain_text(SCAN_A)
             expect(page.locator('#findings-list tbody tr')).to_have_count(2)
             expect(page.locator('#findings-list')).to_contain_text('vol-scan-a-1')
             expect(page.locator('#findings-list')).not_to_contain_text('vol-scan-b-1')
@@ -132,7 +133,7 @@ def main():
             expect(page.locator('#findings-list')).to_contain_text('vol-scan-b-1')
             expect(page.locator('#findings-list')).not_to_contain_text('vol-scan-a')
             expect(page.locator('#findings-count-observing')).to_have_text('0')
-            expect(page.locator('#scan-snapshot-banner')).to_contain_text('Thủ công')
+            expect(page.locator('#scan-snapshot-banner')).to_contain_text('Hoàn tất')
             checks.append('TC03 switching scan leaves no previous-scan rows or counts')
 
             # TC05: detail belongs to the selected scan and resource.
@@ -148,16 +149,22 @@ def main():
             # A scheduled partial scan can still be viewed, with its errors.
             page.locator('#scan-select').select_option(SCAN_C)
             expect(page.locator('#scan-errors-card')).to_be_visible()
-            expect(page.locator('#scan-errors-card')).to_contain_text('AccessDenied')
+            expect(page.locator('#scan-errors-card')).to_contain_text('Lượt quét chưa đầy đủ')
+            page.locator('#scan-errors-card .scan-error-detail').click()
+            expect(page.locator('#scan-detail-dialog')).to_contain_text('AccessDenied')
+            expect(page.locator('#scan-detail-dialog')).to_contain_text('Theo lịch')
+            page.locator('#close-scan-detail').click()
             expect(page.locator('#findings-list')).to_contain_text('Không có cảnh báo')
             expect(page.locator('#scan-snapshot-banner')).to_contain_text('Chưa đầy đủ')
-            expect(page.locator('#scan-snapshot-banner')).to_contain_text('Theo lịch')
-            checks.append('TC14 partial scan is viewable and exposes collection errors and trigger')
+            checks.append('TC14 partial scan stays explicit while errors and trigger remain available in scan detail')
 
             page.locator('#scan-select').select_option(SCAN_B)
-            page.locator('.copy-btn').click()
+            page.locator('#open-scan-detail').click()
+            expect(page.locator('#scan-detail-dialog')).to_contain_text(SCAN_B)
+            page.locator('#scan-detail-dialog .copy-btn').click()
             assert page.evaluate('navigator.clipboard.readText()') == SCAN_B
-            checks.append('TC10 scan id is copyable from the findings header')
+            page.locator('#close-scan-detail').click()
+            checks.append('TC10 scan ID is hidden from the main surface and copyable from scan detail')
 
             page.set_viewport_size({'width': 390, 'height': 844})
             page.locator('[data-page="findings"]').click()

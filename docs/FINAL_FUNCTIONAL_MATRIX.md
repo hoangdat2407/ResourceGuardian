@@ -1,6 +1,8 @@
 # MA TRẬN ĐÁNH GIÁ CHỨC NĂNG HỆ THỐNG
 ## CLOUD RESOURCE GUARDIAN — FINAL FUNCTIONAL MATRIX
 
+> **Historical snapshot, không phải trạng thái nghiệm thu hiện tại.** Các nhãn `LIVE_VERIFIED` bên dưới chỉ phản ánh evidence cũ và có thể vượt quá bằng chứng còn kiểm tra được. Dùng [FINAL_ACCEPTANCE_AUDIT.md](FINAL_ACCEPTANCE_AUDIT.md) làm ma trận hiện hành.
+
 ---
 
 ## 1. Phương pháp & Tiêu chí phân loại

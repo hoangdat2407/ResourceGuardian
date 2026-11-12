@@ -379,5 +379,55 @@ class TestThresholdValidationAndPersistence(unittest.TestCase):
             config({"rds_snapshot_days": 3.5})  # must be integer
 
 
+class TestResourceCoverageRegistry(unittest.TestCase):
+    def test_every_registered_resource_group_is_selectable_by_the_api(self):
+        registry_groups = {metadata["group"] for metadata in RESOURCE_REGISTRY.values()}
+        self.assertTrue(registry_groups <= set(app.ALL_SERVICE_GROUPS))
+        self.assertEqual(len(RESOURCE_REGISTRY), 38)
+
+    def test_documentdb_and_neptune_have_independent_inventory_caps(self):
+        class Session:
+            def __init__(self, pages):
+                self.pages = pages
+
+            def client(self, name, **_kwargs):
+                result_key, values = self.pages[name]
+                paginator = MagicMock()
+                paginator.paginate.return_value = [{result_key: values}]
+                service = MagicMock()
+                service.get_paginator.return_value = paginator
+                return service
+
+        docdb = [
+            {"DBClusterIdentifier": f"docdb-{index}", "Engine": "docdb", "Status": "available"}
+            for index in range(101)
+        ]
+        neptune = [{"DBClusterIdentifier": "neptune-1", "Engine": "neptune", "Status": "available"}]
+        session = Session({
+            "dynamodb": ("TableNames", []),
+            "elasticache": ("CacheClusters", []),
+            "memorydb": ("Clusters", []),
+            "docdb": ("DBClusters", docdb),
+            "neptune": ("DBClusters", neptune),
+        })
+
+        result = collect_region(
+            session, "ap-southeast-1", "123456789012", config({}, include_extended=True),
+            {"nosql"}, datetime(2026, 11, 5, 12, tzinfo=timezone.utc), lambda: None,
+            lambda *_args: 0,
+        )
+
+        self.assertEqual(result["counts"]["DOCUMENTDB_CLUSTER"], 100)
+        self.assertEqual(result["counts"]["NEPTUNE_CLUSTER"], 1)
+        self.assertTrue(result["partial"])
+        self.assertIn({"type": "DOCUMENTDB_CLUSTER", "code": "RESOURCE_LIMIT"}, result["errors"])
+
+    def test_every_registered_resource_type_has_a_detection_rule(self):
+        for resource_type, metadata in RESOURCE_REGISTRY.items():
+            with self.subTest(resource_type=resource_type):
+                self.assertTrue(metadata["rules"])
+                self.assertIn(resource_type, RULE_METADATA)
+
+
 if __name__ == "__main__":
     unittest.main()

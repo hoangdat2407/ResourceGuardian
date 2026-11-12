@@ -12,7 +12,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config
-from rules import config, keep, THRESHOLD_METADATA
+from rules import config, keep, THRESHOLD_METADATA, RESOURCE_REGISTRY
 from collectors import SDK_CONFIG, collect_region
 from email_report import build_email
 
@@ -22,7 +22,7 @@ table = boto3.resource("dynamodb").Table(os.environ["TABLE"])
 invoker = boto3.client("lambda")
 REGIONS = {"ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "us-east-1", "us-west-2", "eu-west-1"}
 SERVICE_GROUPS = ("compute", "storage", "database", "network")
-ALL_SERVICE_GROUPS = ("compute", "storage", "database", "network", "serverless", "monitoring", "security", "backup", "containers", "nosql", "integration")
+ALL_SERVICE_GROUPS = ("compute", "storage", "database", "network", "serverless", "monitoring", "security", "backup", "containers", "nosql", "integration", "analytics")
 STATIC_ROUTES = {
     "/me": {"GET"},
     "/connection": {"PUT"},
@@ -30,6 +30,7 @@ STATIC_ROUTES = {
     "/scan": {"POST"},
     "/scans": {"POST"},
     "/findings": {"GET"},
+    "/inventory": {"GET"},
     "/history": {"GET"},
     "/feedback": {"GET", "PUT"},
     "/notifications": {"PUT"},
@@ -49,6 +50,9 @@ RETENTION_SECONDS = 30 * 86400
 OBSERVATION_READ_LIMIT = 100
 OBSERVATION_WRITE_LIMIT = 98
 OBSERVATION_READ_ATTEMPTS = 3
+INVENTORY_PAGE_SIZE = 25
+INVENTORY_WRITE_LIMIT = 98
+INVENTORY_API_LIMIT = 500
 
 
 class ScanCooldown(Exception):
@@ -167,6 +171,88 @@ def transaction(actions):
 
 def deadline(marker):
     return marker.get("deadline_at", marker.get("created_at", marker.get("started_at", 0)) + JOB_SECONDS)
+
+
+def record_inventory_pages(marker, resources, time_check, account_id):
+    """Persist scan inventory outside RESULT as bounded, retry-safe page items."""
+    pk, region, version = (marker.get(key) for key in ("pk", "region", "connection_version"))
+    run_token = marker.get("run_token")
+    if (not isinstance(pk, str) or not pk.startswith("TENANT#")
+            or region not in REGIONS or not isinstance(version, str) or not version
+            or marker.get("sk") != "RESULT#" + region
+            or not isinstance(marker.get("scan_id"), str) or not marker["scan_id"]
+            or not isinstance(run_token, str) or not run_token
+            or not isinstance(account_id, str) or not re.fullmatch(r"\d{12}", account_id)
+            or not isinstance(resources, (list, tuple))):
+        raise ValueError("Invalid inventory context")
+    unique = {}
+    for resource in resources:
+        if not isinstance(resource, dict) or set(resource) - {"type", "service_id", "resource_id", "resource_name"}:
+            raise ValueError("Invalid inventory resource")
+        kind, service_id, resource_id = (resource.get(key) for key in ("type", "service_id", "resource_id"))
+        name = resource.get("resource_name")
+        if (kind not in RESOURCE_REGISTRY or service_id != RESOURCE_REGISTRY[kind]["service_id"]
+                or not isinstance(resource_id, str) or not 1 <= len(resource_id) <= 4096
+                or (name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 1024))):
+            raise ValueError("Invalid inventory resource")
+        unique[(kind, resource_id)] = {
+            "resource_id": resource_id,
+            **({"resource_name": name} if name else {}),
+        }
+    pages = []
+    expires = int(time.time()) + RETENTION_SECONDS
+    for kind in sorted({kind for kind, _ in unique}):
+        values = [value for (resource_kind, _), value in sorted(unique.items()) if resource_kind == kind]
+        for page_index in range(0, len(values), INVENTORY_PAGE_SIZE):
+            page = page_index // INVENTORY_PAGE_SIZE
+            pages.append({
+                "pk": pk,
+                "sk": "INVENTORY#{}#{}#{}#{}#{}#{:04d}".format(
+                    version, marker["scan_id"], region, run_token, kind, page,
+                ),
+                "connection_version": version,
+                "scan_id": marker["scan_id"],
+                "region": region,
+                "account_id": account_id,
+                "scanned_at": marker.get("started_at", marker.get("created_at")),
+                "run_token": run_token,
+                "type": kind,
+                "service_id": RESOURCE_REGISTRY[kind]["service_id"],
+                "resources": values[page_index:page_index + INVENTORY_PAGE_SIZE],
+                "expires": expires,
+            })
+    for start in range(0, len(pages), INVENTORY_WRITE_LIMIT):
+        time_check()
+        now = time.time()
+        writes = [{"Put": {"TableName": table.name, "Item": page}} for page in pages[start:start + INVENTORY_WRITE_LIMIT]]
+        checks = [
+            {"ConditionCheck": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": marker["sk"]},
+                "ConditionExpression": "#state = :running AND scan_id = :id AND connection_version = :v AND run_token = :token AND run_until > :now AND deadline_at > :now",
+                "ExpressionAttributeNames": {"#state": "status"},
+                "ExpressionAttributeValues": {":running": "RUNNING", ":id": marker["scan_id"], ":v": version,
+                                              ":token": run_token, ":now": now},
+            }},
+            {"ConditionCheck": {
+                "TableName": table.name, "Key": {"pk": pk, "sk": "PROFILE"},
+                "ConditionExpression": "connection_version = :v AND contains(regions, :region)",
+                "ExpressionAttributeValues": {":v": version, ":region": region},
+            }},
+        ]
+        try:
+            transaction(writes + checks)
+        except ClientError as error:
+            if not conditional_failure(error):
+                raise
+            latest, profile = get(pk, marker["sk"]), get(pk, "PROFILE")
+            now = time.time()
+            if (latest.get("status") != "RUNNING" or latest.get("scan_id") != marker["scan_id"]
+                    or latest.get("connection_version") != version or latest.get("run_token") != run_token
+                    or latest.get("run_until", 0) <= now or deadline(latest) <= now
+                    or profile.get("connection_version") != version or region not in profile.get("regions", [])):
+                return None
+            raise
+    return len(unique)
 
 
 def record_finding_observations(marker, findings, time_check):
@@ -572,6 +658,132 @@ def parse_limit(event):
     return limit, token
 
 
+
+def _scan_rows(pk, profile, scan_id):
+    by_region = {}
+    for row in all_items(pk, "RESULT#"):
+        if row.get("scan_id") == scan_id and row.get("connection_version") == profile.get("connection_version"):
+            by_region[row["region"]] = row
+    for row in all_items(pk, "HISTORY#"):
+        if (row.get("scan_id") == scan_id
+                and row.get("connection_version") == profile.get("connection_version")
+                and row.get("expires", 0) > time.time()):
+            by_region[row["region"]] = row
+    return list(by_region.values())
+
+
+def _inventory_token(payload):
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_inventory_token(value, pk, scan_id, fingerprint):
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        payload = json.loads(raw)
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("Invalid inventory pagination token") from error
+    if (not isinstance(payload, dict) or set(payload) != {"pk", "scan_id", "offset", "fingerprint"}
+            or payload.get("pk") != pk or payload.get("scan_id") != scan_id
+            or payload.get("fingerprint") != fingerprint
+            or type(payload.get("offset")) is not int or payload["offset"] < 0):
+        raise ValueError("Invalid inventory pagination token")
+    return payload["offset"]
+
+
+def inventory_page(pk, profile, event):
+    query = event.get("queryStringParameters") or {}
+    allowed = {"scan_id", "limit", "next_token", "type", "service", "region", "q"}
+    if not isinstance(query, dict) or set(query) - allowed:
+        raise ValueError("Inventory query fields are invalid")
+    scan_id = _valid_scan_id(query.get("scan_id"))
+    raw_limit = query.get("limit", "100")
+    if not isinstance(raw_limit, str) or not raw_limit.isdigit() or not 1 <= int(raw_limit) <= INVENTORY_API_LIMIT:
+        raise ValueError("limit must be an integer from 1 to 500")
+    limit = int(raw_limit)
+    kind = query.get("type", "")
+    service_id = query.get("service", "")
+    region = query.get("region", "")
+    search = query.get("q", "")
+    if (not all(isinstance(value, str) for value in (kind, service_id, region, search))
+            or (kind and kind not in RESOURCE_REGISTRY)
+            or (service_id and service_id not in {item["service_id"] for item in RESOURCE_REGISTRY.values()})
+            or (region and region not in profile.get("regions", []))
+            or len(search) > 4096):
+        raise ValueError("Inventory filters are invalid")
+    rows = _scan_rows(pk, profile, scan_id)
+    if not rows:
+        return None
+    persisted_rows = {
+        row["region"]: row
+        for row in rows
+        if row.get("inventory_persisted") is True and isinstance(row.get("inventory_run_token"), str)
+    }
+    available = bool(persisted_rows)
+    resources = []
+    prefix = "INVENTORY#{}#{}#".format(profile["connection_version"], scan_id)
+    for page in all_items(pk, prefix):
+        owner = persisted_rows.get(page.get("region"))
+        if (owner is None or page.get("run_token") != owner["inventory_run_token"]
+                or page.get("scan_id") != scan_id or page.get("connection_version") != profile["connection_version"]
+                or page.get("account_id") != profile.get("account_id")
+                or page.get("type") not in RESOURCE_REGISTRY
+                or page.get("service_id") != RESOURCE_REGISTRY[page["type"]]["service_id"]
+                or not isinstance(page.get("resources"), list)):
+            continue
+        for resource in page["resources"]:
+            if not isinstance(resource, dict) or not isinstance(resource.get("resource_id"), str):
+                continue
+            item = {
+                "type": page["type"],
+                "service_id": page["service_id"],
+                "region": page["region"],
+                "scan_id": scan_id,
+                "account_id": page["account_id"],
+                "scanned_at": page.get("scanned_at"),
+                "resource_id": resource["resource_id"],
+            }
+            if isinstance(resource.get("resource_name"), str) and resource["resource_name"]:
+                item["resource_name"] = resource["resource_name"]
+            resources.append(item)
+    search_key = search.casefold().strip()
+    resources = [
+        item for item in resources
+        if (not kind or item["type"] == kind)
+        and (not service_id or item["service_id"] == service_id)
+        and (not region or item["region"] == region)
+        and (not search_key or search_key in " ".join((
+            item["resource_id"], item.get("resource_name", ""), item["type"], item["service_id"],
+            item["region"], item["account_id"], item["scan_id"], str(item.get("scanned_at") or ""),
+        )).casefold())
+    ]
+    resources.sort(key=lambda item: (item["type"], item["region"], item["resource_id"]))
+    fingerprint = hashlib.sha256(json.dumps(
+        [profile["connection_version"], kind, service_id, region, search_key],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    token = query.get("next_token")
+    offset = _decode_inventory_token(token, pk, scan_id, fingerprint) if token else 0
+    if offset > len(resources):
+        raise ValueError("Invalid inventory pagination token")
+    end = min(offset + limit, len(resources))
+    next_token = _inventory_token({
+        "pk": pk, "scan_id": scan_id, "offset": end, "fingerprint": fingerprint,
+    }) if end < len(resources) else None
+    complete = (
+        len(persisted_rows) == len(rows)
+        and all(row.get("status") == "SUCCEEDED" and not row.get("errors") for row in rows)
+    )
+    return {
+        "scan_id": scan_id,
+        "available": available,
+        "aggregate_only": not available,
+        "complete": complete,
+        "resources": resources[offset:end],
+        "total_count": len(resources) if available else None,
+        "next_token": next_token,
+    }
+
 def _valid_scan_id(value):
     try:
         parsed = uuid.UUID(value)
@@ -750,27 +962,21 @@ def api(event, context):
                 if row.get("region") in regions and row.get("connection_version") == profile.get("connection_version")
             ]
             return response(200, {"results": rows})
+        if route == "/inventory":
+            if not profile.get("connection_version"):
+                return response(200, {
+                    "scan_id": None, "available": False, "aggregate_only": True, "complete": False,
+                    "resources": [], "total_count": None, "next_token": None,
+                })
+            page = inventory_page(pk, profile, event)
+            return response(200, page) if page else response(404, {"error": "Scan not found for this user"})
         if route == "/history":
             limit, token = parse_limit(event)
             rows, next_token = page_rows(pk, "HISTORY#", profile, limit, token)
             return response(200, {"results": [visible_result(row) for row in rows], "next_token": next_token})
         if route == "scan_status":
             scan_id = _valid_scan_id(path.rsplit("/", 1)[-1])
-            rows = [
-                row for row in all_items(pk, "RESULT#")
-                if row.get("scan_id") == scan_id and row.get("connection_version") == profile.get("connection_version")
-            ]
-            # A newer scan can replace RESULT in only some regions. Merge the
-            # retained terminal snapshots so the older scan stays complete.
-            by_region = {row["region"]: row for row in rows}
-            for row in all_items(pk, "HISTORY#"):
-                if (
-                    row.get("scan_id") == scan_id
-                    and row.get("connection_version") == profile.get("connection_version")
-                    and row.get("expires", 0) > time.time()
-                ):
-                    by_region[row["region"]] = row
-            rows = list(by_region.values())
+            rows = _scan_rows(pk, profile, scan_id)
             if not rows:
                 return response(404, {"error": "Scan not found for this user"})
             return response(200, {"scan_id": scan_id, "results": [visible_result(row) for row in rows]})
@@ -956,9 +1162,11 @@ def scan(job, context):
         if context.get_remaining_time_in_millis() < 60000 or time.time() >= deadline(marker) - 60:
             raise TimeoutError("Scan stopped before Lambda timeout")
 
+    global_region = "us-east-1" if "us-east-1" in profile["regions"] else sorted(profile["regions"])[0]
     collected = collect_region(
         sess, region, profile.get("account_id", ""), profile["settings"],
         profile["service_groups"], datetime.fromtimestamp(now, timezone.utc), time_check, observed,
+        global_region=global_region,
     )
 
     def observation_time_check():
@@ -967,12 +1175,20 @@ def scan(job, context):
                 or time.time() >= min(deadline(marker), marker["run_until"]) - 10):
             raise TimeoutError("Insufficient time to persist finding observations")
 
+    inventory_present = "inventory" in collected
+    inventory_count = None
     try:
         observation_time_check()
+        if inventory_present:
+            inventory_count = record_inventory_pages(
+                marker, collected["inventory"], observation_time_check, profile.get("account_id", ""),
+            )
+            if inventory_count is None:
+                return
         observations = record_finding_observations(marker, collected["findings"], observation_time_check)
     except TimeoutError:
         finish_scan(marker, "TIMED_OUT", run_token=run_token, error_code="TIME_BUDGET",
-                    error_message="Insufficient time remaining to persist finding observations safely")
+                    error_message="Insufficient time remaining to persist inventory and finding observations safely")
         return {"timed_out": True}
     if observations is None:
         return
@@ -1012,10 +1228,12 @@ def scan(job, context):
         "status": "PARTIAL" if collected["partial"] or too_many_findings else "SUCCEEDED",
         "started_at": marker.get("started_at", now), "completed_at": int(time.time()),
         "connection_version": profile["connection_version"], "counts": collected["counts"],
+        "inventory_persisted": inventory_present, "inventory_count": inventory_count,
+        **({"inventory_run_token": run_token} if inventory_present else {}),
         "findings": actionable[:FINDING_LIMIT], "finding_count": len(actionable), "errors": errors,
         "candidates": retained, "total_candidate_count": len(candidates),
-        "note": "Limit 100 resources/type and 50 displayed findings/region. Only selected regions scanned.",
-        "expires": now + 30 * 86400,
+        "note": "Limit 100 resources/type and 50 displayed findings/region. Inventory identities are stored separately.",
+        "expires": now + RETENTION_SECONDS,
     }
     # DynamoDB allows 400 KiB per item. Leave room for its attribute encoding
     # and notification metadata, and report every retention limit as partial.

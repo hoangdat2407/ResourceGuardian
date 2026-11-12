@@ -6,7 +6,7 @@ Tài liệu này hướng dẫn thao tác, không xác nhận trạng thái mộ
 
 1. Hoàn tất kiểm tra local ở [README.md](README.md#7-kiểm-thử), commit revision và rà diff code/template/IAM. Giữ hai bản [target-role.yaml](target-role.yaml) và [web/target-role.yaml](web/target-role.yaml) giống nhau.
 2. Xác nhận account bằng STS, chọn stack/region và phạm vi chi phí. Nghiệm thu dùng stack riêng `cloud-resource-guardian-task8-test` tại `ap-southeast-1`, SES tắt; không dùng stack đang phục vụ người dùng để fault injection.
-3. Reviewer ghi revision, account/stack/region, template/IAM diff, tác động replacement của UserPool, Cognito chỉ admin tạo user, số user thực tế không quá 5 và allowlist chỉ đọc của target role. Executor được cấp quyền phải khác reviewer; hai tên khai báo trong manifest không tự xác thực danh tính hay cấp quyền cloud.
+3. Reviewer ghi revision, account/stack/region, template/IAM diff, tác động replacement của UserPool, trạng thái self-sign-up theo template, số user vận hành dự kiến và allowlist chỉ đọc của target role. Executor được cấp quyền phải khác reviewer; hai tên khai báo trong manifest không tự xác thực danh tính hay cấp quyền cloud.
 4. Review change set thực tế trước khi execute. `deploy.py --plan` có thể tạo/cấu hình artifact bucket, upload ZIP và tạo change set; đây là thao tác ghi AWS. `publish.py` ghi S3 và invalidate CloudFront.
 5. Pin SHA-256 của ZIP và source/template đã review. Deploy chính ZIP đó qua `--artifact`, không đóng gói lại sau khi pin. Thay đổi source hoặc template cần cập nhật pin trước lần nghiệm thu tiếp theo.
 6. Chạy E2E với hai tenant khác nhau; giữ scan ID, UTC, revision/hash, region, kết quả và log/request ID đã loại secrets. Không lưu password, OTP, token, credentials hoặc presigned URL trong source/manifest/evidence.
@@ -42,9 +42,110 @@ if ($LASTEXITCODE -ne 0) { throw 'Upload target-role.yaml that bai' }
 .\.venv\Scripts\python.exe publish.py --stack $reviewStack --profile guardian-lab --region ap-southeast-1
 ```
 
-Kiểm tra đủ năm object, MIME/cache/hash, config không phải demo và CloudFront invalidation hoàn tất. Tạo user bằng Cognito Console trong UserPool của stack; UserPoolId không có trong Outputs hiện tại, nên lấy Physical ID của resource `UserPool` trong CloudFormation → Resources. Admin tạo tối đa 5 user nội bộ, người dùng hoàn tất bước đổi mật khẩu tạm khi đăng nhập lần đầu; không mở self-signup.
+Kiểm tra đủ năm object, MIME/cache/hash, config không phải demo và CloudFront invalidation hoàn tất. UserPool template hiện cho phép self-sign-up và xác minh email; nếu môi trường nghiệm thu yêu cầu account nội bộ, áp dụng quy trình phê duyệt riêng hoặc review thay đổi Cognito trước deploy, không mô tả template hiện tại là admin-only.
 
 Trước UPDATE, lưu template/artifact/config/assets cũ đúng phạm vi để có thể khôi phục. Không tự xóa stack, bucket hoặc dữ liệu tenant để xử lý lỗi triển khai.
+
+## Inventory identity rollout — cần phê duyệt
+
+Source mới dùng cùng bảng DynamoDB, không thêm GSI và không rewrite dữ liệu: inventory được lưu bằng item page tenant/connection/scan/region/type có TTL. Scan cũ giữ aggregate count và frontend fallback tương thích. Không có migration dữ liệu bắt buộc, nhưng capability chưa reachable trên stack cho đến khi reviewer duyệt:
+
+1. Event `GET /inventory` đã được thêm cho `ApiFunction` trong `template.yaml`. Route kế thừa Cognito JWT default authorizer giống `/findings`; không tạo Lambda mới.
+2. Thêm đúng một action mới vào cả `target-role.yaml` và `web/target-role.yaml`: `ecr:DescribeImages`. DocumentDB và Neptune dùng boto3 clients riêng nhưng AWS IAM management API vẫn dùng `rds:DescribeDBClusters`, action này đã có. Không thêm các action không tồn tại `docdb:DescribeDBClusters`/`neptune:DescribeDBClusters`; `cfn-lint` W3037 và tài liệu AWS đều bác bỏ hai prefix đó. Không thêm action ghi.
+3. Deploy backend + route trước. Smoke `/me`, `/findings`, `/history`, rồi `/inventory?scan_id=<uuid>&limit=1` phải trả 404 cho scan không thuộc tenant và không được trả dữ liệu tenant khác.
+4. Chạy một scan nghiệm thu được phê duyệt. Xác minh `inventory_persisted`, count/type/region, PARTIAL/error và pagination; không kết luận complete khi có cap/permission/time error.
+5. Publish frontend sau khi backend smoke đạt. Frontend mới vẫn fallback aggregate với 404/405, nhưng rollout backend-first tránh làm capability mới trông như scan legacy.
+
+Preflight phải lưu artifact/template/config/assets revision trước, export mô tả bảng và PITR/TTL hiện tại, kiểm tra change set không replace bảng/UserPool và ước lượng write/read theo tối đa 100 identity/type/region. Không cần backup data migration vì không rewrite; production owner vẫn quyết định snapshot/on-demand backup trước release.
+
+Rollback: publish lại web revision trước; redeploy Lambda artifact trước; nếu cần thì bỏ route `/inventory` bằng change set riêng. Item inventory additive được code cũ bỏ qua và tự hết hạn theo TTL, không xóa thủ công. Action mới `ecr:DescribeImages` có thể rollback sau khi collector cũ được khôi phục. Post-deploy smoke phải kiểm tra PKCE/login, tenant 404, scan current/history, inventory identity/aggregate legacy, feedback, PARTIAL disclosure, console error và viewport 320/390/768/1440.
+
+## Release production có kiểm soát — chưa được tự động thực thi
+
+Các lệnh dưới đây là runbook, không phải bằng chứng đã deploy. Chỉ chạy sau khi `aws sts get-caller-identity` khớp account được duyệt. Đặt rõ stack thực tế; không dựa vào default của script:
+
+```bash
+export PROFILE=guardian-lab REGION=ap-southeast-1
+export STACK=cloud-resource-guardian
+export TARGET_PROFILE=guardian-lab TARGET_ROLE_STACK=guardian-read-role-demo
+export RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export BACKUP_DIR=".preflight/release-$RELEASE_ID"
+export ARTIFACT=".preflight/task8-artifacts/task8-final.zip"
+mkdir -p "$BACKUP_DIR"
+
+aws sts get-caller-identity --profile "$PROFILE" --region "$REGION"
+aws cloudformation describe-stacks --stack-name "$STACK" --profile "$PROFILE" --region "$REGION"
+aws cloudformation get-template --stack-name "$STACK" --template-stage Processed \
+  --query TemplateBody --output json --profile "$PROFILE" --region "$REGION" \
+  > "$BACKUP_DIR/platform-template.json"
+aws cloudformation get-template --stack-name "$TARGET_ROLE_STACK" --template-stage Processed \
+  --query TemplateBody --output json --profile "$TARGET_PROFILE" --region "$REGION" \
+  > "$BACKUP_DIR/target-role-template.json"
+
+WEB_BUCKET="$(aws cloudformation describe-stacks --stack-name "$STACK" --profile "$PROFILE" --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='WebBucket'].OutputValue | [0]" --output text)"
+aws s3 sync "s3://$WEB_BUCKET/" "$BACKUP_DIR/web/" --profile "$PROFILE" --region "$REGION"
+sha256sum "$ARTIFACT" template.yaml target-role.yaml web/target-role.yaml web/index.html web/styles.css web/app.js \
+  > "$BACKUP_DIR/release-sha256.txt"
+```
+
+Nếu STS/stack/bucket trả sai hoặc backup lỗi thì dừng. Production owner quyết định tạo DynamoDB on-demand backup; source release này không rewrite bảng. Trước target-role update, tạo change set riêng và chỉ chấp nhận đúng một policy delta `ecr:DescribeImages`:
+
+```bash
+export TARGET_CHANGESET="guardian-read-role-$RELEASE_ID"
+aws cloudformation create-change-set \
+  --stack-name "$TARGET_ROLE_STACK" --change-set-name "$TARGET_CHANGESET" --change-set-type UPDATE \
+  --template-body file://target-role.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameters \
+    ParameterKey=ApiPrincipal,UsePreviousValue=true \
+    ParameterKey=ScanPrincipal,UsePreviousValue=true \
+    ParameterKey=ExternalId,UsePreviousValue=true \
+    ParameterKey=RoleSuffix,UsePreviousValue=true \
+  --profile "$TARGET_PROFILE" --region "$REGION"
+aws cloudformation wait change-set-create-complete \
+  --stack-name "$TARGET_ROLE_STACK" --change-set-name "$TARGET_CHANGESET" \
+  --profile "$TARGET_PROFILE" --region "$REGION"
+aws cloudformation describe-change-set \
+  --stack-name "$TARGET_ROLE_STACK" --change-set-name "$TARGET_CHANGESET" \
+  --profile "$TARGET_PROFILE" --region "$REGION"
+```
+
+Sau khi reviewer duyệt change set role, executor mới chạy `execute-change-set` và chờ `stack-update-complete`. Tiếp theo lấy nguyên parameter hiện hữu để tạo platform change set bằng artifact đã pin:
+
+```bash
+DOMAIN_PREFIX="$(aws cloudformation describe-stacks --stack-name "$STACK" --profile "$PROFILE" --region "$REGION" \
+  --query "Stacks[0].Parameters[?ParameterKey=='DomainPrefix'].ParameterValue | [0]" --output text)"
+SENDER_EMAIL="$(aws cloudformation describe-stacks --stack-name "$STACK" --profile "$PROFILE" --region "$REGION" \
+  --query "Stacks[0].Parameters[?ParameterKey=='SenderEmail'].ParameterValue | [0]" --output text)"
+[ "$SENDER_EMAIL" = "None" ] && SENDER_EMAIL=""
+
+.venv/bin/python deploy.py \
+  --profile "$PROFILE" --region "$REGION" --stack "$STACK" \
+  --domain-prefix "$DOMAIN_PREFIX" --sender-email "$SENDER_EMAIL" \
+  --artifact "$ARTIFACT" --plan
+```
+
+`--plan` vẫn ghi artifact bucket và tạo change set. Reviewer phải xác nhận change set **không** replace `Data`, `UserPool`, `UserClient`, `UserDomain`, `WebBucket` hoặc tài nguyên stateful khác; thay đổi mong đợi ở platform là code của năm Lambda và route `GET /inventory`. Không execute nếu có `Replacement=True/Conditional` chưa giải thích. Sau execute và `stack-update-complete`, smoke `/me`, `/findings`, `/history`, `/inventory` với token thật đã redacted; dùng tenant thứ hai để xác nhận scan ID tenant thứ nhất trả 404.
+
+Chỉ khi backend smoke đạt mới publish frontend:
+
+```bash
+aws s3 cp web/target-role.yaml "s3://$WEB_BUCKET/target-role.yaml" \
+  --content-type application/yaml --cache-control no-store \
+  --profile "$PROFILE" --region "$REGION"
+.venv/bin/python publish.py --profile "$PROFILE" --region "$REGION" --stack "$STACK"
+```
+
+`publish.py` upload web và tạo invalidation. Chờ invalidation hoàn tất rồi smoke login/logout, connection, inventory/findings/history, feedback, console/network và 390/1440 px. Scan thật và SES send là hai approval riêng.
+
+Rollback khi update chưa hoàn tất:
+
+```bash
+aws cloudformation rollback-stack --stack-name "$STACK" --profile "$PROFILE" --region "$REGION"
+aws cloudformation wait stack-rollback-complete --stack-name "$STACK" --profile "$PROFILE" --region "$REGION"
+```
+
+Nếu update đã `UPDATE_COMPLETE`, tạo change set mới từ `platform-template.json` đã backup để phục hồi template/CodeUri cũ, review không replacement rồi execute; không dùng `rollback-stack` như rollback release đã hoàn tất. Khôi phục web trước bằng `aws s3 sync "$BACKUP_DIR/web/" "s3://$WEB_BUCKET/" --delete`, sau đó invalidate CloudFront. Target role rollback tương tự bằng `target-role-template.json`, nhưng chỉ sau khi backend collector cũ đã được phục hồi. Không xóa inventory page: code cũ bỏ qua và TTL tự dọn.
 
 ## Task 8 AWS harness
 

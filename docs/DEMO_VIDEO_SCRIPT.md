@@ -1,6 +1,8 @@
 # KỊCH BẢN QUAY VIDEO DEMO (7–9 PHÚT)
 ## CLOUD RESOURCE GUARDIAN — HỆ THỐNG GIÁM SÁT & PHÁT HIỆN LÃNG PHÍ TÀI NGUYÊN AWS
 
+> **Tài liệu này chưa được phê duyệt để quay.** Xem [báo cáo nghiệm thu hiện tại](FINAL_ACCEPTANCE_AUDIT.md); không tuyên bố độ chính xác, quét đủ 38 loại/39 rule hoặc email production khi chưa có bằng chứng AWS E2E mới.
+
 ---
 
 ### Thông tin tổng quan

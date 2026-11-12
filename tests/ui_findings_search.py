@@ -163,7 +163,7 @@ def main():
             # 6: resource and finding counts are both explicit and different.
             total_resources, total_findings = len(unique_resources(ALL_A)), len(ALL_A)
             scope = page.locator('#findings-scope')
-            expect(scope).to_contain_text('%d/%d tài nguyên' % (total_resources, total_resources))
+            expect(scope).to_contain_text('%d tài nguyên' % total_resources)
             expect(scope).to_contain_text('%d cảnh báo' % total_findings)
             # 11: truncated backend data must not be presented as a complete search.
             expect(scope).to_contain_text('Chỉ tìm kiếm trên')
@@ -183,6 +183,9 @@ def main():
                 expect(rows()).to_have_count(expected)
             search.fill('')
             checks.append('search covers resource ID, service name, rule ID, Vietnamese reason and resource name')
+
+            page.locator('#advanced-filters summary').click()
+            expect(page.locator('#filter-type')).to_be_visible()
 
             # 2/7: primary service + status filters, advanced region, and chart sync.
             page.locator('#filter-type').select_option('EBS')

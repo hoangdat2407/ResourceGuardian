@@ -127,6 +127,8 @@ def main():
             page.goto(base + '/#findings')
             expect(page.locator('#app')).to_be_visible()
             expect(page.locator('#findings-list tbody tr')).to_have_count(9)
+            page.locator('#advanced-filters summary').click()
+            expect(page.locator('#filter-type')).to_be_visible()
 
             def navigate(section):
                 page.locator('[data-page="' + section + '"]').click()
@@ -197,7 +199,8 @@ def main():
             expect(page.locator('#overview-state')).to_contain_text('chưa quét thành công')
             expect(page.locator('#total')).to_have_text('—')
             navigate('findings')
-            expect(page.locator('#findings-scope')).to_contain_text('không dùng kết quả')
+            expect(page.locator('#scan-errors-card')).to_be_visible()
+            expect(page.locator('#findings-count-checked')).to_have_text('—')
             state['rows'] = [{'region': REGIONS[0], 'status': 'SUCCEEDED', 'counts': {'EC2': 0}, 'findings': []}]
             navigate('overview')
             page.locator('#refresh').click()
@@ -216,7 +219,7 @@ def main():
             page.locator('#filter-region').select_option('ap-northeast-1')
             page.locator('#filter-type').select_option('RDS')
             navigate('connection')
-            expect(page.locator('#service-group-options input[type="checkbox"]')).to_have_count(11)
+            expect(page.locator('#service-group-options input[type="checkbox"]')).to_have_count(12)
             for checkbox in page.locator('#service-group-options input[type="checkbox"]').all():
                 checkbox.uncheck()
             before = len(requests_to('/connection'))
@@ -236,7 +239,7 @@ def main():
             navigate('findings')
             for ident in FILTERS:
                 expect(page.locator('#' + ident)).to_have_value('')
-            assert set(page.locator('#filter-region option').evaluate_all('(items)=>items.map(item=>item.value)')) == {'', *REGIONS[:2]}
+            assert page.locator('#filter-region option').evaluate_all('(items)=>items.map(item=>item.value)') == ['']
             page.reload()
             navigate('connection')
             assert page.locator('#service-group-options input:checked').evaluate_all('(items)=>items.map(item=>item.value)') == ['storage', 'network']
@@ -339,7 +342,7 @@ def main():
                 expect(page.locator('#history-list')).to_be_empty()
                 expect(page.locator('#history-detail')).to_be_empty()
                 expect(page.locator('#status')).not_to_contain_text('Service unavailable')
-                assert set(page.locator('#filter-region option').evaluate_all('(items)=>items.map(item=>item.value)')) == {'', REGIONS[0]}
+                assert page.locator('#filter-region option').evaluate_all('(items)=>items.map(item=>item.value)') == ['']
                 assert page.evaluate('window.__oldScopePolls') == [], (path, response_status, 'Old scope restarted polling')
             checks.append('Held old findings/history success and 503 cannot overwrite reconnect scope, restore old history, or restart polling')
 
@@ -352,6 +355,12 @@ def main():
                     navigate(section)
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (width, section)
                     if section == 'findings':
+                        advanced = page.locator('#advanced-filters')
+                        if advanced.evaluate('(el)=>el.open'):
+                            advanced.locator('summary').click()
+                        for ident in ['search', 'filter-service', 'filter-type', 'filter-level']:
+                            expect(page.locator('#' + ident)).to_be_visible()
+                        advanced.locator('summary').click()
                         for ident in FILTERS:
                             expect(page.locator('#' + ident)).to_be_visible()
                     page.evaluate('window.scrollTo(0,0)')

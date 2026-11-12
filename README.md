@@ -2,9 +2,11 @@
 
 Cloud Resource Guardian giúp người dùng xem xét tài nguyên AWS có dấu hiệu ít sử dụng. Dự án gồm backend Python/boto3 chạy trên Lambda, dashboard HTML/CSS/JavaScript, hạ tầng AWS SAM và script triển khai.
 
-Phạm vi gồm chín loại tài nguyên, chi tiết evidence, hai mốc quan sát first/last, phản hồi đã xem/giữ lại/bỏ qua và lịch sử phân trang. Scheduler dùng EventBridge; worker nhận Lambda Invoke async; lỗi sau retry đi qua SQS failure destination để phục hồi.
+Phạm vi evaluator nghiêm ngặt ban đầu gồm chín loại tài nguyên. Source hiện khai báo 38 loại tài nguyên, 39 rule và 40 trường ngưỡng; cả 38 loại có đường collector qua 12 nhóm dịch vụ có thể chọn. Những đường mở rộng chưa có cùng mức bằng chứng AWS và kiểm soát missing-data như chín loại lõi, vì vậy không được xem các số khai báo là số chức năng đã nghiệm thu production.
 
-Hướng dẫn triển khai, chạy harness và khôi phục nằm trong [DEPLOYMENT.md](DEPLOYMENT.md). Demo và test local không xác nhận phiên bản đang chạy trên AWS hoặc kết quả nghiệm thu cloud.
+Hướng dẫn triển khai, chạy harness và khôi phục nằm trong [DEPLOYMENT.md](DEPLOYMENT.md). Demo và test local không xác nhận phiên bản đang chạy trên AWS hoặc kết quả nghiệm thu cloud. Trạng thái đối chiếu hiện tại nằm trong [báo cáo nghiệm thu cuối](docs/FINAL_ACCEPTANCE_AUDIT.md).
+
+Báo cáo Search/Filter theo resource type, inventory identity mới và giới hạn dữ liệu nằm tại [docs/RESOURCE_FILTER_COVERAGE_AUDIT.md](docs/RESOURCE_FILTER_COVERAGE_AUDIT.md).
 
 ## 1. Thử ngay tại máy, không cần AWS
 
@@ -26,14 +28,14 @@ Demo lưu/lọc bốn nhóm và 11 cấu hình. First/last được cập nhật
 
 | Tính năng | Cách thực hiện |
 |---|---|
-| Đăng nhập, đăng xuất | Cognito Hosted UI, Authorization Code + PKCE; chỉ admin tạo user; token chỉ lưu trong sessionStorage |
-| Nhiều người dùng | Tối đa 5 user nội bộ theo release gate; API Gateway xác minh JWT; backend lấy userId từ claim `sub`, không lấy từ body |
-| Kết nối AWS | Một account/người dùng; STS AssumeRole, Role ARN và ExternalId riêng; chọn 1–4 nhóm dịch vụ |
-| Quét tài nguyên | EC2; EBS/Snapshot/S3 multipart; RDS; EIP/NAT Gateway/ALB/NLB; tối đa ba region/người dùng |
+| Đăng ký, đăng nhập, đăng xuất | Cognito Hosted UI, Authorization Code + PKCE; UserPool hiện cho phép tự đăng ký và xác minh email; token chỉ lưu trong sessionStorage |
+| Nhiều người dùng | API Gateway xác minh JWT; backend lấy userId từ claim `sub`, không lấy từ body. Mốc 5 user là giả định vận hành của scheduler hiện tại, không phải quota Cognito |
+| Kết nối AWS | Một account/người dùng; STS AssumeRole, Role ARN và ExternalId riêng; chọn ít nhất một trong 12 nhóm dịch vụ |
+| Quét tài nguyên | 38 loại có đường collector qua 12 nhóm có thể chọn; chín loại lõi có bộ bằng chứng nghiêm ngặt hơn. Analytics đã selectable nhưng chưa được xác minh bằng scan production trong thay đổi này |
 | Quét ngay | POST `/scans` không có body, trả `scan_id`; Lambda backend Invoke async Lambda worker |
 | Theo dõi tiến độ | Frontend lấy `/findings` mỗi năm giây khi còn QUEUED/RUNNING; dừng khi terminal hoặc lỗi |
 | Quét định kỳ | EventBridge kích hoạt Lambda scheduler mỗi giờ, chọn profile đến hạn |
-| Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày, phân trang 20 lần quét region mặc định |
+| Lưu kết quả | DynamoDB theo tenant; lịch sử 30 ngày. Scan mới có thể lưu inventory identity theo page riêng ngoài RESULT, còn scan legacy chỉ có aggregate count |
 | Phản hồi & Ngoại lệ | Tag `guardian:keep=true` cho EC2/EBS/EIP/snapshot/RDS/NAT; API `/feedback` cho cả chín loại (acknowledged, kept, ignoreUntil tối đa 30 ngày); handler `/keep` và `/ignore` tương thích ngược chỉ dùng nội bộ |
 | Email tùy chọn | SES mặc định tắt; khi bật, gửi tới email Cognito đã xác minh nếu tập REVIEW đang hiện không rỗng, thay đổi và đã qua cooldown |
 | Xử lý lỗi | PARTIAL khi một phần API lỗi/đạt giới hạn/hết time budget; async retry → SQS failure destination → recovery; đối soát TIMED_OUT mỗi 5 phút; DLQ vận hành |
@@ -92,7 +94,7 @@ Executor dùng đúng lệnh `execute-change-set` mà script in ra cho change se
 
 Script upload ba file frontend và `config.json`, rồi tạo CloudFront invalidation bao phủ cả template đã upload. Kiểm tra đủ năm object, config thật và invalidation hoàn tất.
 
-Admin tạo user trong đúng Cognito UserPool của stack, giới hạn tối đa 5 user nội bộ theo release gate. Người dùng mở **WebUrl**, đăng nhập bằng tài khoản được cấp và đổi mật khẩu tạm ở lần đầu nếu được yêu cầu. UserPool tắt tự đăng ký; không có bước tự tạo tài khoản trên web. Xem [hướng dẫn AWS về user do admin tạo](https://docs.aws.amazon.com/cognito/latest/developerguide/how-to-create-user-accounts.html).
+Người dùng có thể đăng ký trên web, xác minh email rồi đăng nhập. Nếu môi trường nghiệm thu muốn giới hạn tài khoản, quản trị viên phải áp dụng quy trình phê duyệt riêng; template hiện không tắt tự đăng ký. Không mô tả môi trường hiện tại là admin-only.
 
 Hạ tầng chính: private S3 + CloudFront → Cognito / API Gateway → Lambda backend / scheduler / worker → DynamoDB; worker dùng STS và AWS SDK đọc account người dùng. SQS `DeadLetters` nhận OnFailure worker và có recovery consumer; `OperationsDeadLetters` nhận redrive và lỗi vận hành của scheduler/reconciler/delivery.
 
@@ -132,17 +134,17 @@ Dùng profile của account đích nếu khác account triển khai. Mỗi ngư�
 - **RDS:** instance available và đủ tuổi cửa sổ; CPUUtilization p95 và DatabaseConnections p95 đều dưới ngưỡng. Dùng hourly Maximum.
 - **NAT Gateway:** gateway available và đủ tuổi; tính trung bình hourly Sum riêng cho BytesInFromSource và BytesInFromDestination theo số mẫu thực đo của từng chiều, cộng rồi đổi thành MiB/giờ để so ngưỡng.
 - **ALB/NLB:** load balancer active và đủ tuổi; ALB dùng RequestCount/Sum, NLB dùng NewFlowCount/Sum. Scanner không gọi DescribeTags.
-- Mọi metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ hợp lệ. Sample 0 thật được tính; thiếu mẫu, số âm, boolean, kiểu sai, NaN/infinity hoặc phép tính overflow tạo `INSUFFICIENT_DATA`. Tài nguyên thiếu thời điểm tạo hoặc chưa tồn tại đủ cửa sổ cũng có trạng thái này. Evidence giữ ngưỡng, đơn vị, số mẫu nhận/hợp lệ/lỗi và nguyên nhân; dữ liệu thiếu/lỗi không được thay bằng 0 hoặc dùng để kết luận ít hoạt động.
+- Với chín loại lõi, metric bắt buộc phải có ít nhất `ceil(window_hours × 0.8)` mẫu giờ hợp lệ. Sample 0 thật được tính; thiếu mẫu, số âm, boolean, kiểu sai, NaN/infinity hoặc phép tính overflow tạo `INSUFFICIENT_DATA`. Tài nguyên thiếu thời điểm tạo hoặc chưa tồn tại đủ cửa sổ cũng có trạng thái này. Evidence giữ ngưỡng, đơn vị, số mẫu nhận/hợp lệ/lỗi và nguyên nhân; dữ liệu thiếu/lỗi không được thay bằng 0 hoặc dùng để kết luận ít hoạt động. Các evaluator metric mở rộng cũng không còn biến chuỗi rỗng thành zero; chúng trả `INSUFFICIENT_DATA`, nhưng chưa có AWS E2E đồng đều cho cả 38 loại.
 - Collector lọc timestamp theo `[observation_start, observation_end)`, yêu cầu đúng lưới giờ và khử trùng điểm cùng timestamp. Phản hồi CloudWatch sai cấu trúc, timestamp xung đột hoặc phân trang lỗi làm scan `PARTIAL`, không sinh kết luận ít hoạt động từ chuỗi lỗi.
-- Bốn nhóm dịch vụ: `compute` (EC2), `storage` (EBS/Snapshot/S3 multipart), `database` (RDS), `network` (EIP/NAT/ALB/NLB). Profile cũ mặc định bật đủ bốn nhóm.
-- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn kết quả lưu ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt; `total_candidate_count` ghi số ứng viên trước khi cắt. Worker timeout 300 giây; collector dừng khi còn dưới 60 giây theo context/deadline để lưu dữ liệu. Registry dùng budget riêng, chừa tối thiểu 10 giây cho finalization.
+- Backend cho chọn 12 nhóm: `compute`, `storage`, `database`, `network`, `serverless`, `monitoring`, `security`, `backup`, `nosql`, `containers`, `integration`, `analytics`. Profile cũ vẫn mặc định bốn nhóm lõi.
+- Chỉ đọc region đã chọn. Mỗi loại tối đa 100 tài nguyên/region, kết quả hiển thị tối đa 50 findings/region. Worker giữ tối đa 100 ứng viên nội bộ và giới hạn RESULT ở 300 KiB; phải cắt dữ liệu thì báo `PARTIAL`. `finding_count` có thể là cận dưới khi nhóm ứng viên bị cắt. Scan mới ghi danh tính inventory theo page DynamoDB riêng, tenant/connection/scan/region/type/run-token scoped, TTL 30 ngày; scan legacy vẫn chỉ có aggregate counts và UI không tạo Resource ID giả. Worker timeout 300 giây; collector dừng khi còn dưới 60 giây và persistence chừa tối thiểu 10 giây cho finalization.
 - Một account/người dùng, tối đa ba region. Mọi PUT `/connection` tạo connection version mới; result, observation và feedback cũ không áp dụng cho kết nối mới.
 - Quét thủ công tối thiểu 15 phút/lần. Job có deadline 15 phút; API hiển thị TIMED_OUT khi quá hạn và reconciler lưu trạng thái/history ở lượt đối soát kế tiếp khi hạ tầng hoạt động bình thường. Admission, connection version và run token ngăn job trùng/cũ ghi đè kết quả mới. Không đủ 60 giây trước STS thì worker kết thúc TIMED_OUT; hết budget trong collector tạo PARTIAL với dữ liệu hợp lệ đã có.
 - Scheduler scan bảng DynamoDB mỗi giờ, phù hợp tối đa 5 user nội bộ. Khi tăng quy mô cần GSI theo due time, quota tenant và chia lô.
 
 Xem [RULES.md](RULES.md) cho danh mục rule, cấu trúc bằng chứng, hợp đồng collector và API giữ lại nội bộ. Finding bổ sung `rule_id` và `recommendation`; dashboard hỗ trợ đã xem, giữ lại và bỏ qua qua API `/feedback`.
 
-Phạm vi hiện tại gồm chín loại trên cùng màn chi tiết evidence, phản hồi và lịch sử trên dashboard. Báo cáo còn nêu các dịch vụ khác trong bốn nhóm, hai nhóm AI/analytics và giám sát/tích hợp, cùng dữ liệu billing/cost; cần đầu vào collector và bộ rule tương ứng trước khi nghiệm thu các phần này. Kiểm thử local chưa chứng minh đã chạy trên AWS thật.
+Chín loại lõi có hợp đồng metric/evidence và bằng chứng local sâu hơn. Source mở rộng lên 38 loại/39 rule/40 trường ngưỡng và 12 nhóm selectable. `ECR_IMAGE_OLD` nay đọc `DescribeImages.imagePushedAt`; DocumentDB và Neptune dùng client riêng; CloudFront chỉ được một region xác định thu thập. Target role cần thêm `ecr:DescribeImages`; DocumentDB và Neptune tiếp tục dùng quyền IAM `rds:DescribeDBClusters` đã có vì AWS management API của hai dịch vụ dùng prefix `rds:`. Route CloudFormation `/inventory` đã được khai báo trong source release nhưng chưa được deploy, và chưa có scan production mới cho phạm vi mở rộng. Không dùng các số 38/39/40 để tuyên bố đã nghiệm thu AWS.
 
 ## 6. API contract
 
@@ -152,10 +154,11 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 |---|---|---|
 | GET | /me | Profile allowlist, complete settings, service groups, IAM principals và khả năng gửi email |
 | PUT | /connection | `role_arn`, `regions`, optional `service_groups`; STS xác minh account và rotate connection version |
-| PUT | /settings | Partial update cho 11 ngưỡng số; merge với setting hiện tại và kiểm tra min/max/type |
+| PUT | /settings | Partial update cho 40 trường ngưỡng đã khai báo; merge với setting hiện tại và kiểm tra min/max/type. Mười một trường thuộc bộ rule lõi ban đầu |
 | POST | /scans | Body rỗng; 202 + scan_id, 409 nếu đang chạy, 429 nếu chưa đủ 15 phút |
 | GET | /scans/{scanId} | Trạng thái/kết quả retained của scan thuộc tenant và kết nối hiện tại |
 | GET | /findings | Kết quả hiện tại đã overlay feedback; kept/ignore active bị ẩn, acknowledged vẫn hiện; bỏ keep/ignore khôi phục ứng viên còn được lưu |
+| GET | /inventory | Source API cho inventory identity của một `scan_id`, limit 1–500, cursor tenant/filter-bound và filter type/service/region/q; trả `available`, `aggregate_only`, `complete`. `template.yaml` chưa xuất bản route này nên deployment hiện tại vẫn fallback aggregate cho đến khi change set được duyệt |
 | GET | /history | Snapshot bất biến; `limit` 1–100, mặc định 20; `next_token` tenant-bound |
 | GET | /feedback | Feedback của kết nối hiện tại; `limit`/`next_token` như history |
 | PUT | /feedback | `region`, `finding_id` và subset `acknowledged`/`kept`/`ignoreUntil`; thời hạn UTC kết thúc bằng `Z`, null để xóa; clear cũng dùng PUT |
@@ -164,6 +167,7 @@ Tất cả API yêu cầu Cognito access token trong `Authorization: Bearer ...`
 | PUT | /ignore | Handler nội bộ tương thích ngược: `region`, `resource_id`, `days` 1–30; template hiện không xuất bản route |
 
 Frontend poll `/findings` khi có QUEUED/RUNNING, tối đa 185 lượt; khi terminal hoặc lỗi thì dừng. `/scans/{scanId}` trả chi tiết một job, được UI dùng để mở lịch sử nhiều region. `finding_id` là SHA-256 deterministic của type/region/stable identity và là khóa feedback; `resource_id` chỉ để hiển thị. Route/method sai trả 404/405 trước khi tạo profile. Mỗi body tối đa 10 KiB. `SUCCEEDED` chỉ có nghĩa các API trong phạm vi đã chọn hoàn tất.
+Trang `Tài nguyên cần kiểm tra` giữ ngữ cảnh lượt quét trong một thanh tóm tắt; Scan ID, trigger và lỗi dịch vụ chỉ xuất hiện trong panel chi tiết. Scope inventory tải hết cursor `/inventory` cho scan mới và tìm theo ID, tên, service, type, region, account, scan ID/thời gian; khi API/scan legacy chỉ có count, UI ghi rõ aggregate-only. Chế độ `Tìm trong lịch sử` phân trang `/history` đến hết dữ liệu retained và tìm **findings lịch sử**, lọc theo thời gian hoàn tất bằng `Asia/Ho_Chi_Minh`; lịch sử cũ không được giả là có inventory identities. Giới hạn retained là 30 ngày. Chi tiết finding mở trong side panel trên desktop, full-screen trên mobile; quản lý keep/ignore nằm ở tab `Đã giữ & bỏ qua`.
 
 Worker giữ ứng viên bị `/feedback` che trong kết quả nội bộ, nên bỏ keep hoặc ignore hết hạn có thể làm chúng hiện lại mà không cần quét mới, kể cả sau lượt quét tiếp theo. Khả năng khôi phục giới hạn trong ứng viên được giữ; dữ liệu cũ chưa lưu ứng viên cần một lượt quét mới. API không xuất trường `candidates`. `/history` và `/scans/{scanId}` giữ snapshot lúc quét; phản hồi mới chỉ overlay `/findings`, không sửa lịch sử. Handler `/keep` và `/ignore` cũ dùng resource ID và chỉ tác động lượt quét sau; đây là cơ chế độc lập với `/feedback`.
 
@@ -188,7 +192,7 @@ Smoke tự khởi động demo riêng; không cần giữ server demo khác. Có
 
 Nếu dùng SAM CLI: `sam validate --lint --region ap-southeast-1` rồi `sam build`. Dùng virtualenv riêng cho SAM nếu dependencies của SAM CLI xung đột với phiên bản test đã pin.
 
-Trước execute, reviewer và executor phải là hai người khác nhau; reviewer rà tác động UserPool replacement, Cognito admin-only, số user không quá 5 và allowlist chỉ đọc. Sau deploy, executor chạy AWS E2E riêng theo [DEPLOYMENT.md](DEPLOYMENT.md#aws-e2e-cho-rule-và-web); suite này đổi connection version, nên bằng chứng EBS/EIP đủ thời gian phải lấy bằng scan tiếp trên cùng kết nối. EC2/EBS/EIP/Snapshot/S3 multipart cần evidence thật; RDS/NAT/ALB/NLB chỉ được SKIPPED với `RESOURCE_NOT_AVAILABLE` hoặc `COST_NOT_APPROVED`. SES không là release gate.
+Trước execute, reviewer và executor phải là hai người khác nhau; reviewer rà tác động UserPool và trạng thái tự đăng ký, số user phù hợp với giới hạn vận hành scheduler, cùng allowlist chỉ đọc. Sau deploy, executor chạy AWS E2E riêng theo [DEPLOYMENT.md](DEPLOYMENT.md#aws-e2e-cho-rule-và-web); suite này đổi connection version, nên bằng chứng EBS/EIP đủ thời gian phải lấy bằng scan tiếp trên cùng kết nối. EC2/EBS/EIP/Snapshot/S3 multipart cần evidence thật; RDS/NAT/ALB/NLB chỉ được SKIPPED với `RESOURCE_NOT_AVAILABLE` hoặc `COST_NOT_APPROVED`. SES không là release gate.
 
 ## 8. Chi phí và dọn dẹp
 

@@ -224,7 +224,7 @@ class Task8(unittest.TestCase):
     def test_reconnect_during_scan_rejects_old_result_and_preserves_new_result(self):
         marker = self.marker()
 
-        def collect(*args):
+        def collect(*args, **kwargs):
             app.put({**self.profile, "connection_version": "v2"})
             app.put({**marker, "connection_version": "v2", "scan_id": str(uuid.uuid4())})
             return {"counts": {}, "findings": [], "errors": [], "partial": False}
@@ -286,7 +286,7 @@ class Task8(unittest.TestCase):
         marker = self.marker(deadline_at=self.now + 200)
         self.context.get_remaining_time_in_millis.return_value = 200000
 
-        def collect(*args):
+        def collect(*args, **kwargs):
             self.assertEqual(self.row()["run_until"], self.now + 200)
             return {"counts": {}, "findings": [], "errors": [], "partial": False}
 

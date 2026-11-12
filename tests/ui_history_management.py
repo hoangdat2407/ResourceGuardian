@@ -362,7 +362,10 @@ def main():
             for width in [320, 390, 768, 1440]:
                 page.set_viewport_size({'width': width, 'height': 900})
                 detail.scroll_into_view_if_needed()
-                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
+                overflow = page.locator('body *').evaluate_all(
+                    '(els)=>els.filter(el=>el.getBoundingClientRect().right>innerWidth+1)'
+                    '.map(el=>({tag:el.tagName,id:el.id,className:String(el.className),right:el.getBoundingClientRect().right,width:el.getBoundingClientRect().width})).slice(0,20)')
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (width, overflow)
                 page.screenshot(path=str(OUT / f'history-{width}.png'), full_page=True)
             checks.append('Legacy missing metadata and long HTML-like errors render as safe text without horizontal overflow at 320/390/768/1440')
 

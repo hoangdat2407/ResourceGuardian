@@ -256,6 +256,7 @@ Resources:
         History: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /history, Method: GET}}
         Notifications: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /notifications, Method: PUT}}
         Findings: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /findings, Method: GET}}
+        Inventory: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /inventory, Method: GET}}
         FeedbackGet: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /feedback, Method: GET}}
         FeedbackPut: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /feedback, Method: PUT}}
   WorkerFunction:

@@ -3,9 +3,11 @@
 Pure rendering helpers only: no AWS calls and no state changes. ``app.notify``
 keeps ownership of deduplication, cooldown and SES delivery.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape as _escape
 import re
+
+VN_TIMEZONE = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
 
 SERVICE_NAMES = {
     "EC2": "Amazon EC2",
@@ -310,7 +312,7 @@ def build_email(profile, result, web_url=""):
     total_findings = result.get("finding_count", len(findings))
     completed = result.get("completed_at")
     try:
-        completed_text = datetime.fromtimestamp(completed, timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+        completed_text = datetime.fromtimestamp(completed, VN_TIMEZONE).strftime("%d/%m/%Y %H:%M Asia/Ho_Chi_Minh")
     except (TypeError, ValueError, OSError, OverflowError):
         completed_text = "Chưa có thời gian"
     status = result.get("status") or ""
@@ -325,13 +327,17 @@ def build_email(profile, result, web_url=""):
     observing_resources = len(_unique("OBSERVING", findings))
     stats = _service_stats(review)
     top = _top_resources(review)
+    remaining_alerts = max(
+        0,
+        len(review) - sum(len(row["findings"]) + row["more"] for row in top),
+    )
     warning = ""
     if status == "PARTIAL":
         warning = "Lượt quét chưa đầy đủ. Các số liệu chỉ phản ánh phần đã quét thành công; không kết luận tài khoản AWS an toàn."
     elif status in ("FAILED", "TIMED_OUT"):
         warning = "Lượt quét không thành công. Không kết luận tài khoản AWS an toàn dựa trên email này."
     link = web_url if web_url.startswith(("https://", "http://")) else ""
-    subject = "Cloud Resource Guardian: " + str(review_resources) + " tài nguyên cần kiểm tra"
+    subject = "[Cloud Resource Guardian] " + str(review_resources) + " tài nguyên cần kiểm tra"
 
     text_lines = [
         "CLOUD RESOURCE GUARDIAN — BÁO CÁO TÀI NGUYÊN AWS",
@@ -379,6 +385,8 @@ def build_email(profile, result, web_url=""):
                 text_lines.append("   Và " + str(row["more"]) + " cảnh báo khác trên cùng tài nguyên.")
     else:
         text_lines.append("Không có tài nguyên cần kiểm tra.")
+    if remaining_alerts:
+        text_lines.append("Còn " + str(remaining_alerts) + " cảnh báo khác. Xem trên Dashboard.")
     text_lines.append("")
     if link:
         text_lines += ["Xem chi tiết trên Dashboard: " + link, ""]
@@ -449,6 +457,12 @@ def build_email(profile, result, web_url=""):
         )
     if not resources_html:
         resources_html = '<p style="margin:0;font-size:13px;color:#5b6b77;">Không có tài nguyên cần kiểm tra.</p>'
+    remaining_html = ""
+    if remaining_alerts:
+        remaining_html = (
+            '<p style="margin:10px 0 0;font-size:13px;font-weight:bold;color:#3d4f5c;">Còn '
+            + str(remaining_alerts) + " cảnh báo khác. Xem trên Dashboard.</p>"
+        )
     button_html = ""
     if link:
         button_html = (
@@ -485,6 +499,7 @@ def build_email(profile, result, web_url=""):
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
         '<td style="font-size:13px;line-height:1.6;color:#3d4f5c;">'
         "<div><strong>Thời gian quét:</strong> " + esc(completed_text) + "</div>"
+        "<div><strong>AWS account:</strong> " + esc(account) + "</div>"
         "<div><strong>Region:</strong> " + esc(region) + "</div>"
         '<div><strong>Trạng thái:</strong> <span style="display:inline-block;padding:2px 8px;border-radius:999px;'
         'background:' + badge_bg + ";color:" + badge_fg + ';font-size:12px;font-weight:bold;">' + esc(status_label) + "</span></div>"
@@ -515,7 +530,7 @@ def build_email(profile, result, web_url=""):
         '<tr><td style="padding:22px 24px 0;">'
         '<h2 style="margin:0 0 10px;font-size:15px;color:#16232e;">Tài nguyên đáng chú ý</h2>'
         '<p style="margin:0 0 10px;font-size:12px;color:#5b6b77;">Tối đa 5 tài nguyên đầu tiên theo kết quả quét; không xếp hạng mức độ nghiêm trọng.</p>'
-        + resources_html + "</td></tr>"
+        + resources_html + remaining_html + "</td></tr>"
         '<tr><td style="padding:8px 24px 0;">' + button_html + "</td></tr>"
         '<tr><td style="padding:22px 24px 24px;border-top:1px solid #eef2f4;">'
         '<div style="font-size:12px;line-height:1.6;color:#5b6b77;">'

@@ -1,6 +1,8 @@
 # KỊCH BẢN & CHECKLIST QUAY VIDEO DEMO BẢO VỆ (10 PHÚT)
 ## CLOUD RESOURCE GUARDIAN — 10-MINUTE DEMO REHEARSAL CHECKLIST
 
+> **Không dùng trực tiếp trước khi đóng các BLOCKER trong [báo cáo nghiệm thu hiện tại](FINAL_ACCEPTANCE_AUDIT.md).** Working tree chưa được publish; kiểm thử AWS E2E và giao thư SES chưa được chạy trong đợt audit này. Không đọc lời thoại tuyên bố quét đủ 38 loại hoặc 39 rule.
+
 ---
 
 ## 1. Checklist Chuẩn bị Trước khi Bấm Quay (Pre-Recording Checklist)

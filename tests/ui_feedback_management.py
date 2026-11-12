@@ -220,10 +220,21 @@ def main():
                              second_page=None, hold_get=False, hold_put=False, unauthorized=False)
                 page.goto(base + '/#findings')
                 page.reload()
+                page.locator('#feedback-tab').click()
                 expect(page.locator('#feedback-list .feedback-record')).to_have_count(20)
 
             page.goto(base + '/#findings')
+            page.locator('#results-tab').focus()
+            page.keyboard.press('ArrowRight')
+            expect(page.locator('#feedback-tab')).to_be_focused()
+            expect(page.locator('#feedback-tab')).to_have_attribute('aria-selected', 'true')
+            page.keyboard.press('Home')
+            expect(page.locator('#results-tab')).to_be_focused()
+            expect(page.locator('#results-tab')).to_have_attribute('aria-selected', 'true')
+            page.keyboard.press('End')
+            expect(page.locator('#feedback-tab')).to_be_focused()
             expect(page.locator('#feedback-list .feedback-record')).to_have_count(20)
+            checks.append('Result and feedback tabs support Arrow, Home and End keyboard navigation')
             legacy = original_records[2]
             expect(group(legacy)).to_contain_text(legacy['finding_id'])
             expect(group(legacy)).to_contain_text(REGION)
@@ -272,12 +283,12 @@ def main():
             state['hold_get'] = True
             with page.expect_request('**/api/feedback?**'):
                 page.keyboard.press('Enter')
-            page.locator('#search').focus()
+            page.locator('#feedback-tab').focus()
             pending, snapshot = state['held_get']
             state['held_get'] = None
             pending.fulfill(json=snapshot)
             expect(page.locator('#refresh-feedback')).to_be_enabled()
-            expect(page.locator('#search')).to_be_focused()
+            expect(page.locator('#feedback-tab')).to_be_focused()
             checks.append('Keyboard pagination and reload retain focus when controls disable or disappear, preserve enabled controls and never pull focus back from elsewhere')
 
             reset()
@@ -455,6 +466,7 @@ def main():
             page.evaluate('refresh()')
             page.locator('#refresh-feedback').click()
             expect(group(item)).to_have_count(1)
+            page.locator('#results-tab').click()
             expect(current(original_candidates[0])).to_have_count(1)
             before_errors = len(errors)
             current_row = current(original_candidates[0])
@@ -464,6 +476,7 @@ def main():
             page.locator('#ignore-days').fill('30')
             page.locator('#ignore-cancel').click()
             expect(page.locator('#ignore-dialog')).not_to_be_visible()
+            page.locator('#feedback-tab').click()
             assert not puts() or puts()[-1].get('finding_id') != item['finding_id'] or 'ignoreUntil' not in puts()[-1]
             expect(group(item).locator('.feedback-manage-days')).to_have_value('7')
             assert len(errors) == before_errors, errors[before_errors:]

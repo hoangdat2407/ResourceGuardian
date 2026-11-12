@@ -215,8 +215,8 @@ def main():
                 expect(value('account_id')).to_have_text('111111111111')
                 expect(value('rule_id')).to_have_text(item['rule_id'])
                 expect(value('recommendation')).to_have_text(item['recommendation'])
-                expect(value('first_seen_at')).to_contain_text('2026-10-28')
-                expect(value('last_seen_at')).to_contain_text('2026-10-30')
+                expect(value('first_seen_at')).to_contain_text('28/10/2026')
+                expect(value('last_seen_at')).to_contain_text('30/10/2026')
                 for key in FIELDS[item['type']]:
                     expect(value(key)).to_have_count(1)
                     assert 'Chưa có dữ liệu' not in value(key).inner_text(), (item['type'], key)
@@ -245,6 +245,13 @@ def main():
             for width in [1440, 390]:
                 page.set_viewport_size({'width': width, 'height': 900})
                 open_current(original[0])
+                box = dialog.bounding_box()
+                assert dialog.evaluate('(el)=>el.scrollTop') == 0
+                assert box is not None
+                if width == 390:
+                    assert abs(box['x']) < 1 and abs(box['width'] - width) < 1, box
+                else:
+                    assert abs(box['x'] + box['width'] - width) < 1 and box['width'] < 700, box
                 page.screenshot(path=str(OUT / f'ec2-current-{width}.png'))
                 value('coverage').scroll_into_view_if_needed()
                 page.screenshot(path=str(OUT / f'ec2-metrics-{width}.png'))
@@ -304,7 +311,7 @@ def main():
             assert 'Invalid Date' not in content.inner_text()
             assert PROFILE['account_id'] not in content.inner_text()
             close()
-            # Evidence-level legacy context is accepted; offset timestamps display UTC.
+            # Evidence-level legacy context is accepted; offset timestamps display in Asia/Ho_Chi_Minh.
             legacy.update(evidence={'account_id': '333333333333', 'evaluated_at': '2026-10-30T19:00:00+07:00',
                                     'cpu_p95': 0, 'network_mib_hour': 0, 'coverage': 0,
                                     'thresholds': {'cpu_percent': 0, 'network_mib_hour': 0},
@@ -316,7 +323,7 @@ def main():
             open_current(legacy)
             expect(value('account_id')).to_have_text('333333333333')
             expect(value('coverage')).to_contain_text('0%')
-            expect(value('first_seen_at')).to_contain_text('12:00')
+            expect(value('first_seen_at')).to_contain_text('19:00')
             expect(value('last_seen_at')).to_contain_text('Chưa có dữ liệu')
             expect(value('thresholds.cpu_percent')).to_contain_text('0')
             expect(value('missing_metrics')).to_contain_text('cpu')
@@ -387,9 +394,7 @@ def main():
             page.evaluate('historyRows=[]; scanRowsCache.clear(); refresh()')
             expect(page.locator('#findings-list tbody tr')).to_have_count(0)
             close()
-            assert page.evaluate('''()=>document.activeElement.matches('button,input,select,a') &&
-                                        document.activeElement.getClientRects().length > 0 &&
-                                        !document.activeElement.closest('#finding-dialog')'''), 'Disappeared opener needs a visible focus fallback'
+            expect(page.locator('#search')).to_be_focused()
             state['rows'] = [row([long_item])]
             state['history'] = [row([long_item])]
             page.evaluate('refresh()')
