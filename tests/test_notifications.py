@@ -44,7 +44,7 @@ class Notifications(unittest.TestCase):
             "note": "Only selected regions; at most 50 displayed findings.",
             "findings": [
                 {"type": "EBS", "resource_id": "vol-demo", "level": "REVIEW", "rule_id": "EBS_UNATTACHED",
-                 "reason": "Unattached volume; validate retention", "evidence": {"size_gib": 20, "observed_hours": 48}},
+                 "reason": "Unattached volume; validate data retention", "evidence": {"size_gib": 20, "observed_hours": 48}},
                 {"type": "EBS", "resource_id": "vol-wait", "level": "OBSERVING", "reason": "Wait for observation"},
             ],
         }
@@ -126,13 +126,22 @@ class Notifications(unittest.TestCase):
         self.assertEqual(request["Destination"], {"ToAddresses": ["verified@example.com"]})
         text = request["Message"]["Body"]["Text"]["Data"]
         html = request["Message"]["Body"]["Html"]["Data"]
-        for expected in ("123456789012", "ap-southeast-1", "scan-1", "Chưa đầy đủ", "vol-demo",
-                         "48 giờ", "AccessDenied", "Amazon EC2", "https://guardian.example/",
-                         "Xem chi tiết trên Dashboard", "không tự dừng hoặc xóa"):
+        for expected in (
+            "Chưa đầy đủ",
+            "vol-demo",
+            "vol-wait",
+            "Amazon EBS",
+            "Volume chưa gắn với EC2",
+            "https://guardian.example/",
+            "Xem chi tiết trên Dashboard",
+            "không tự dừng hoặc xóa",
+            "Cần kiểm tra",
+            "Đang quan sát",
+        ):
             self.assertIn(expected, text)
-        self.assertNotIn("vol-wait", text)
-        self.assertNotIn("size_gib", text)
-        self.assertNotIn("size_gib", html)
+        for forbidden in ("123456789012", "scan-1", "48 giờ", "AccessDenied", "size_gib", "rule_id"):
+            self.assertNotIn(forbidden, text)
+            self.assertNotIn(forbidden, html)
         self.assertIn("<!doctype html>", html)
         self.assertIn("Xem chi tiết trên Dashboard", html)
         self.assertIn("Lượt quét chưa đầy đủ", html)
@@ -140,7 +149,10 @@ class Notifications(unittest.TestCase):
         self.assertNotIn("EXTERNAL-ID-SECRET", text + html)
         self.assertEqual(request["Message"]["Body"]["Text"]["Charset"], "UTF-8")
         self.assertEqual(request["Message"]["Body"]["Html"]["Charset"], "UTF-8")
-        self.assertIn("tài nguyên cần kiểm tra", request["Message"]["Subject"]["Data"])
+        self.assertEqual(
+            request["Message"]["Subject"]["Data"],
+            "[Cloud Resource Guardian] 1 tài nguyên cần kiểm tra",
+        )
         self.assertEqual(request["Message"]["Subject"]["Charset"], "UTF-8")
         self.assertEqual(self.client.call_args.kwargs["config"].retries["total_max_attempts"], 1)
 
@@ -151,6 +163,14 @@ class Notifications(unittest.TestCase):
         result["findings"][1]["evidence"]["observed_hours"] = 100
         self.now += 7 * 3600
         self.assertEqual(app.notify(self.profile, result), "UNCHANGED")
+        self.ses.send_email.assert_called_once()
+
+    def test_observing_only_change_does_not_resend(self):
+        self.assertEqual(app.notify(self.profile, self.result), "SENT")
+        changed = copy.deepcopy(self.result)
+        changed["findings"][1]["resource_id"] = "vol-wait-new"
+        self.now += 7 * 3600
+        self.assertEqual(app.notify(self.profile, changed), "UNCHANGED")
         self.ses.send_email.assert_called_once()
 
     def test_changed_set_waits_for_scan_interval_boundary(self):

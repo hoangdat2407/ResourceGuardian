@@ -31,153 +31,196 @@ def result(status="SUCCEEDED", findings=None, **extra):
 
 
 class EmailReport(unittest.TestCase):
-    def test_subject_uses_bracketed_product_name_and_unique_review_count(self):
-        content = build_email(PROFILE, result(findings=[
-            finding(resource_id="vol-same"),
-            finding(resource_id="vol-same", rule="EBS_SECOND_RULE"),
-        ]))
-        self.assertEqual(content["subject"], "[Cloud Resource Guardian] 1 tài nguyên cần kiểm tra")
+    def test_subject_uses_actual_unique_review_resources(self):
+        findings = [finding(resource_id="vol-%d" % index) for index in range(7)]
+        findings.append(finding(resource_id="vol-0", rule="EBS_SECOND_RULE"))
+        content = build_email(PROFILE, result(findings=findings))
+        self.assertEqual(
+            content["subject"],
+            "[Cloud Resource Guardian] 7 tài nguyên cần kiểm tra",
+        )
 
-    def test_zero_findings_has_clear_empty_state_and_no_button(self):
-        content = build_email(PROFILE, result(findings=[], finding_count=0), web_url="")
-        self.assertIn("Không có cảnh báo REVIEW", content["text"])
-        self.assertIn("Không có cảnh báo REVIEW", content["html"])
-        self.assertNotIn("Xem chi tiết trên Dashboard", content["html"])
-        self.assertIn("0 tài nguyên", content["subject"])
-        self.assertIn("Tổng findings của lượt quét: 0", content["text"])
+    def test_three_kpis_cover_all_finding_statuses(self):
+        findings = [
+            finding(resource_id="vol-review"),
+            finding(kind="LAMBDA_FUNCTION", resource_id="fn-observing", level="OBSERVING",
+                    reason="Resource younger than observation window"),
+            finding(kind="CLOUDFRONT_DISTRIBUTION", resource_id="dist-missing",
+                    level="INSUFFICIENT_DATA",
+                    reason="Missing CloudWatch metrics for CloudFront; not classified as idle"),
+        ]
+        content = build_email(PROFILE, result(findings=findings))
+        for expected in (
+            "Cần kiểm tra: 1",
+            "Đang quan sát: 1",
+            "Thiếu dữ liệu: 1",
+            "vol-review",
+            "fn-observing",
+            "dist-missing",
+        ):
+            self.assertIn(expected, content["text"])
+        self.assertNotIn("Tổng findings", content["text"] + content["html"])
+        self.assertNotIn("Dịch vụ quét lỗi", content["text"] + content["html"])
 
-    def test_single_finding_includes_service_reason_evidence_and_threshold(self):
-        item = finding(evidence={"observed_hours": 49.5, "thresholds": {"orphan_hours": 24}})
-        content = build_email(PROFILE, result(findings=[item]), web_url="https://guardian.example/")
-        self.assertIn("Amazon EBS", content["text"])
-        self.assertIn("vol-demo", content["text"])
-        self.assertIn("Volume chưa gắn với EC2", content["text"])
-        self.assertIn("Thời gian theo dõi 49,5 giờ", content["text"])
-        self.assertIn("ngưỡng theo dõi 24 giờ", content["text"])
-        self.assertIn("1 tài nguyên", content["subject"])
-        self.assertEqual(content["html"].count("Xem chi tiết trên Dashboard"), 1)
-
-    def test_top_resources_are_limited_to_five_but_service_stats_keep_everything(self):
-        findings = [finding(resource_id="vol-%d" % index, evidence={"observed_hours": 30})
-                    for index in range(7)]
-        content = build_email(PROFILE, result(findings=findings), web_url="https://guardian.example/")
+    def test_top_resources_are_limited_to_five(self):
+        findings = [finding(resource_id="vol-%d" % index) for index in range(7)]
+        content = build_email(
+            PROFILE,
+            result(findings=findings),
+            web_url="https://guardian.example/",
+        )
         for index in range(5):
             self.assertIn("vol-%d" % index, content["text"])
         for index in range(5, 7):
             self.assertNotIn("vol-%d" % index, content["text"])
-        self.assertIn("7 cảnh báo / 7 tài nguyên", content["text"])
-        self.assertIn("7 tài nguyên cần kiểm tra", content["subject"])
-        self.assertIn("Còn 2 cảnh báo khác. Xem trên Dashboard.", content["text"])
-        self.assertIn("Còn 2 cảnh báo khác. Xem trên Dashboard.", content["html"])
+        self.assertIn("Còn 2 tài nguyên khác trên Dashboard.", content["text"])
+        self.assertIn("Còn 2 tài nguyên khác trên Dashboard.", content["html"])
 
-    def test_multiple_findings_on_one_resource_count_as_one_resource(self):
+    def test_multiple_findings_on_one_resource_are_counted_once(self):
         findings = [
-            finding(resource_id="vol-same", rule="EBS_UNATTACHED", evidence={"observed_hours": 30}),
-            finding(resource_id="vol-same", rule="EBS_NO_SNAPSHOT",
-                    reason="Old snapshot not referenced by listed AMIs; backup purpose requires review",
-                    evidence={"age_days": 60}),
+            finding(resource_id="vol-same", rule="EBS_UNATTACHED"),
+            finding(resource_id="vol-same", rule="EBS_SECOND_RULE",
+                    reason="Old snapshot not referenced by listed AMIs; backup purpose requires review"),
         ]
-        content = build_email(PROFILE, result(findings=findings),
-                              web_url="https://guardian.example/")
-        self.assertIn("1 tài nguyên", content["subject"])
-        self.assertIn("Tài nguyên cần kiểm tra (REVIEW): 1", content["text"])
-        self.assertIn("Tổng findings của lượt quét: 3", content["text"])  # backend finding_count
-        self.assertIn("2 cảnh báo / 1 tài nguyên", content["text"])
+        content = build_email(PROFILE, result(findings=findings))
+        self.assertIn("1 tài nguyên cần kiểm tra", content["subject"])
+        self.assertIn("Cần kiểm tra: 1", content["text"])
         self.assertEqual(content["html"].count("vol-same"), 1)
 
-    def test_partial_scan_warns_and_lists_unscanned_services_with_distinct_hints(self):
-        errors = [{"type": "EC2", "code": "AccessDenied"},
-                  {"type": "RDS", "code": "SubscriptionRequiredException"}]
-        content = build_email(PROFILE, result(status="PARTIAL", findings=[finding()], errors=errors),
-                              web_url="https://guardian.example/")
+    def test_resource_rows_are_simple_and_omit_technical_details(self):
+        content = build_email(PROFILE, result(findings=[{
+            **finding(evidence={"observed_hours": 49.5, "thresholds": {"orphan_hours": 24}}),
+            "finding_id": "finding-secret",
+            "stack_trace": "Traceback: secret",
+        }]))
+        combined = content["text"] + content["html"]
+        self.assertIn("Amazon EBS", combined)
+        self.assertIn("Volume chưa gắn với EC2", combined)
+        for forbidden in (
+            "EBS_UNATTACHED",
+            "finding-secret",
+            "observed_hours",
+            "49.5",
+            "49,5",
+            "orphan_hours",
+            "Traceback",
+            "evidence",
+        ):
+            self.assertNotIn(forbidden, combined)
+
+    def test_long_arn_is_shortened(self):
+        long_id = "arn:aws:ec2:ap-southeast-1:123456789012:volume/" + "x" * 100
+        content = build_email(
+            PROFILE,
+            result(findings=[finding(resource_id=long_id)]),
+        )
+        combined = content["text"] + content["html"]
+        self.assertNotIn(long_id, combined)
+        self.assertNotIn("arn:aws:", combined)
+        self.assertIn("…", combined)
+
+    def test_partial_scan_is_explicit_without_raw_error_codes(self):
+        content = build_email(
+            PROFILE,
+            result(
+                status="PARTIAL",
+                findings=[finding()],
+                errors=[{"type": "EC2", "code": "AccessDenied", "stack_trace": "secret"}],
+            ),
+            web_url="https://guardian.example/",
+        )
+        combined = content["text"] + content["html"]
         self.assertIn("Lượt quét chưa đầy đủ", content["text"])
-        self.assertIn("thiếu quyền IAM", content["text"])
-        self.assertIn("chưa kích hoạt subscription", content["text"])
-        self.assertIn("AccessDenied", content["text"])
         self.assertIn("Lượt quét chưa đầy đủ", content["html"])
-        self.assertIn("Dịch vụ chưa quét được", content["html"])
-        self.assertIn("Dịch vụ gặp lỗi khi quét: 2", content["text"])
+        self.assertNotIn("quét thành công toàn bộ", combined.lower())
+        self.assertNotIn("AccessDenied", combined)
+        self.assertNotIn("stack_trace", combined)
 
     def test_failed_scan_never_claims_the_account_is_safe(self):
-        content = build_email(PROFILE, result(status="FAILED", findings=[]), web_url="")
-        self.assertIn("Lượt quét không thành công", content["text"])
-        self.assertIn("Không kết luận", content["text"])
-        self.assertIn("Không kết luận", content["html"])
-        self.assertNotIn("tài khoản của bạn an toàn", content["text"].lower())
-        self.assertNotIn("không có vấn đề", content["text"].lower())
-        self.assertNotIn("tài khoản của bạn an toàn", content["html"].lower())
+        content = build_email(PROFILE, result(status="FAILED", findings=[]))
+        combined = content["text"] + content["html"]
+        self.assertIn("Lượt quét không thành công", combined)
+        self.assertEqual(
+            content["subject"],
+            "[Cloud Resource Guardian] Lượt quét không thành công",
+        )
+        self.assertNotIn("tài khoản aws an toàn", combined.lower())
 
-    def test_long_resource_id_is_kept_and_wraps(self):
-        long_id = "arn:aws:ec2:ap-southeast-1:123456789012:volume/" + "x" * 600
-        content = build_email(PROFILE, result(findings=[finding(resource_id=long_id)]),
-                              web_url="https://guardian.example/")
-        self.assertIn(long_id, content["text"])
-        self.assertIn(long_id, content["html"])
-        self.assertIn("word-break:break-all", content["html"])
+    def test_zero_findings_uses_concise_template_without_zero_kpis(self):
+        content = build_email(
+            PROFILE,
+            result(findings=[], finding_count=0),
+            web_url="https://guardian.example/",
+        )
+        self.assertEqual(
+            content["subject"],
+            "[Cloud Resource Guardian] 0 tài nguyên cần kiểm tra",
+        )
+        self.assertIn("Không có tài nguyên cần kiểm tra", content["text"])
+        self.assertNotIn("TỔNG QUAN", content["text"])
+        self.assertNotIn("Tài nguyên nổi bật", content["html"])
+        self.assertNotIn(">0</div>", content["html"])
+        self.assertEqual(content["html"].count("Xem chi tiết trên Dashboard"), 1)
 
-    def test_missing_or_null_evidence_is_handled(self):
-        findings = [
-            finding(resource_id="vol-no-evidence", evidence=None),
-            finding(resource_id="vol-empty-evidence", evidence={}),
-            finding(resource_id="vol-none-value", evidence={"size_gib": None}),
-        ]
-        content = build_email(PROFILE, result(findings=findings), web_url="")
-        self.assertNotIn("None", content["text"] + content["html"])
-        self.assertNotIn('"evidence"', content["text"] + content["html"])
-        self.assertNotIn("Bằng chứng:", content["text"])
-
-    def test_dangerous_values_are_escaped_in_html(self):
+    def test_dashboard_link_is_escaped_and_drops_query_and_fragment(self):
         malicious = finding(
             resource_id='"><script>window.x=1</script>',
             reason='<img src=x onerror="window.y=2">',
-            evidence={"observed_hours": 10},
         )
-        errors = [{"type": "<svg onload=alert(1)>", "code": "AccessDenied"}]
         content = build_email(
-            {**PROFILE, "account_id": "<b>123</b>"},
-            result(status="PARTIAL", findings=[malicious], errors=errors,
-                   scan_id='<script>scan</script>'),
-            web_url="javascript:alert(1)",
+            PROFILE,
+            result(findings=[malicious]),
+            web_url="https://guardian.example/resources?access_token=secret#fragment",
         )
         html = content["html"]
-        self.assertNotIn("<script", html.lower())
-        self.assertNotIn("<img", html.lower())
-        self.assertNotIn("<svg", html.lower())
-        self.assertNotIn("onerror=", html.lower())
-        self.assertNotIn("javascript:", html.lower())
+        self.assertIn('href="https://guardian.example/resources"', html)
+        for forbidden in ("access_token", "secret", "<script", "<img", "onerror=", "javascript:"):
+            self.assertNotIn(forbidden, html.lower())
         self.assertIn("&lt;script&gt;window.x=1", html)
-        self.assertIn("&lt;b&gt;123&lt;/b&gt;", html)
-        self.assertNotIn("onerror=", html.lower())
-        self.assertNotIn("Xem chi tiết trên Dashboard", html)
         self.assertNotIn("FIXTURE-EXTERNAL-ID", content["text"] + html)
 
-    def test_html_and_text_are_complete_documents(self):
-        content = build_email(PROFILE, result(findings=[finding()], errors=[]),
-                              web_url="https://guardian.example/")
+    def test_unsafe_dashboard_links_are_omitted(self):
+        for web_url in ("javascript:alert(1)", "http://guardian.example/"):
+            with self.subTest(web_url=web_url):
+                content = build_email(
+                    PROFILE,
+                    result(findings=[finding()]),
+                    web_url=web_url,
+                )
+                self.assertNotIn(
+                    "Xem chi tiết trên Dashboard",
+                    content["text"] + content["html"],
+                )
+
+    def test_html_and_plain_text_are_equivalent_complete_documents(self):
+        content = build_email(
+            PROFILE,
+            result(findings=[finding()], errors=[]),
+            web_url="https://guardian.example/",
+        )
         html, text = content["html"], content["text"]
         self.assertTrue(html.startswith("<!doctype html>"))
         self.assertTrue(html.rstrip().endswith("</html>"))
         self.assertIn('lang="vi"', html)
         self.assertIn("max-width:600px", html)
         self.assertIn("viewport", html)
+        self.assertNotIn("<style", html.lower())
         self.assertNotIn("<form", html.lower())
         self.assertNotIn("<script", html.lower())
         self.assertNotIn("<img", html.lower())
-        self.assertIn("CLOUD RESOURCE GUARDIAN", text)
-        self.assertIn("Account ID: 123456789012", text)
-        self.assertIn("Scan ID: scan-fixture", text)
-        self.assertIn("không tự dừng hoặc xóa", text)
-        self.assertIn("không tự dừng hoặc xóa", html)
-        self.assertIn("Asia/Ho_Chi_Minh", text)
-        self.assertIn("Asia/Ho_Chi_Minh", html)
-        self.assertIn("<strong>AWS account:</strong> 123456789012", html)
-
-    def test_values_are_utf8_safe(self):
-        content = build_email(PROFILE, result(findings=[finding()]), web_url="")
-        content["html"].encode("utf-8")
-        content["text"].encode("utf-8")
-        self.assertIn("Báo cáo tài nguyên AWS", content["html"])
-
+        for expected in (
+            "Cloud Resource Guardian",
+            "Kết quả quét tài nguyên AWS",
+            "Hoàn tất",
+            "Amazon EBS",
+            "vol-demo",
+            "Xem chi tiết trên Dashboard",
+            "không tự dừng hoặc xóa",
+        ):
+            self.assertIn(expected, html)
+            self.assertIn(expected, text)
+        html.encode("utf-8")
+        text.encode("utf-8")
 
 if __name__ == "__main__":
     unittest.main()
